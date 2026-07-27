@@ -7024,6 +7024,7 @@ Guidelines:
         ledger_inserts = []     # (day, category, amount, note)
         reset_updates = []      # (new_daily_usage_rate, subscription_id)
         promo_updates = []      # (promotion, effective_price, effective_c_max, first_billing_done, subscription_id)
+        price_updates = []      # (listed_price, subscription_id) for individual price decreases
 
         # Payment suspension: enterprise customers with active churn_prevention
         # threads don't pay (satisfaction was < 0 at renewal time).
@@ -7052,6 +7053,19 @@ Guidelines:
             customer_id = sub['customer_id']
             group_id = sub['group_id'] or 'S1'
 
+            # Individual renewal decisions evaluate plans at the current config
+            # price. Preserve a lower grandfathered price, but never bill above
+            # the price used to evaluate the selected plan.
+            evaluated_list_price = config.get(f'price_{current_plan}')
+            if (
+                sub['customer_type'] == 'small'
+                and not sub['pending_plan']
+                and evaluated_list_price is not None
+            ):
+                billing_price = min(billing_price, evaluated_list_price)
+                if billing_price < sub['listed_price']:
+                    price_updates.append((billing_price, sub['subscription_id']))
+
             # Snapshot drifted c_max at billing time for satisfaction calculations
             billing_c_max = sub['current_c_max'] or sub['c_max']
             # Apply group + global drift offset to c_max
@@ -7070,13 +7084,22 @@ Guidelines:
                 # targeting. Recomputing here would lose channel-specific lead
                 # promos because billing only has the customer row.
                 total_promo = sub['promotion'] or 0.0
-                effective_price = sub['effective_price']
-                if effective_price is None:
-                    effective_price = max(0.0, billing_price - total_promo)
+                effective_price = max(0.0, billing_price - total_promo)
             else:
                 total_promo = existing_promo
                 # Apply promotion to effective price (floored at 0)
                 effective_price = max(0.0, billing_price - total_promo)
+
+            # A lead's first-period discount is snapshotted at signup, while
+            # renewal evaluation uses the current ongoing promotion. If that
+            # promotion became more favorable before first billing, honor the
+            # lower evaluated amount as the ceiling.
+            if sub['customer_type'] == 'small' and evaluated_list_price is not None:
+                evaluated_effective_price = max(
+                    0.0, evaluated_list_price - existing_promo
+                )
+                effective_price = min(effective_price, evaluated_effective_price)
+
             total_payment = effective_price * seat_count
             payments += total_payment
             ledger_inserts.append((
@@ -7123,6 +7146,13 @@ Guidelines:
                 SET daily_usage_rate = ?, billing_period_usage = 0
                 WHERE subscription_id = ?
             """, reset_updates)
+
+        if price_updates:
+            self.conn.executemany("""
+                UPDATE subscriptions
+                SET listed_price = ?
+                WHERE subscription_id = ?
+            """, price_updates)
 
         if promo_updates:
             self.conn.executemany("""
