@@ -506,7 +506,7 @@ def test_same_plan_renewal_billing_uses_decreased_evaluated_price(
     assert sub["effective_price"] == pytest.approx(8.0)
 
 
-def test_same_plan_renewal_billing_uses_increased_evaluated_price(
+def test_same_plan_renewal_billing_preserves_stored_price_when_evaluated_is_higher(
     make_initialized_sim, monkeypatch,
 ):
     conn, sim, _config = make_initialized_sim(seed=123)
@@ -531,7 +531,7 @@ def test_same_plan_renewal_billing_uses_increased_evaluated_price(
     sim._process_billing_decisions(plan_config, overload=0.0, outage=False)
     payments = sim._process_billing(plan_config)
 
-    assert payments == pytest.approx(100.0)
+    assert payments == pytest.approx(10.0)
     sub = conn.execute(
         """
         SELECT listed_price, effective_price
@@ -540,5 +540,5 @@ def test_same_plan_renewal_billing_uses_increased_evaluated_price(
         """,
         (customer_id,),
     ).fetchone()
-    assert sub["listed_price"] == pytest.approx(100.0)
-    assert sub["effective_price"] == pytest.approx(100.0)
+    assert sub["listed_price"] == pytest.approx(10.0)
+    assert sub["effective_price"] == pytest.approx(10.0)

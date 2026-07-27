@@ -7107,17 +7107,16 @@ Guidelines:
             group_id = sub['group_id'] or 'S1'
             first_billing_done = sub['first_billing_done'] or 0
 
-            # Individual renewal decisions evaluate plans at the current config
-            # price. Use that exact price for billing after either a decrease
-            # or an increase so evaluated and billed prices stay identical.
+            # If the evaluated list price decreased, bill and persist the lower
+            # price. Otherwise preserve the subscription's stored price.
             evaluated_list_price = config.get(f'price_{current_plan}')
             if (
                 sub['customer_type'] == 'small'
                 and not sub['pending_plan']
                 and evaluated_list_price is not None
             ):
-                billing_price = evaluated_list_price
-                if billing_price != sub['listed_price']:
+                billing_price = min(billing_price, evaluated_list_price)
+                if billing_price < sub['listed_price']:
                     price_updates.append((billing_price, sub['subscription_id']))
 
             # Snapshot drifted c_max at billing time for satisfaction calculations
