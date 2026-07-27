@@ -300,3 +300,51 @@ def test_new_customer_plan_choice_uses_daily_quota_factor(make_initialized_sim):
     sim._cache_step_day_globals(plan_config)
 
     assert sim._choose_plan_for_customer_curve(params, plan_config) == "C"
+
+
+def test_first_billing_uses_stored_channel_lead_promotion(make_initialized_sim):
+    config = BenchmarkConfig(
+        seed=123,
+        lead_promotion_by_channel_group={"content_marketing": {"S1": 90.0}},
+    )
+    conn, sim, _config = make_initialized_sim(config=config, seed=123)
+
+    customer_id = sim._create_customer(
+        {
+            **sim._generate_customer_from_group("S1"),
+            "acquisition_source": "content_marketing",
+        }
+    )
+    conn.execute(
+        """
+        INSERT INTO subscriptions (
+            customer_id, plan, listed_price, promotion, effective_price,
+            effective_c_max, seat_count, start_day, status, billing_day_mod30,
+            daily_usage_rate, billing_period_usage, first_billing_done
+        ) VALUES (?, 'A', 100.0, 90.0, 10.0, 100.0, 1, ?, 'subscribed', ?, 10.0, 0, 0)
+        """,
+        (customer_id, sim.current_day, sim.current_day % 30),
+    )
+    conn.commit()
+
+    payments = sim._process_billing({"price_A": 100.0, "tier_A": 4})
+
+    assert payments == pytest.approx(10.0)
+    assert conn.execute(
+        """
+        SELECT amount FROM ledger
+        WHERE category = 'subscription_payment' AND note = ?
+        """,
+        (f"Subscription payment from customer {customer_id}",),
+    ).fetchone()["amount"] == pytest.approx(10.0)
+    sub = conn.execute(
+        """
+        SELECT promotion, effective_price, first_billing_done
+        FROM subscriptions
+        WHERE customer_id = ?
+        """,
+        (customer_id,),
+    ).fetchone()
+    assert sub["promotion"] == pytest.approx(0.0)
+    assert sub["effective_price"] == pytest.approx(100.0)
+    assert sub["first_billing_done"] == 1
