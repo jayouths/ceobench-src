@@ -7006,6 +7006,7 @@ Guidelines:
 
         subscribers = self.conn.execute("""
             SELECT s.subscription_id, s.customer_id, s.listed_price,
+                   s.promotion, s.effective_price,
                    s.plan, s.pending_plan, s.pending_price, s.start_day,
                    c.customer_type, c.usage_scale, c.seat_count, c.group_id,
                    c.c_max,
@@ -7064,13 +7065,18 @@ Guidelines:
             # Lead promotion only applies if first billing hasn't been done yet
             first_billing_done = sub['first_billing_done'] or 0
             if not first_billing_done:
-                lead_promo = self._get_lead_promotion(group_id)
-                total_promo = existing_promo + lead_promo
+                # The subscription row snapshots the exact first-period
+                # promotion used at signup, including acquisition-channel
+                # targeting. Recomputing here would lose channel-specific lead
+                # promos because billing only has the customer row.
+                total_promo = sub['promotion'] or 0.0
+                effective_price = sub['effective_price']
+                if effective_price is None:
+                    effective_price = max(0.0, billing_price - total_promo)
             else:
                 total_promo = existing_promo
-
-            # Apply promotion to effective price (floored at 0)
-            effective_price = max(0.0, billing_price - total_promo)
+                # Apply promotion to effective price (floored at 0)
+                effective_price = max(0.0, billing_price - total_promo)
             total_payment = effective_price * seat_count
             payments += total_payment
             ledger_inserts.append((
