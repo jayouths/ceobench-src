@@ -1495,7 +1495,27 @@ class Simulator:
         """, (customer_id,)).fetchone()
         return result is not None
 
-    def _create_subscription(self, customer_id: int, plan: str, price: float):
+    def _compute_first_period_subscription_pricing(
+        self,
+        customer_id: int,
+        group_id: str,
+        plan: str,
+        price: float,
+        lead_promo: float = 0.0,
+    ) -> Tuple[float, float]:
+        """Return the stored first-period promotion and effective price."""
+        existing_promo = self._get_effective_promotion(customer_id, group_id, plan)
+        first_period_promo = max(0.0, lead_promo) + existing_promo
+        return first_period_promo, max(0.0, price - first_period_promo)
+
+    def _create_subscription(
+        self,
+        customer_id: int,
+        plan: str,
+        price: float,
+        lead_channel: Optional[str] = None,
+        lead_promo: Optional[float] = None,
+    ):
         """Create a direct subscription for individual customers.
 
         Customer subscribes immediately if their participation curve accepts the plan.
@@ -1517,13 +1537,13 @@ class Simulator:
         # Sample daily usage rate for this billing period
         daily_usage_rate = sample_daily_usage_rate(self.rng, usage_scale, seat_count)
 
-        # Compute lead promotion for first billing period (new leads only)
-        lead_promo = self._get_lead_promotion(group_id)
-        # Also include any existing user promotion that applies
-        existing_promo = self._get_effective_promotion(customer_id, group_id, plan)
-        # Total first-period promotion = lead promo + existing promo
-        first_period_promo = lead_promo + existing_promo
-        eff_price = max(0.0, price - first_period_promo)
+        # The first bill must use the same channel-aware lead discount that
+        # conversion used; billing cannot reconstruct acquisition channel later.
+        if lead_promo is None:
+            lead_promo = self._get_lead_promotion(group_id, channel=lead_channel)
+        first_period_promo, eff_price = self._compute_first_period_subscription_pricing(
+            customer_id, group_id, plan, price, lead_promo
+        )
 
         self.conn.execute("""
             INSERT INTO subscriptions (
@@ -1553,7 +1573,14 @@ class Simulator:
                 seat_count=None
             )
 
-    def _create_lost_lead_record(self, customer_id: int, plan: str, price: float):
+    def _create_lost_lead_record(
+        self,
+        customer_id: int,
+        plan: str,
+        price: float,
+        promotion: float = 0.0,
+        effective_price: Optional[float] = None,
+    ):
         """Record a lead who evaluated the product but didn't subscribe.
 
         These are customers whose participation curve didn't accept any available plan.
@@ -1563,15 +1590,20 @@ class Simulator:
             "SELECT seat_count FROM customers WHERE customer_id = ?", (customer_id,)
         ).fetchone()
         seat_count = int(cust['seat_count'] or 1) if cust else 1
+        promotion = max(0.0, promotion)
+        if effective_price is None:
+            effective_price = max(0.0, price - promotion)
+
         self.conn.execute("""
             INSERT INTO subscriptions (
                 customer_id, plan, listed_price, promotion, effective_price,
                 seat_count,
                 start_day, status, billing_day_mod30,
                 daily_usage_rate, billing_period_usage
-            ) VALUES (?, ?, ?, 0, ?, ?, ?, 'lost', ?, 0, 0)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'lost', ?, 0, 0)
         """, (
-            customer_id, plan, price, price, seat_count, self.current_day,
+            customer_id, plan, price, promotion, effective_price,
+            seat_count, self.current_day,
             self.current_day % 30
         ))
 
@@ -2094,6 +2126,11 @@ class Simulator:
 
                 lead_promo = self._get_lead_promotion(group_id, channel=lead_channel)
                 effective_price = max(0.0, price - lead_promo)
+                # Persist the exact first-period lead pricing used for this
+                # conversion decision so subscription creation cannot lose
+                # channel/group targeting context later.
+                params['_lead_promo_used'] = lead_promo
+                params['_lead_effective_price_used'] = effective_price
 
                 tier = config[f'tier_{best_plan}']
                 tier_multiplier = MODEL_TIERS[tier].quality_multiplier
@@ -2294,8 +2331,12 @@ class Simulator:
                     pass
                 elif outcome == 'lost':
                     seat_count = int(params.get('seat_count', 1) or 1)
+                    lead_promo = params.get('_lead_promo_used', 0.0)
+                    lead_effective_price = params.get('_lead_effective_price_used')
+                    if lead_effective_price is None:
+                        lead_effective_price = max(0.0, price - lead_promo)
                     lost_rows.append((
-                        cid, best_plan, price, 0, price, seat_count,
+                        cid, best_plan, price, lead_promo, lead_effective_price, seat_count,
                         _day, _day % 30
                     ))
                     new_individual_leads += 1
@@ -2306,11 +2347,14 @@ class Simulator:
                     seat_count = int(params.get('seat_count', 1) or 1)
                     initial_c_max = params.get('c_max', 100.0)
                     daily_usage_rate = sample_daily_usage_rate(self.rng, usage_scale, seat_count)
-                    lead_channel = params.get('_lead_channel')
-                    lead_promo = self._get_lead_promotion(gid, channel=lead_channel)
-                    existing_promo = self._get_effective_promotion(cid, gid, best_plan)
-                    first_period_promo = lead_promo + existing_promo
-                    eff_price = max(0.0, price - first_period_promo)
+                    lead_promo = params.get('_lead_promo_used')
+                    if lead_promo is None:
+                        lead_promo = self._get_lead_promotion(
+                            gid, channel=params.get('_lead_channel')
+                        )
+                    first_period_promo, eff_price = self._compute_first_period_subscription_pricing(
+                        cid, gid, best_plan, price, lead_promo
+                    )
 
                     sub_rows.append((
                         cid, best_plan, price, first_period_promo, eff_price,

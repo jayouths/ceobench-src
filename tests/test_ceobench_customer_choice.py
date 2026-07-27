@@ -350,6 +350,122 @@ def test_first_billing_uses_stored_channel_lead_promotion(make_initialized_sim):
     assert sub["first_billing_done"] == 1
 
 
+def test_create_subscription_snapshots_channel_lead_promotion(make_initialized_sim):
+    config = BenchmarkConfig(
+        seed=123,
+        lead_promotion_by_channel_group={"content_marketing": {"S1": 90.0}},
+    )
+    conn, sim, _config = make_initialized_sim(config=config, seed=123)
+    customer_id = sim._create_customer(
+        {
+            **sim._generate_customer_from_group("S1"),
+            "acquisition_source": "content_marketing",
+        }
+    )
+
+    sim._create_subscription(
+        customer_id,
+        "A",
+        100.0,
+        lead_channel="content_marketing",
+    )
+    conn.commit()
+
+    sub = conn.execute(
+        """
+        SELECT listed_price, promotion, effective_price, first_billing_done
+        FROM subscriptions
+        WHERE customer_id = ?
+        """,
+        (customer_id,),
+    ).fetchone()
+    assert sub["listed_price"] == pytest.approx(100.0)
+    assert sub["promotion"] == pytest.approx(90.0)
+    assert sub["effective_price"] == pytest.approx(10.0)
+    assert sub["first_billing_done"] == 0
+
+    payments = sim._process_billing({"price_A": 100.0, "tier_A": 4})
+
+    assert payments == pytest.approx(10.0)
+
+
+def test_generated_paid_channel_leads_bill_at_promoted_price(
+    make_initialized_sim, monkeypatch,
+):
+    config = BenchmarkConfig(
+        seed=123,
+        base_product_quality=1.0,
+        lead_acquisition_cost=0.0,
+        lead_promotion_by_channel_group={"content_marketing": {"S1": 999_999.0}},
+    )
+    config.targeted_ad_spend = {"content_marketing": {"S1": 10_000.0}}
+    conn, sim, _config = make_initialized_sim(config=config, seed=123)
+
+    def fixed_customer(group_id):
+        return {
+            "customer_type": "small",
+            "group_id": group_id,
+            "steepness_left": 0.8,
+            "steepness_right": 1.6,
+            "c_max": 10.0,
+            "q_max": 0.8,
+            "q_min": 0.2,
+            "usage_demand": 10.0,
+            "quality_sensitivity": 1.0,
+            "price_sensitivity": 1.0,
+            "willingness_to_pay": 10.0,
+            "usage_scale": 10.0,
+            "patience": 1.0,
+            "seat_count": 1,
+            "ads_quality_sensitivity": 0.1,
+            "ads_return_sensitivity": 0.15,
+        }
+
+    monkeypatch.setattr(sim, "_generate_customer_from_group", fixed_customer)
+    plan_config = {
+        "price_A": 1_000_000.0,
+        "price_B": 1_000_000.0,
+        "price_C": 1_000_000.0,
+        "tier_A": 5,
+        "tier_B": 5,
+        "tier_C": 5,
+        "quota_A": 1_000,
+        "quota_B": 1_000,
+        "quota_C": 1_000,
+        "capacity_tier": 1,
+    }
+    sim._cache_step_day_globals(plan_config)
+
+    generated = sim._generate_new_customers(plan_config)
+
+    assert generated["new_individual_subscribers"] > 0
+    sub = conn.execute(
+        """
+        SELECT COUNT(*) AS n, AVG(listed_price) AS avg_listed,
+               AVG(promotion) AS avg_promo, AVG(effective_price) AS avg_effective
+        FROM subscriptions
+        WHERE status = 'subscribed'
+        """
+    ).fetchone()
+    assert sub["n"] == generated["new_individual_subscribers"]
+    assert sub["avg_listed"] == pytest.approx(1_000_000.0)
+    assert sub["avg_promo"] == pytest.approx(999_999.0)
+    assert sub["avg_effective"] == pytest.approx(1.0)
+
+    payments = sim._process_billing(plan_config)
+
+    assert payments == pytest.approx(generated["new_individual_subscribers"])
+    ledger = conn.execute(
+        """
+        SELECT COUNT(*) AS n, AVG(amount) AS avg_amount
+        FROM ledger
+        WHERE category = 'subscription_payment'
+        """
+    ).fetchone()
+    assert ledger["n"] == generated["new_individual_subscribers"]
+    assert ledger["avg_amount"] == pytest.approx(1.0)
+
+
 def test_same_plan_renewal_billing_uses_decreased_evaluated_price(
     make_initialized_sim, monkeypatch,
 ):
