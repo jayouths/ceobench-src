@@ -350,7 +350,7 @@ def test_first_billing_uses_stored_channel_lead_promotion(make_initialized_sim):
     assert sub["first_billing_done"] == 1
 
 
-def test_same_plan_renewal_billing_caps_at_current_evaluated_price(
+def test_same_plan_renewal_billing_uses_decreased_evaluated_price(
     make_initialized_sim, monkeypatch,
 ):
     config = BenchmarkConfig(seed=123, promotion_global=2.0)
@@ -390,7 +390,9 @@ def test_same_plan_renewal_billing_caps_at_current_evaluated_price(
     assert sub["effective_price"] == pytest.approx(8.0)
 
 
-def test_billing_preserves_lower_grandfathered_price(make_initialized_sim):
+def test_same_plan_renewal_billing_uses_increased_evaluated_price(
+    make_initialized_sim, monkeypatch,
+):
     conn, sim, _config = make_initialized_sim(seed=123)
     customer_id = _create_subscribed_customer(conn, sim)
     conn.execute(
@@ -404,9 +406,16 @@ def test_billing_preserves_lower_grandfathered_price(make_initialized_sim):
     )
     conn.commit()
 
-    payments = sim._process_billing({"price_A": 100.0, "tier_A": 4})
+    plan_config = {"price_A": 100.0, "tier_A": 4}
+    monkeypatch.setattr(sim, "_get_involuntary_churn_mu", lambda _group_id: 0.0)
+    monkeypatch.setattr(
+        sim, "_select_best_plan_inline", lambda *_args, **_kwargs: "A"
+    )
 
-    assert payments == pytest.approx(10.0)
+    sim._process_billing_decisions(plan_config, overload=0.0, outage=False)
+    payments = sim._process_billing(plan_config)
+
+    assert payments == pytest.approx(100.0)
     sub = conn.execute(
         """
         SELECT listed_price, effective_price
@@ -415,27 +424,5 @@ def test_billing_preserves_lower_grandfathered_price(make_initialized_sim):
         """,
         (customer_id,),
     ).fetchone()
-    assert sub["listed_price"] == pytest.approx(10.0)
-    assert sub["effective_price"] == pytest.approx(10.0)
-
-
-def test_first_billing_does_not_exceed_current_promotion_evaluation(
-    make_initialized_sim,
-):
-    config = BenchmarkConfig(seed=123, promotion_global=90.0)
-    conn, sim, _config = make_initialized_sim(config=config, seed=123)
-    customer_id = _create_subscribed_customer(conn, sim)
-    conn.execute(
-        """
-        UPDATE subscriptions
-        SET listed_price = 100.0, promotion = 0.0, effective_price = 100.0,
-            first_billing_done = 0
-        WHERE customer_id = ?
-        """,
-        (customer_id,),
-    )
-    conn.commit()
-
-    payments = sim._process_billing({"price_A": 100.0, "tier_A": 4})
-
-    assert payments == pytest.approx(10.0)
+    assert sub["listed_price"] == pytest.approx(100.0)
+    assert sub["effective_price"] == pytest.approx(100.0)
