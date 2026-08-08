@@ -4140,28 +4140,15 @@ class Simulator:
             def _make_macro_call(item=macro_item):
                 try:
                     config = self.config
-                    social_model = config.social_post_llm_model
                     social_provider = config.social_post_llm_provider
-
+                    llm_response = self.customer_simulator.create_social_response(
+                        "You are a social media content generator simulating realistic business professionals posting about economic conditions.",
+                        item['prompt'],
+                        task_max_tokens=300,
+                    )
                     if social_provider in ("bedrock", "anthropic"):
-                        llm_response = self.customer_simulator.social_post_client.messages.create(
-                            model=social_model,
-                            max_tokens=300,
-                            temperature=config.social_media_temperature,
-                            system="You are a social media content generator simulating realistic business professionals posting about economic conditions.",
-                            messages=[{"role": "user", "content": item['prompt']}],
-                        )
                         text = llm_response.content[0].text.strip()
                     else:
-                        llm_response = self.customer_simulator.client.responses.create(
-                            model=social_model,
-                            reasoning={"effort": "low"},
-                            input=[
-                                {"role": "system", "content": "You are a social media content generator simulating realistic business professionals posting about economic conditions."},
-                                {"role": "user", "content": item['prompt']}
-                            ],
-                            max_output_tokens=300,
-                        )
                         text = llm_response.output_text.strip()
 
                     # Clean: strip numbering/bullets if LLM added them
@@ -4307,28 +4294,15 @@ class Simulator:
             def _make_macro_call(item=macro_item):
                 try:
                     config = self.config
-                    social_model = config.social_post_llm_model
                     social_provider = config.social_post_llm_provider
-
+                    llm_response = self.customer_simulator.create_social_response(
+                        "You are a social media content generator simulating realistic business professionals posting about economic conditions.",
+                        item['prompt'],
+                        task_max_tokens=300,
+                    )
                     if social_provider in ("bedrock", "anthropic"):
-                        llm_response = self.customer_simulator.social_post_client.messages.create(
-                            model=social_model,
-                            max_tokens=300,
-                            temperature=config.social_media_temperature,
-                            system="You are a social media content generator simulating realistic business professionals posting about economic conditions.",
-                            messages=[{"role": "user", "content": item['prompt']}],
-                        )
                         text = llm_response.content[0].text.strip()
                     else:
-                        llm_response = self.customer_simulator.client.responses.create(
-                            model=social_model,
-                            reasoning={"effort": "low"},
-                            input=[
-                                {"role": "system", "content": "You are a social media content generator simulating realistic business professionals posting about economic conditions."},
-                                {"role": "user", "content": item['prompt']}
-                            ],
-                            max_output_tokens=300,
-                        )
                         text = llm_response.output_text.strip()
 
                     import re
@@ -5804,17 +5778,13 @@ Guidelines:
         user_prompt = f"Write a social media post reacting to {competitor_name}'s product launch."
 
         social_model = self.customer_simulator.config.social_post_llm_model
-        social_temperature = self.customer_simulator.config.social_media_temperature
-
         post_max_tokens = self.config.competitor_post_llm_max_tokens
+        response = self.customer_simulator.create_social_response(
+            system_prompt,
+            user_prompt,
+            task_max_tokens=post_max_tokens,
+        )
         if self.customer_simulator.config.social_post_llm_provider in ("bedrock", "anthropic"):
-            response = self.customer_simulator.social_post_client.messages.create(
-                model=social_model,
-                max_tokens=post_max_tokens,
-                temperature=social_temperature,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
-            )
             post_text = response.content[0].text.strip()
             self.customer_simulator._log_cost(
                 self.current_day, 'competitor_event_post',
@@ -5822,15 +5792,6 @@ Guidelines:
                 model=social_model
             )
         else:
-            response = self.customer_simulator.client.responses.create(
-                model=social_model,
-                reasoning={"effort": "low"},
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                max_output_tokens=post_max_tokens,
-            )
             post_text = response.output_text.strip()
             self.customer_simulator._log_cost(
                 self.current_day, 'competitor_event_post',
