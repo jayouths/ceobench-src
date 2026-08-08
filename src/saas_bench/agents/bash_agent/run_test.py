@@ -90,8 +90,7 @@ class BashAgentRunner:
         self.provider = provider or default_config.agent_llm_provider
         self.seed = seed
         self.scenario = scenario
-        # Round down to nearest full week so the simulation always ends on a
-        # week boundary (no partial trailing week). e.g. 500 -> 497.
+        # 实验只能按周推进，因此总天数会被四舍五入为 7 的倍数
         self.total_days = (total_days // 7) * 7
         self.initial_cash = initial_cash
         self.reasoning_effort = reasoning_effort or default_config.agent_llm_reasoning_effort
@@ -1013,8 +1012,11 @@ __pycache__/
 
     def run(self, verbose: bool = True) -> Dict[str, Any]:
         """Run the full simulation."""
+
+        # 准备实验环境
         self.setup()
 
+        # 处理断点恢复
         start_day = 1
         if self.continue_from:
             checkpoint = self._load_checkpoint()
@@ -1045,6 +1047,7 @@ __pycache__/
             else:
                 print(f"WARNING: No checkpoint found, starting from Day 1")
 
+        # 初始化新实验的状态
         if start_day == 1 and verbose:
             print(f"\n{'='*60}")
             print(f"Starting Bash Agent Run")
@@ -1064,12 +1067,14 @@ __pycache__/
         _cash = 0
         last_status: Dict[str, Any] = {}
 
+        # 处理每周的 Agent 决策
         for day in range(start_day, self.total_days + 1):
+
+            # 记录本轮开始时间
             _day_start = _time.monotonic()
             current_day = day
 
-            # Get actual simulation day from server (may differ from harness loop counter
-            # when agent uses next-week which advances 7 sim days per loop iteration)
+            # 查询模拟器真实状态
             status = self._get_game_status()
             last_status = status
             sim_day = status.get('day', day)
@@ -1079,14 +1084,14 @@ __pycache__/
                 print(f"DAY {day} (sim day {sim_day})")
                 print(f"{'='*40}")
 
-            # Build dashboard (timed)
+            # 构建 DashBoard
             _t0 = _time.monotonic()
             dashboard = self._get_dashboard()
             _dashboard_elapsed = _time.monotonic() - _t0
             self._log_tool_result(0, sim_day, '_dashboard', {}, dashboard)
             self._log_timing("dashboard", sim_day, elapsed_s=round(_dashboard_elapsed, 3))
 
-            # Agent loop for this day
+            # Agent Loop：只要本周的决策尚未结束，就持续执行
             observation = dashboard
             info = {'day': sim_day, 'cash': status.get('cash', self._get_cash())}
             turns_today = 0
@@ -1098,10 +1103,11 @@ __pycache__/
             _day_cached_tokens = 0
             _day_reasoning_tokens = 0
 
+            # 每一小轮最多允许调用 100 次工具，如果超过 100 次，说明 Agent 可能陷入了无限循环。
             while not day_ended and turns_today < 100:
                 turns_today += 1
 
-                # LLM call (timed)
+                # 将 observation（可能是 DashBoard，也可能是 Tool Use） 传给 LLM，获取下一步的 action
                 _t0 = _time.monotonic()
                 action = self.agent.act(observation, 0, False, info)
                 _llm_elapsed = _time.monotonic() - _t0
@@ -1111,6 +1117,7 @@ __pycache__/
                 _day_cached_tokens += self.agent.last_cached_tokens
                 _day_reasoning_tokens += self.agent.last_reasoning_tokens
 
+                # 若 action 为 None，说明 LLM 返回有误，此时直接报错
                 if action is None:
                     # With the agent's retry-with-feedback loop, _call_* should no
                     # longer return None. If we still get here, something is very
@@ -1121,6 +1128,7 @@ __pycache__/
                         "This indicates a bug in the agent scaffold — please investigate."
                     )
 
+                # 解析 action 为工具调用指令
                 tool_name = action.tool
                 tool_args_preview = ""
                 if tool_name == 'bash':
@@ -1128,6 +1136,7 @@ __pycache__/
                 else:
                     tool_args_preview = json.dumps(action.arguments or {})[:120]
 
+                # 将本次 LLM 的调用信息(llm_call)记录到日志文件（耗时、使用工具、Token 使用情况、请求的模型等）
                 self._log_timing("llm_call", sim_day, turn=turns_today,
                                  elapsed_s=round(_llm_elapsed, 2),
                                  tool=tool_name, tool_preview=tool_args_preview,
@@ -1141,13 +1150,13 @@ __pycache__/
                                  anthropic_fallbacks=self.agent.last_anthropic_fallbacks,
                                  total_anthropic_fallbacks=self.agent.total_anthropic_fallbacks)
 
-                # Execute action (timed)
                 if verbose:
                     if tool_name == 'bash':
                         print(f"    [Turn {turns_today}] bash: {tool_args_preview[:100]}")
                     else:
                         print(f"    [Turn {turns_today}] {tool_name}({tool_args_preview[:100]})")
 
+                # 执行工具调用
                 _t0 = _time.monotonic()
                 try:
                     result = self._execute_tool(action.tool, action.arguments or {})
@@ -1163,11 +1172,12 @@ __pycache__/
                 _day_tool_total += _tool_elapsed
                 observation = result if isinstance(result, str) else json.dumps(result)
 
+                # 将工具调用耗时信息(tool_exec)记录到日志文件
                 self._log_timing("tool_exec", sim_day, turn=turns_today,
                                  elapsed_s=round(_tool_elapsed, 3),
                                  tool=tool_name, tool_preview=tool_args_preview)
 
-                # Log tool result
+                # 将工具调用执行结果信息(tool_result)记录到日志文件
                 self._log_tool_result(
                     self.agent.total_turns, sim_day,
                     action.tool, action.arguments or {},
@@ -1178,18 +1188,18 @@ __pycache__/
                     print(f"      → {observation[:200]}")
                     print(f"      ⏱ llm={_llm_elapsed:.1f}s tool={_tool_elapsed:.1f}s")
 
-                # Check if the agent detected a day advancement
+                # 当 Agent 调用 next-week，说明本周决策结束，标记 day_ended 为 True
                 if self.agent.day_advanced:
                     day_ended = True
                     self.agent.clear_day_advanced()
 
-                # Check server for timeout (via game-status)
+                # 向模拟器查询最新状态
                 status = self._get_game_status()
                 last_status = status
-                sim_day = status.get('day', sim_day)  # Update sim_day after potential next-week
-                self._commit_weeks_up_to(sim_day)  # Commit any sim-week boundary just crossed
+                sim_day = status.get('day', sim_day)    # 更新 sim_day
+                self._commit_weeks_up_to(sim_day)       # next-week 后，将 Agent 工具目录的改动提交到 Git
 
-                # Check if simulation reached total_days (inside inner loop)
+                # 如果模拟天数已经达到设定天数，结束游戏
                 if sim_day >= self.total_days:
                     game_ended = True
                     game_outcome = 'completed'
@@ -1197,6 +1207,7 @@ __pycache__/
                         print(f"\n✅ Simulation reached {sim_day} days (target: {self.total_days})")
                     break
 
+                # 如果模拟器返回超时，结束游戏
                 if status.get('timed_out'):
                     print(f"\n⚠️  step_day timed out on sim day {sim_day}")
                     print(f"Auto-quitting. Saving checkpoint...")
@@ -1205,10 +1216,9 @@ __pycache__/
                     game_outcome = 'timeout'
                     break
 
+                # 检查是否破产，如果是则结束游戏
                 _cash_inner = status.get('cash', 0)
                 info = {'day': sim_day, 'cash': _cash_inner}
-
-                # Check bankruptcy inside inner loop (don't let agent keep playing while bankrupt)
                 if _cash_inner < 0:
                     game_ended = True
                     game_outcome = 'bankrupt'
@@ -1229,6 +1239,8 @@ __pycache__/
             # the warning once so the agent can keep planning. Flag is cleared
             # after one iteration so subsequent days behave normally.
             _step_elapsed = 0
+
+            # 若内层经过 100 次工具调用仍未结束本周决策，会打印异常警告、写入一条 turn_cap_no_advance 日志、保存 checkpoint 后继续。
             if not day_ended:
                 if self._suppress_force_step_day_once:
                     print(f"  [resume] Skipping force step_day on resume iter (last tool was not next-week)")
@@ -1240,14 +1252,14 @@ __pycache__/
                     )
                     self._log_timing("turn_cap_no_advance", sim_day, turns=turns_today)
 
-            # Log step_day timing
+            # Log step_day timing（过时逻辑）
             self._log_timing("step_day", sim_day, elapsed_s=round(_step_elapsed, 2))
 
-            # Log slow step_day as warning
+            # Log slow step_day as warning（过时逻辑）
             if _step_elapsed > 300:
                 print(f"\n⚠️  step_day took {_step_elapsed:.1f}s on sim day {sim_day} (>300s) — continuing")
 
-            # Get post-day status (also refresh sim_day)
+            # 重新获取一次模拟器状态，若 Agent 执行了 next-week，则 sim_day 会增加 7 天
             status = self._get_game_status()
             last_status = status
             sim_day = status.get('day', sim_day)
@@ -1255,7 +1267,7 @@ __pycache__/
             _subs = status.get('subscribers', 0)
             _cash = status.get('cash', 0)
 
-            # Check if simulation reached total_days
+            # 过时逻辑
             if sim_day >= self.total_days:
                 game_ended = True
                 game_outcome = 'completed'
@@ -1263,7 +1275,7 @@ __pycache__/
                     print(f"\n✅ Simulation reached {sim_day} days (target: {self.total_days})")
                 break
 
-            # Per-day timing summary
+            # 汇总本轮运行信息(day_summary)，写入 timing_*.jsonl 日志文件，同时打印到终端。
             _day_elapsed = _time.monotonic() - _day_start
             _day_other = _day_elapsed - _day_llm_total - _day_tool_total - _step_elapsed - _dashboard_elapsed
             self._log_timing("day_summary", sim_day,
@@ -1309,7 +1321,7 @@ __pycache__/
             # Idempotent via once_key — _commit_weeks_up_to may have already committed this week.
             self._commit_weeks_up_to(sim_day)
 
-            # Save checkpoint (use actual sim day, not harness loop counter)
+            # 保存当前 sim_day 的 checkpoint
             self._save_checkpoint(sim_day)
 
             # Check bankruptcy
