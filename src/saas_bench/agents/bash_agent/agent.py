@@ -48,22 +48,32 @@ class BashAgent(BaseAgent):
         self,
         tool_descriptions: List[Dict[str, Any]],
         client,
-        model: str = "gpt-4o",
+        model: Optional[str] = None,
         system_prompt: Optional[str] = None,
         max_turns_per_day: int = 0,  # 0 = no limit
         response_callback: Optional[callable] = None,
         reasoning_effort: Optional[str] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        max_output_tokens: int = 16384,
+        timeout_seconds: float = 600.0,
         tool_result_callback: Optional[callable] = None,
         workspace_path: Optional[Path] = None,
         total_days: int = 3650,
         anthropic_fallback_model: Optional[str] = None,
     ):
         super().__init__(tool_descriptions)
+        if not model:
+            raise ValueError("agent model must be explicitly configured")
         self.client = client
         self.model = model
         self.max_turns_per_day = max_turns_per_day
         self.response_callback = response_callback
         self.reasoning_effort = reasoning_effort
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_output_tokens = max_output_tokens
+        self.timeout_seconds = timeout_seconds
         self.tool_result_callback = tool_result_callback
         self.workspace_path = workspace_path or Path('.')
         self.total_days = total_days
@@ -453,10 +463,43 @@ class BashAgent(BaseAgent):
         """Call the LLM and parse the response into an action."""
         if self.use_anthropic:
             return self._call_anthropic()
-        elif self.reasoning_effort and self.supports_responses_api:
+        elif self.supports_responses_api:
             return self._call_openai_responses()
         else:
             return self._call_openai()
+
+    def _build_openai_chat_kwargs(self, messages, tools) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            'model': self.model,
+            'messages': messages,
+            'tools': tools,
+            'tool_choice': 'auto',
+            'max_completion_tokens': self.max_output_tokens,
+        }
+        if self.temperature is not None:
+            params['temperature'] = self.temperature
+        if self.top_p is not None:
+            params['top_p'] = self.top_p
+        if self.reasoning_effort is not None:
+            params['reasoning_effort'] = self.reasoning_effort
+        return params
+
+    def _build_openai_responses_kwargs(self, input_items, tools) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            'model': self.model,
+            'input': input_items,
+            'tools': tools,
+            'tool_choice': 'auto',
+            'max_output_tokens': self.max_output_tokens,
+            'instructions': self._get_system_prompt_with_memory(),
+        }
+        if self.temperature is not None:
+            params['temperature'] = self.temperature
+        if self.top_p is not None:
+            params['top_p'] = self.top_p
+        if self.reasoning_effort is not None:
+            params['reasoning'] = {'effort': self.reasoning_effort, 'summary': 'auto'}
+        return params
 
     def _call_openai(self) -> Optional[Action]:
         """Call OpenAI-compatible API and parse the response."""
@@ -465,7 +508,7 @@ class BashAgent(BaseAgent):
         import signal
         import openai
 
-        LLM_WALL_CLOCK_TIMEOUT = 600  # 10min hard wall-clock limit per LLM call
+        LLM_WALL_CLOCK_TIMEOUT = max(1, int(self.timeout_seconds))
 
         class LLMTimeoutError(Exception):
             pass
@@ -498,18 +541,9 @@ class BashAgent(BaseAgent):
             ]
 
             try:
-                api_kwargs = {
-                    'model': self.model,
-                    'messages': messages,
-                    'tools': tools,
-                    'tool_choice': 'auto',
-                    'max_completion_tokens': 16384,
-                    'temperature': 1.0,
-                }
+                api_kwargs = self._build_openai_chat_kwargs(messages, tools)
                 _is_together = 'api.together.xyz' in (str(getattr(self.client, 'base_url', '') or ''))
                 _is_together_deepseek = _is_together and 'deepseek' in self.model.lower()
-                if self.reasoning_effort:
-                    api_kwargs['reasoning_effort'] = self.reasoning_effort
                 if _is_together_deepseek:
                     # Together's DeepSeek-V4 thinking is gated on the chat-template flag,
                     # not on `reasoning_effort` (which Together rejects with 400 for max,
@@ -698,13 +732,13 @@ class BashAgent(BaseAgent):
                     continue
 
     def _call_openai_responses(self) -> Optional[Action]:
-        """Call OpenAI Responses API (required for reasoning models with tools)."""
+        """Call the OpenAI Responses API, optionally enabling reasoning."""
         import time as _time
         import traceback
         import signal
         import openai
 
-        LLM_WALL_CLOCK_TIMEOUT = 600
+        LLM_WALL_CLOCK_TIMEOUT = max(1, int(self.timeout_seconds))
 
         class LLMTimeoutError(Exception):
             pass
@@ -745,16 +779,7 @@ class BashAgent(BaseAgent):
             ]
 
             try:
-                api_kwargs = {
-                    'model': self.model,
-                    'input': input_items,
-                    'tools': tools,
-                    'tool_choice': 'auto',
-                    'max_output_tokens': 16384,
-                    'instructions': self._get_system_prompt_with_memory(),
-                }
-                if self.reasoning_effort:
-                    api_kwargs['reasoning'] = {'effort': self.reasoning_effort, 'summary': 'auto'}
+                api_kwargs = self._build_openai_responses_kwargs(input_items, tools)
 
                 # Set hard wall-clock timeout via signal.alarm
                 old_handler = signal.signal(signal.SIGALRM, _llm_timeout_handler)
@@ -1080,11 +1105,15 @@ class BashAgent(BaseAgent):
 
             api_kwargs = {
                 'model': self.model,
-                'max_tokens': 128000,
+                'max_tokens': self.max_output_tokens,
                 'system': system_content,
                 'messages': messages,
                 'tools': tools,
             }
+            if self.temperature is not None:
+                api_kwargs['temperature'] = self.temperature
+            if self.top_p is not None:
+                api_kwargs['top_p'] = self.top_p
             anthropic_messages = self.client.messages
             if self.anthropic_fallback_model:
                 anthropic_messages = self.client.beta.messages

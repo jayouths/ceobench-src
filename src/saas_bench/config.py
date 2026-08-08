@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 
@@ -667,33 +667,45 @@ class BenchmarkConfig:
     budget_limit_usd: float = 50.0
 
     # === LLM MODEL CONFIGURATION ===
-    # Agent LLM (the AI being benchmarked). CLI flags in bash_agent/run_test.py
-    # can override these defaults for ad hoc runs.
+    # The main experiment runner requires explicit TOML settings; these defaults
+    # remain for legacy entrypoints that do not participate in our experiments.
     agent_llm_provider: str = "openai"
     agent_llm_model: str = "gpt-5.2"
-    agent_llm_reasoning_effort: str = "low"  # "low", "medium", "high"
+    agent_llm_reasoning_effort: str = "low"
 
     # Social Post LLM (for generating social media posts).
-    # Local Opus benchmark runs use direct Anthropic here so the simulator does
-    # not require Bedrock credentials.
     # Supported providers: "bedrock", "anthropic", or "openai".
     #   - "bedrock":   AnthropicBedrock SDK; requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION.
     #                  Use a Bedrock model id (e.g. "us.anthropic.claude-haiku-4-5-20251001-v1:0").
     #   - "anthropic": Direct Anthropic SDK; requires ANTHROPIC_API_KEY.
     #                  Use the public model name (e.g. "claude-haiku-4-5"). No AWS credentials needed.
     #   - "openai":    OpenAI Responses API; requires OPENAI_API_KEY.
-    social_post_llm_model: str = "claude-haiku-4-5"
     social_post_llm_provider: str = "anthropic"  # "bedrock" | "anthropic" | "openai"
-    social_post_llm_temperature: float = 0.9  # Higher for creative variety
+    social_post_llm_model: str = "claude-haiku-4-5"
+    social_post_llm_base_url: Optional[str] = None
+    social_post_llm_api_key_env: Optional[str] = "ANTHROPIC_API_KEY"
+    social_post_llm_api_key_required: bool = True
+    social_post_llm_reasoning_effort: Optional[str] = None
+    social_post_llm_temperature: Optional[float] = 0.9
+    social_post_llm_top_p: Optional[float] = None
     social_post_llm_max_tokens: int = 1000
+    social_post_llm_timeout_seconds: float = 600.0
+    social_post_llm_input_cost_per_million: Optional[float] = None
+    social_post_llm_output_cost_per_million: Optional[float] = None
 
     # Enterprise Customer LLM (for negotiation responses, initial outreach).
-    # Local Opus benchmark runs use direct Anthropic here so the simulator does
-    # not require Bedrock credentials.
-    enterprise_llm_model: str = "claude-sonnet-4-5"
     enterprise_llm_provider: str = "anthropic"  # "bedrock" | "anthropic" | "openai"
-    enterprise_llm_temperature: float = 0.7
+    enterprise_llm_model: str = "claude-sonnet-4-5"
+    enterprise_llm_base_url: Optional[str] = None
+    enterprise_llm_api_key_env: Optional[str] = "ANTHROPIC_API_KEY"
+    enterprise_llm_api_key_required: bool = True
+    enterprise_llm_reasoning_effort: Optional[str] = None
+    enterprise_llm_temperature: Optional[float] = 0.7
+    enterprise_llm_top_p: Optional[float] = None
     enterprise_llm_max_tokens: int = 300
+    enterprise_llm_timeout_seconds: float = 600.0
+    enterprise_llm_input_cost_per_million: Optional[float] = None
+    enterprise_llm_output_cost_per_million: Optional[float] = None
 
     # Bedrock configuration
     bedrock_region: str = "us-east-2"  # Ohio — AWS Bedrock region
@@ -703,16 +715,11 @@ class BenchmarkConfig:
 
     # Legacy aliases (kept for compatibility)
     @property
-    def social_post_llm_reasoning_effort(self) -> str:
-        """Legacy alias - Bedrock uses temperature, not reasoning_effort."""
-        return "low"
-
-    @property
-    def agent_model(self) -> str:
+    def agent_model(self) -> Optional[str]:
         return self.agent_llm_model
 
     @property
-    def agent_reasoning_effort(self) -> str:
+    def agent_reasoning_effort(self) -> Optional[str]:
         return self.agent_llm_reasoning_effort
 
     # GPT-5.2 pricing (actual from OpenAI)
@@ -855,7 +862,7 @@ class BenchmarkConfig:
     # === V2.1: SOCIAL MEDIA DIVERSITY (Section 2) ===
     # Strategies to reduce repetitive social media posts from template/LLM generation.
     # [Buffer 2024: Posts with unique voice/format get 2.3× more engagement]
-    social_media_temperature: float = 0.95  # LLM temperature for social media posts (higher = more varied)
+    social_media_temperature: float = 0.95  # Legacy simulator setting
     social_media_diversity_window: int = 10  # Number of recent same-group posts to use as negative examples (V2.2: was 5)
     social_media_cross_group_dedup_window: int = 5  # V2.2: Recent cross-group posts to include in dedup
 

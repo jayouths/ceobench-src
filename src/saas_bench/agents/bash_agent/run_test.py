@@ -31,7 +31,11 @@ if str(package_root) not in sys.path:
     sys.path.insert(0, str(package_root))
 
 from openai import OpenAI
-from saas_bench.config import BenchmarkConfig
+from saas_bench.experiment_config import (
+    default_api_key_env,
+    default_base_url,
+    load_experiment_config,
+)
 
 try:
     import anthropic
@@ -82,18 +86,59 @@ class BashAgentRunner:
         initial_cash: float = 1_000_000.0,
         workspace_base: Optional[Path] = None,
         reasoning_effort: Optional[str] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        max_output_tokens: Optional[int] = None,
+        timeout_seconds: float = 600.0,
+        input_cost_per_million: Optional[float] = None,
+        output_cost_per_million: Optional[float] = None,
+        api_key_env: Optional[str] = None,
+        api_key_required: bool = True,
+        simulator_llm_config: Optional[Dict[str, Any]] = None,
+        config_source: Optional[Path] = None,
         continue_from: Optional[Path] = None,
         label: Optional[str] = None,
     ):
-        default_config = BenchmarkConfig()
-        self.model = model or default_config.agent_llm_model
-        self.provider = provider or default_config.agent_llm_provider
+        if not model:
+            raise ValueError("decision-agent model must be explicitly configured")
+        if not provider:
+            raise ValueError("decision-agent provider must be explicitly configured")
+        self.model = model
+        self.provider = provider
         self.seed = seed
         self.scenario = scenario
         # 实验只能按周推进，因此总天数会被四舍五入为 7 的倍数
         self.total_days = (total_days // 7) * 7
         self.initial_cash = initial_cash
-        self.reasoning_effort = reasoning_effort or default_config.agent_llm_reasoning_effort
+        # None means "not configured" and omits the API parameter. Explicit
+        # values, including "none", must be forwarded unchanged.
+        self.reasoning_effort = reasoning_effort
+        if temperature is not None and not 0 <= temperature <= 2:
+            raise ValueError("temperature must be between 0 and 2")
+        if top_p is not None and not 0 <= top_p <= 1:
+            raise ValueError("top_p must be between 0 and 1")
+        if max_output_tokens is not None and max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        for name, price in (
+            ("input_cost_per_million", input_cost_per_million),
+            ("output_cost_per_million", output_cost_per_million),
+        ):
+            if price is not None and price < 0:
+                raise ValueError(f"{name} must be non-negative")
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_output_tokens = max_output_tokens or (
+            128_000 if self.provider in ("anthropic", "bedrock") else 16_384
+        )
+        self.timeout_seconds = float(timeout_seconds)
+        self.input_cost_per_million = input_cost_per_million
+        self.output_cost_per_million = output_cost_per_million
+        self.api_key_env = api_key_env
+        self.api_key_required = api_key_required
+        self.simulator_llm_config = dict(simulator_llm_config or {})
+        self.config_source = Path(config_source).resolve() if config_source else None
         self.continue_from = continue_from
         self.label = label  # Optional human-readable variant tag — surfaced on the dashboard
         self.anthropic_fallback_model = (
@@ -105,6 +150,7 @@ class BashAgentRunner:
         # Set in _restore_from_checkpoint when last logged tool was NOT next-week;
         # consumed once by the outer loop to skip force step_day on the resume iter.
         self._suppress_force_step_day_once = False
+        self._existing_run_config: Optional[Dict[str, Any]] = None
 
         if continue_from:
             self.workspace_dir = Path(continue_from).resolve()
@@ -114,7 +160,12 @@ class BashAgentRunner:
             if config_file.exists():
                 with open(config_file) as f:
                     old_config = json.load(f)
+                self._existing_run_config = old_config
                 self.run_id = old_config['run_id']
+                # Simulator settings are part of the existing world and cannot
+                # change when a run resumes, even if a different TOML is passed.
+                if old_config.get("simulator_llm"):
+                    self.simulator_llm_config = old_config["simulator_llm"]
             else:
                 self.run_id = self.workspace_dir.name.replace('run_', '')
             self.workspace_base = self.workspace_dir.parent
@@ -178,6 +229,7 @@ class BashAgentRunner:
         # Load API key
         env_file = Path(__file__).parent.parent.parent.parent.parent / ".env"
         env_vars = load_env_file(env_file)
+        self._env_vars = env_vars
 
         for key in ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION',
                     'AWS_SESSION_TOKEN', 'NMDB_KEY']:
@@ -202,6 +254,8 @@ class BashAgentRunner:
         self.use_anthropic = self.provider in ("anthropic", "bedrock")
         if api_key:
             self.api_key = api_key
+        elif self.api_key_env:
+            self.api_key = env_vars.get(self.api_key_env) or os.environ.get(self.api_key_env)
         elif self.provider == "xai":
             self.api_key = env_vars.get("XAI_API_KEY") or os.environ.get("XAI_API_KEY")
         elif self.provider == "google":
@@ -219,6 +273,8 @@ class BashAgentRunner:
         else:
             self.api_key = env_vars.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
 
+        if not self.api_key and not self.api_key_required:
+            self.api_key = "not-required"
         if not self.api_key and self.provider not in ("bedrock",):
             raise ValueError(f"No API key found for provider {self.provider}")
 
@@ -235,6 +291,8 @@ class BashAgentRunner:
         else:
             self.base_url = None
 
+        self._validate_resume_config()
+
         # Create client
         if self.provider == "bedrock":
             if not ANTHROPIC_AVAILABLE:
@@ -244,11 +302,16 @@ class BashAgentRunner:
                 aws_secret_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
                 aws_session_token=os.environ.get("AWS_SESSION_TOKEN"),
                 aws_region=os.environ.get("AWS_REGION", "us-east-2"),
+                timeout=self.timeout_seconds,
             )
         elif self.provider == "anthropic":
             if not ANTHROPIC_AVAILABLE:
                 raise ImportError("anthropic package required")
-            self.client = anthropic.Anthropic(api_key=self.api_key)
+            self.client = anthropic.Anthropic(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                timeout=self.timeout_seconds,
+            )
         elif self.provider == "ai_sandbox":
             try:
                 from portkey_ai import Portkey
@@ -263,7 +326,7 @@ class BashAgentRunner:
             client_kwargs = {"api_key": self.api_key}
             if self.base_url:
                 client_kwargs["base_url"] = self.base_url
-            client_kwargs["timeout"] = httpx.Timeout(600.0)  # 10min max per LLM call; retry on timeout
+            client_kwargs["timeout"] = httpx.Timeout(self.timeout_seconds)
             self.client = OpenAI(**client_kwargs)
 
         # Components (initialized in setup)
@@ -272,6 +335,43 @@ class BashAgentRunner:
         self._server_proc = None
         self._server_port = None
         self._session_id = None
+
+    def _validate_resume_config(self) -> None:
+        """Prevent a resumed run from silently changing experimental variables."""
+        if not self._existing_run_config:
+            return
+
+        current = {
+            "model": self.model,
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "reasoning_effort": self.reasoning_effort,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "max_output_tokens": self.max_output_tokens,
+            "timeout_seconds": self.timeout_seconds,
+            "input_cost_per_million": self.input_cost_per_million,
+            "output_cost_per_million": self.output_cost_per_million,
+            "api_key_env": self.api_key_env,
+            "api_key_required": self.api_key_required,
+            "seed": self.seed,
+            "scenario": self.scenario,
+            "total_days": self.total_days,
+            "initial_cash": self.initial_cash,
+            "label": self.label,
+        }
+        mismatches = []
+        for field, value in current.items():
+            if field not in self._existing_run_config:
+                continue
+            previous = self._existing_run_config[field]
+            if previous != value:
+                mismatches.append(f"{field}: previous={previous!r}, requested={value!r}")
+        if mismatches:
+            raise ValueError(
+                "resume configuration does not match the original run: "
+                + "; ".join(mismatches)
+            )
 
     # =========================================================================
     # HTTP helpers — all simulation interaction goes through these
@@ -502,6 +602,7 @@ __pycache__/
                 "--days", str(self.total_days),
                 "--seed", str(self.seed),
                 "--cash", str(self.initial_cash),
+                "--scenario", self.scenario,
             ],
             capture_output=True, text=True, env=env,
         )
@@ -548,6 +649,13 @@ __pycache__/
         """Environment for host-side simulator processes."""
         env = os.environ.copy()
         env["NOVAMIND_SERVER_MODE"] = "1"
+        if self.simulator_llm_config:
+            env["CEOBENCH_SIMULATOR_LLM_CONFIG"] = json.dumps(
+                self.simulator_llm_config, separators=(",", ":")
+            )
+            for field, value in self.simulator_llm_config.items():
+                if field.endswith("_api_key_env") and value and value in self._env_vars:
+                    env.setdefault(value, self._env_vars[value])
         return env
 
     def _launch_server(self):
@@ -690,6 +798,7 @@ __pycache__/
             'run_id': self.run_id,
             'model': self.model,
             'provider': self.provider,
+            'base_url': self.base_url,
             'reasoning_effort': self.reasoning_effort,
             'anthropic_fallback_model': self.anthropic_fallback_model,
             'seed': self.seed,
@@ -959,6 +1068,10 @@ __pycache__/
             max_turns_per_day=0,  # No limit
             response_callback=self._log_response,
             reasoning_effort=self.reasoning_effort,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            max_output_tokens=self.max_output_tokens,
+            timeout_seconds=self.timeout_seconds,
             tool_result_callback=self._log_tool_result,
             workspace_path=self.agent_workspace,
             total_days=self.total_days,
@@ -977,7 +1090,16 @@ __pycache__/
             'run_id': self.run_id,
             'model': self.model,
             'provider': self.provider,
+            'base_url': self.base_url,
             'reasoning_effort': self.reasoning_effort,
+            'temperature': self.temperature,
+            'top_p': self.top_p,
+            'max_output_tokens': self.max_output_tokens,
+            'timeout_seconds': self.timeout_seconds,
+            'input_cost_per_million': self.input_cost_per_million,
+            'output_cost_per_million': self.output_cost_per_million,
+            'api_key_env': self.api_key_env,
+            'api_key_required': self.api_key_required,
             'anthropic_fallback_model': self.anthropic_fallback_model,
             'seed': self.seed,
             'scenario': self.scenario,
@@ -987,6 +1109,8 @@ __pycache__/
             'api_server_port': self._server_port,
             'session_id': self._session_id,
             'label': self.label,
+            'config_source': str(self.config_source) if self.config_source else None,
+            'simulator_llm': self.simulator_llm_config,
             'public_dir_override': os.environ.get('NOVAMIND_PUBLIC_DIR') or None,
         }
         with open(self.workspace_dir / "config.json", 'w') as f:
@@ -1388,44 +1512,100 @@ __pycache__/
 def main():
     import argparse
 
-    default_config = BenchmarkConfig()
     parser = argparse.ArgumentParser(description="Run bash agent for SaaS Bench")
+    parser.add_argument("--config", type=Path, required=True,
+                        help="TOML file containing explicit experiment and model configuration")
     parser.add_argument("--model", default=None,
-                        help=f"Model name (default: BenchmarkConfig.agent_llm_model={default_config.agent_llm_model})")
+                        help="Override the decision-agent model from TOML")
     parser.add_argument("--provider", default=None,
                         choices=["openai", "xai", "google", "anthropic", "bedrock", "modal", "together", "ai_sandbox"],
-                        help=f"API provider (default: BenchmarkConfig.agent_llm_provider={default_config.agent_llm_provider})")
+                        help="Override the decision-agent provider from TOML")
     parser.add_argument("--base-url", help="Custom API base URL")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--scenario", default="default", help="Scenario name")
-    parser.add_argument("--days", type=int, default=3650, help="Total simulation days")
+    parser.add_argument("--seed", type=int, help="Random seed")
+    parser.add_argument("--scenario", help="Scenario name")
+    parser.add_argument("--days", type=int, help="Total simulation days")
+    parser.add_argument("--initial-cash", type=float, help="Initial cash")
     parser.add_argument("--workspace", type=Path, help="Workspace base directory")
     parser.add_argument("--quiet", action="store_true", help="Suppress verbose output")
     parser.add_argument("--reasoning-effort",
                         choices=["none", "low", "medium", "high", "xhigh", "max"],
-                        help="Reasoning effort for reasoning models "
-                             f"(default: BenchmarkConfig.agent_llm_reasoning_effort={default_config.agent_llm_reasoning_effort})")
+                        help="Reasoning effort for reasoning models (default: omitted)")
+    parser.add_argument("--temperature", type=float,
+                        help="Sampling temperature forwarded to the model (default: omitted)")
+    parser.add_argument("--top-p", type=float,
+                        help="Nucleus sampling probability forwarded to the model (default: omitted)")
+    parser.add_argument("--max-output-tokens", type=int,
+                        help="Maximum output tokens for each decision-agent call")
+    parser.add_argument("--timeout-seconds", type=float,
+                        help="Timeout for each decision-agent API call")
     parser.add_argument("--continue-from", type=Path,
                         help="Path to previous run directory to resume from")
     parser.add_argument("--api-key", help="API key (overrides .env and environment)")
+    parser.add_argument("--api-key-env",
+                        help="Environment variable containing the decision-agent API key")
     parser.add_argument("--label",
                         help="Variant tag stored in config.json and shown on the dashboard "
                              "(e.g. 'leads_x1.25'). Lets multiple config variants be "
                              "distinguished without forking the run_id scheme.")
     args = parser.parse_args()
 
+    file_config = load_experiment_config(args.config)
+    experiment = file_config.experiment
+    decision = file_config.decision_agent
+    resolved_provider = args.provider or decision.provider
+    provider_was_overridden = args.provider is not None and args.provider != decision.provider
+    resolved_base_url = args.base_url
+    if resolved_base_url is None:
+        resolved_base_url = (
+            default_base_url(resolved_provider)
+            if provider_was_overridden
+            else decision.base_url
+        )
+    resolved_api_key_env = args.api_key_env
+    if resolved_api_key_env is None:
+        resolved_api_key_env = (
+            default_api_key_env(resolved_provider)
+            if provider_was_overridden
+            else decision.api_key_env
+        )
+
     runner = BashAgentRunner(
-        model=args.model,
-        provider=args.provider,
-        base_url=args.base_url,
+        model=args.model or decision.model,
+        provider=resolved_provider,
+        base_url=resolved_base_url,
         api_key=args.api_key,
-        seed=args.seed,
-        scenario=args.scenario,
-        total_days=args.days,
-        workspace_base=args.workspace,
-        reasoning_effort=args.reasoning_effort,
+        api_key_env=resolved_api_key_env,
+        api_key_required=decision.api_key_required,
+        seed=args.seed if args.seed is not None else experiment.seed,
+        scenario=args.scenario or experiment.scenario,
+        total_days=args.days if args.days is not None else experiment.days,
+        initial_cash=(
+            args.initial_cash if args.initial_cash is not None else experiment.initial_cash
+        ),
+        workspace_base=args.workspace or Path(experiment.workspace),
+        reasoning_effort=(
+            args.reasoning_effort
+            if args.reasoning_effort is not None
+            else decision.reasoning_effort
+        ),
+        temperature=args.temperature if args.temperature is not None else decision.temperature,
+        top_p=args.top_p if args.top_p is not None else decision.top_p,
+        max_output_tokens=(
+            args.max_output_tokens
+            if args.max_output_tokens is not None
+            else decision.max_output_tokens
+        ),
+        timeout_seconds=(
+            args.timeout_seconds
+            if args.timeout_seconds is not None
+            else decision.timeout_seconds
+        ),
+        input_cost_per_million=decision.input_cost_per_million,
+        output_cost_per_million=decision.output_cost_per_million,
+        simulator_llm_config=file_config.simulator_overrides(),
+        config_source=args.config,
         continue_from=args.continue_from,
-        label=args.label,
+        label=args.label if args.label is not None else experiment.label,
     )
 
     result = runner.run(verbose=not args.quiet)

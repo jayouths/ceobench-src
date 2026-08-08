@@ -45,9 +45,30 @@ from saas_bench.docs_generator import initialize_workspace
 _SIMULATOR_LLM_CONFIG_FIELDS = (
     "social_post_llm_provider",
     "social_post_llm_model",
+    "social_post_llm_base_url",
+    "social_post_llm_api_key_env",
+    "social_post_llm_api_key_required",
+    "social_post_llm_reasoning_effort",
+    "social_post_llm_temperature",
+    "social_post_llm_top_p",
+    "social_post_llm_max_tokens",
+    "social_post_llm_timeout_seconds",
+    "social_post_llm_input_cost_per_million",
+    "social_post_llm_output_cost_per_million",
     "enterprise_llm_provider",
     "enterprise_llm_model",
+    "enterprise_llm_base_url",
+    "enterprise_llm_api_key_env",
+    "enterprise_llm_api_key_required",
+    "enterprise_llm_reasoning_effort",
+    "enterprise_llm_temperature",
+    "enterprise_llm_top_p",
+    "enterprise_llm_max_tokens",
+    "enterprise_llm_timeout_seconds",
+    "enterprise_llm_input_cost_per_million",
+    "enterprise_llm_output_cost_per_million",
 )
+_SIMULATOR_LLM_CONFIG_ENV = "CEOBENCH_SIMULATOR_LLM_CONFIG"
 
 
 def _sessions_dir(base: Path) -> Path:
@@ -126,55 +147,94 @@ def _resolve_session(base: Path, session_id: Optional[str]) -> str:
 def _apply_simulator_llm_config(config: BenchmarkConfig) -> dict:
     """Validate and serialize simulator-side LLM provider/model config."""
     valid_providers = {"bedrock", "anthropic", "openai"}
-    for attr in ("social_post_llm_provider", "enterprise_llm_provider"):
-        provider = getattr(config, attr)
+    for prefix in ("social_post_llm", "enterprise_llm"):
+        provider = getattr(config, f"{prefix}_provider")
         if provider not in valid_providers:
-            print(f"Error: invalid simulator LLM provider for {attr}: {provider!r}", file=sys.stderr)
+            print(f"Error: invalid simulator LLM provider for {prefix}: {provider!r}", file=sys.stderr)
             sys.exit(1)
-
-    if (
-        config.social_post_llm_provider == "anthropic"
-        or config.enterprise_llm_provider == "anthropic"
-    ) and not os.environ.get("ANTHROPIC_API_KEY"):
-        print(
-            "Error: simulator Anthropic provider requires ANTHROPIC_API_KEY. "
-            "It does not use agent-only credentials such as --api-key.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    if (
-        config.social_post_llm_provider == "openai"
-        or config.enterprise_llm_provider == "openai"
-    ) and not os.environ.get("OPENAI_API_KEY"):
-        print(
-            "Error: simulator OpenAI provider requires OPENAI_API_KEY. "
-            "It does not use agent-only credentials such as --api-key.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        if not getattr(config, f"{prefix}_model"):
+            print(f"Error: simulator model is empty for {prefix}", file=sys.stderr)
+            sys.exit(1)
+        temperature = getattr(config, f"{prefix}_temperature")
+        top_p = getattr(config, f"{prefix}_top_p")
+        max_tokens = getattr(config, f"{prefix}_max_tokens")
+        timeout = getattr(config, f"{prefix}_timeout_seconds")
+        if temperature is not None and not 0 <= temperature <= 2:
+            print(f"Error: invalid temperature for {prefix}: {temperature}", file=sys.stderr)
+            sys.exit(1)
+        if top_p is not None and not 0 <= top_p <= 1:
+            print(f"Error: invalid top_p for {prefix}: {top_p}", file=sys.stderr)
+            sys.exit(1)
+        if max_tokens <= 0 or timeout <= 0:
+            print(f"Error: max_tokens and timeout must be positive for {prefix}", file=sys.stderr)
+            sys.exit(1)
+        for suffix in ("input_cost_per_million", "output_cost_per_million"):
+            price = getattr(config, f"{prefix}_{suffix}")
+            if price is not None and price < 0:
+                print(f"Error: {suffix} must be non-negative for {prefix}", file=sys.stderr)
+                sys.exit(1)
+        input_price = getattr(config, f"{prefix}_input_cost_per_million")
+        output_price = getattr(config, f"{prefix}_output_cost_per_million")
+        if (input_price is None) != (output_price is None):
+            print(f"Error: input and output costs must be configured together for {prefix}", file=sys.stderr)
+            sys.exit(1)
+        if provider in {"openai", "anthropic"}:
+            api_key_env = getattr(config, f"{prefix}_api_key_env")
+            api_key_required = getattr(config, f"{prefix}_api_key_required")
+            if api_key_required and (not api_key_env or not os.environ.get(api_key_env)):
+                print(
+                    f"Error: {prefix} provider {provider!r} requires environment "
+                    f"variable {api_key_env!r}.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     return {field: getattr(config, field) for field in _SIMULATOR_LLM_CONFIG_FIELDS}
+
+
+def _apply_simulator_llm_env_overrides(config: BenchmarkConfig) -> None:
+    raw = os.environ.get(_SIMULATOR_LLM_CONFIG_ENV)
+    if not raw:
+        return
+    try:
+        overrides = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"Error: invalid {_SIMULATOR_LLM_CONFIG_ENV}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    unknown = sorted(set(overrides) - set(_SIMULATOR_LLM_CONFIG_FIELDS))
+    if unknown:
+        print(f"Error: unknown simulator LLM settings: {', '.join(unknown)}", file=sys.stderr)
+        sys.exit(1)
+    for field, value in overrides.items():
+        setattr(config, field, value)
 
 
 def _restore_simulator_llm_config(config: BenchmarkConfig, meta: dict) -> None:
     simulator_llm = meta.get("simulator_llm") or {}
     for attr in _SIMULATOR_LLM_CONFIG_FIELDS:
-        value = simulator_llm.get(attr)
-        if value:
-            setattr(config, attr, value)
+        if attr in simulator_llm:
+            setattr(config, attr, simulator_llm[attr])
 
 
-def _create_simulator_openai_client(config: BenchmarkConfig):
-    if (
-        config.social_post_llm_provider != "openai"
-        and config.enterprise_llm_provider != "openai"
-    ):
+def _create_simulator_openai_client(config: BenchmarkConfig, prefix: str):
+    if getattr(config, f"{prefix}_provider") != "openai":
         return None
 
     from openai import OpenAI
 
-    return OpenAI()
+    api_key_env = getattr(config, f"{prefix}_api_key_env")
+    api_key_required = getattr(config, f"{prefix}_api_key_required")
+    api_key = os.environ.get(api_key_env) if api_key_env else None
+    if not api_key_required:
+        api_key = api_key or "not-required"
+    kwargs = {
+        "api_key": api_key,
+        "timeout": getattr(config, f"{prefix}_timeout_seconds"),
+    }
+    base_url = getattr(config, f"{prefix}_base_url")
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAI(**kwargs)
 
 
 # =========================================================================
@@ -197,6 +257,7 @@ def cmd_new_session(args, base: Path):
         total_days=total_days,
         initial_cash=args.cash,
     )
+    _apply_simulator_llm_env_overrides(config)
     simulator_llm = _apply_simulator_llm_config(config)
 
     # Initialize database in memory (never writes plain SQLite to disk)
@@ -204,7 +265,8 @@ def cmd_new_session(args, base: Path):
 
     # Initialize simulator with customer simulator
     customer_sim = CustomerSimulator(
-        client=_create_simulator_openai_client(config),
+        social_openai_client=_create_simulator_openai_client(config, "social_post_llm"),
+        enterprise_openai_client=_create_simulator_openai_client(config, "enterprise_llm"),
         conn=conn,
         config=config,
     )
@@ -290,7 +352,8 @@ def cmd_start_server(args, base: Path):
     meta["simulator_llm"] = _apply_simulator_llm_config(config)
 
     customer_sim = CustomerSimulator(
-        client=_create_simulator_openai_client(config),
+        social_openai_client=_create_simulator_openai_client(config, "social_post_llm"),
+        enterprise_openai_client=_create_simulator_openai_client(config, "enterprise_llm"),
         conn=conn,
         config=config,
     )

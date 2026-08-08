@@ -122,16 +122,33 @@ EVENT_DESCRIPTION_VARIANTS = {
 }
 
 
-def _create_bedrock_client(config: BenchmarkConfig):
+def _create_bedrock_client(config: BenchmarkConfig, prefix: str):
     """Create an AnthropicBedrock client for Bedrock API calls."""
     from anthropic import AnthropicBedrock
-    return AnthropicBedrock(aws_region=config.bedrock_region)
+    return AnthropicBedrock(
+        aws_region=config.bedrock_region,
+        timeout=getattr(config, f"{prefix}_timeout_seconds"),
+    )
 
 
-def _create_anthropic_client(config: BenchmarkConfig):
-    """Create a direct Anthropic API client. Reads ANTHROPIC_API_KEY from env."""
+def _create_anthropic_client(config: BenchmarkConfig, prefix: str):
+    """Create a role-specific direct Anthropic API client."""
+    import os
     from anthropic import Anthropic
-    return Anthropic()
+
+    api_key_env = getattr(config, f"{prefix}_api_key_env")
+    api_key_required = getattr(config, f"{prefix}_api_key_required")
+    api_key = os.environ.get(api_key_env) if api_key_env else None
+    if not api_key_required:
+        api_key = api_key or "not-required"
+    kwargs = {
+        "api_key": api_key,
+        "timeout": getattr(config, f"{prefix}_timeout_seconds"),
+    }
+    base_url = getattr(config, f"{prefix}_base_url")
+    if base_url:
+        kwargs["base_url"] = base_url
+    return Anthropic(**kwargs)
 
 
 @dataclass
@@ -145,6 +162,13 @@ class CustomerLLMResponse:
     output_tokens: int = 0
 
 
+def _optional_reasoning(effort: Optional[str]) -> Dict[str, Any]:
+    """Return a Responses API reasoning argument only when explicitly set."""
+    if effort is None:
+        return {}
+    return {"reasoning": {"effort": effort}}
+
+
 class CustomerSimulator:
     """LLM-based customer simulation using Bedrock Claude models.
 
@@ -153,32 +177,65 @@ class CustomerSimulator:
     Falls back to OpenAI if provider is set to "openai" in config.
     """
 
-    def __init__(self, client: OpenAI, conn: sqlite3.Connection, config: BenchmarkConfig):
-        self.client = client  # OpenAI client (fallback / legacy)
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        config: BenchmarkConfig,
+        social_openai_client: Optional[OpenAI] = None,
+        enterprise_openai_client: Optional[OpenAI] = None,
+        client: Optional[OpenAI] = None,
+    ):
+        # `client` remains as a compatibility fallback for direct callers.
+        self.social_openai_client = social_openai_client or client
+        self.enterprise_openai_client = enterprise_openai_client or client
+        self.client = self.social_openai_client or self.enterprise_openai_client
         self.conn = conn
         self.config = config
         self.model = config.agent_llm_model  # Fallback model (used when provider != bedrock)
-        self.reasoning_effort = config.agent_llm_reasoning_effort
         self.event_logger = None  # Optional event logger
         self.current_day = 0  # Track current day for logging
 
         # Initialize Anthropic-compatible clients lazily (only when needed)
-        self._bedrock_client = None
-        self._anthropic_client = None
+        self._social_bedrock_client = None
+        self._enterprise_bedrock_client = None
+        self._social_anthropic_client = None
+        self._enterprise_anthropic_client = None
 
     @property
-    def bedrock_client(self):
-        """Lazy-initialize the AnthropicBedrock client (AWS Bedrock)."""
-        if self._bedrock_client is None:
-            self._bedrock_client = _create_bedrock_client(self.config)
-        return self._bedrock_client
+    def social_bedrock_client(self):
+        """Lazy-initialize the social-post AnthropicBedrock client."""
+        if self._social_bedrock_client is None:
+            self._social_bedrock_client = _create_bedrock_client(
+                self.config, "social_post_llm"
+            )
+        return self._social_bedrock_client
 
     @property
-    def anthropic_client(self):
-        """Lazy-initialize the direct Anthropic API client."""
-        if self._anthropic_client is None:
-            self._anthropic_client = _create_anthropic_client(self.config)
-        return self._anthropic_client
+    def enterprise_bedrock_client(self):
+        """Lazy-initialize the enterprise AnthropicBedrock client."""
+        if self._enterprise_bedrock_client is None:
+            self._enterprise_bedrock_client = _create_bedrock_client(
+                self.config, "enterprise_llm"
+            )
+        return self._enterprise_bedrock_client
+
+    @property
+    def social_anthropic_client(self):
+        """Lazy-initialize the social-post Anthropic client."""
+        if self._social_anthropic_client is None:
+            self._social_anthropic_client = _create_anthropic_client(
+                self.config, "social_post_llm"
+            )
+        return self._social_anthropic_client
+
+    @property
+    def enterprise_anthropic_client(self):
+        """Lazy-initialize the enterprise Anthropic client."""
+        if self._enterprise_anthropic_client is None:
+            self._enterprise_anthropic_client = _create_anthropic_client(
+                self.config, "enterprise_llm"
+            )
+        return self._enterprise_anthropic_client
 
     @property
     def social_post_client(self):
@@ -191,12 +248,104 @@ class CustomerSimulator:
         """
         provider = self.config.social_post_llm_provider
         if provider == "bedrock":
-            return self.bedrock_client
+            return self.social_bedrock_client
         if provider == "anthropic":
-            return self.anthropic_client
+            return self.social_anthropic_client
         raise ValueError(
             f"social_post_client only supports 'bedrock' or 'anthropic'; got {provider!r}. "
-            f"For OpenAI, dispatch via self.client.responses.create()."
+            f"For OpenAI, dispatch via self.social_openai_client.responses.create()."
+        )
+
+    @property
+    def enterprise_client(self):
+        provider = self.config.enterprise_llm_provider
+        if provider == "bedrock":
+            return self.enterprise_bedrock_client
+        if provider == "anthropic":
+            return self.enterprise_anthropic_client
+        raise ValueError(
+            f"enterprise_client only supports 'bedrock' or 'anthropic'; got {provider!r}."
+        )
+
+    @staticmethod
+    def _optional_sampling(temperature: Optional[float], top_p: Optional[float]) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if temperature is not None:
+            params["temperature"] = temperature
+        if top_p is not None:
+            params["top_p"] = top_p
+        return params
+
+    def create_social_response(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        task_max_tokens: Optional[int] = None,
+    ):
+        """Call the configured social LLM with one effective parameter path."""
+        config = self.config
+        max_tokens = config.social_post_llm_max_tokens
+        if task_max_tokens is not None:
+            max_tokens = min(max_tokens, task_max_tokens)
+        sampling = self._optional_sampling(
+            config.social_post_llm_temperature,
+            config.social_post_llm_top_p,
+        )
+        if config.social_post_llm_provider in ("bedrock", "anthropic"):
+            return self.social_post_client.messages.create(
+                model=config.social_post_llm_model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+                **sampling,
+            )
+        if self.social_openai_client is None:
+            raise RuntimeError("social OpenAI client is not configured")
+        return self.social_openai_client.responses.create(
+            model=config.social_post_llm_model,
+            input=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_output_tokens=max_tokens,
+            **sampling,
+            **_optional_reasoning(config.social_post_llm_reasoning_effort),
+        )
+
+    def create_enterprise_response(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        task_max_tokens: Optional[int] = None,
+    ):
+        """Call the configured enterprise LLM with one effective parameter path."""
+        config = self.config
+        max_tokens = config.enterprise_llm_max_tokens
+        if task_max_tokens is not None:
+            max_tokens = min(max_tokens, task_max_tokens)
+        sampling = self._optional_sampling(
+            config.enterprise_llm_temperature,
+            config.enterprise_llm_top_p,
+        )
+        if config.enterprise_llm_provider in ("bedrock", "anthropic"):
+            return self.enterprise_client.messages.create(
+                model=config.enterprise_llm_model,
+                max_tokens=max_tokens,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+                **sampling,
+            )
+        if self.enterprise_openai_client is None:
+            raise RuntimeError("enterprise OpenAI client is not configured")
+        return self.enterprise_openai_client.responses.create(
+            model=config.enterprise_llm_model,
+            input=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_output_tokens=max_tokens,
+            **sampling,
+            **_optional_reasoning(config.enterprise_llm_reasoning_effort),
         )
 
     def set_event_logger(self, event_logger):
@@ -207,25 +356,51 @@ class CustomerSimulator:
         """Set current day for logging purposes."""
         self.current_day = day
 
-    def _calculate_cost(self, input_tokens: int, output_tokens: int, model: str = None) -> float:
+    def _calculate_cost(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        model: str = None,
+        purpose: Optional[str] = None,
+    ) -> float:
         """Calculate cost based on model used."""
         used_model = model or self.model
+        if purpose in {"customer_negotiation", "customer_initial_outreach"}:
+            input_price = self.config.enterprise_llm_input_cost_per_million
+            output_price = self.config.enterprise_llm_output_cost_per_million
+        else:
+            input_price = self.config.social_post_llm_input_cost_per_million
+            output_price = self.config.social_post_llm_output_cost_per_million
+        if input_price is not None and output_price is not None:
+            return (
+                input_tokens * input_price / 1_000_000
+                + output_tokens * output_price / 1_000_000
+            )
         if 'haiku' in used_model:
             input_cost = input_tokens * self.config.bedrock_haiku_input_cost_per_1k / 1000
             output_cost = output_tokens * self.config.bedrock_haiku_output_cost_per_1k / 1000
         elif 'sonnet' in used_model:
             input_cost = input_tokens * self.config.bedrock_sonnet_input_cost_per_1k / 1000
             output_cost = output_tokens * self.config.bedrock_sonnet_output_cost_per_1k / 1000
-        else:
-            # Fallback to OpenAI/GPT pricing
+        elif used_model and 'gpt-5.2' in used_model:
             input_cost = input_tokens * self.config.gpt52_medium_thinking_input_cost_per_1k / 1000
             output_cost = output_tokens * self.config.gpt52_medium_thinking_output_cost_per_1k / 1000
+        else:
+            raise ValueError(
+                f"No token pricing configured for model {used_model!r}; "
+                "set input_cost_per_million and output_cost_per_million"
+            )
         return input_cost + output_cost
 
     def _log_cost(self, day: int, purpose: str, input_tokens: int, output_tokens: int, model: str = None):
         """Log API cost to database and event logger."""
         used_model = model or self.model
-        cost = self._calculate_cost(input_tokens, output_tokens, model=used_model)
+        cost = self._calculate_cost(
+            input_tokens,
+            output_tokens,
+            model=used_model,
+            purpose=purpose,
+        )
         self.conn.execute("""
             INSERT INTO api_costs (day, model, purpose, input_tokens, output_tokens, cost_usd)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -494,8 +669,6 @@ Output ONLY the post text, nothing else."""
 
         social_model = self.config.social_post_llm_model
         social_provider = self.config.social_post_llm_provider
-        # V2.2: Use social_media_temperature (0.95) for higher creative variety
-        social_temperature = self.config.social_media_temperature
 
         # LLM-replay cache: when BOSSBENCH_LLM_REPLAY_DB is set, return cached
         # content from the source run instead of calling the live LLM.
@@ -509,32 +682,12 @@ Output ONLY the post text, nothing else."""
                 output_tokens=0,
             )
 
+        response = self.create_social_response(system_prompt, user_prompt)
         if social_provider in ("bedrock", "anthropic"):
-            # Bedrock or direct Anthropic — both share the .messages.create() API
-            response = self.social_post_client.messages.create(
-                model=social_model,
-                max_tokens=self.config.social_post_llm_max_tokens,
-                temperature=social_temperature,
-                system=system_prompt,
-                messages=[
-                    {"role": "user", "content": user_prompt}
-                ],
-            )
             post_text = response.content[0].text.strip()
             input_tokens = response.usage.input_tokens
             output_tokens = response.usage.output_tokens
         else:
-            # Fallback to OpenAI
-            print(f"[WARN] Social post using OpenAI fallback (provider={social_provider}, model={social_model}). Set social_post_llm_provider='bedrock' or 'anthropic' for Haiku 4.5.")
-            response = self.client.responses.create(
-                model=social_model,
-                reasoning={"effort": "low"},
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                max_output_tokens=1000,
-            )
             post_text = response.output_text.strip()
             input_tokens = response.usage.input_tokens
             output_tokens = response.usage.output_tokens
@@ -745,33 +898,12 @@ Output JSON:
         enterprise_provider = self.config.enterprise_llm_provider
 
         try:
+            response = self.create_enterprise_response(system_prompt, user_prompt)
             if enterprise_provider in ("bedrock", "anthropic"):
-                # Bedrock and direct Anthropic share the .messages.create() API.
-                client = self.bedrock_client if enterprise_provider == "bedrock" else self.anthropic_client
-                response = client.messages.create(
-                    model=enterprise_model,
-                    max_tokens=self.config.enterprise_llm_max_tokens,
-                    temperature=self.config.enterprise_llm_temperature,
-                    system=system_prompt,
-                    messages=[
-                        {"role": "user", "content": user_prompt}
-                    ],
-                )
                 response_text = response.content[0].text.strip()
                 input_tokens = response.usage.input_tokens
                 output_tokens = response.usage.output_tokens
             else:
-                # Fallback to OpenAI
-                print(f"[WARN] Negotiation response using OpenAI fallback (provider={enterprise_provider}, model={enterprise_model}). Set enterprise_llm_provider='bedrock' or 'anthropic' for Sonnet 4.5.")
-                response = self.client.responses.create(
-                    model=enterprise_model,
-                    reasoning={"effort": self.reasoning_effort},
-                    input=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    max_output_tokens=300
-                )
                 response_text = response.output_text.strip()
                 input_tokens = response.usage.input_tokens
                 output_tokens = response.usage.output_tokens
@@ -901,33 +1033,16 @@ Output ONLY the message text."""
         enterprise_provider = self.config.enterprise_llm_provider
 
         try:
+            response = self.create_enterprise_response(
+                system_prompt,
+                "Write your initial outreach message.",
+                task_max_tokens=150,
+            )
             if enterprise_provider in ("bedrock", "anthropic"):
-                # Bedrock and direct Anthropic share the .messages.create() API.
-                client = self.bedrock_client if enterprise_provider == "bedrock" else self.anthropic_client
-                response = client.messages.create(
-                    model=enterprise_model,
-                    max_tokens=150,
-                    temperature=self.config.enterprise_llm_temperature,
-                    system=system_prompt,
-                    messages=[
-                        {"role": "user", "content": "Write your initial outreach message."}
-                    ],
-                )
                 text = response.content[0].text.strip()
                 input_tokens = response.usage.input_tokens
                 output_tokens = response.usage.output_tokens
             else:
-                # Fallback to OpenAI
-                print(f"[WARN] Initial outreach using OpenAI fallback (provider={enterprise_provider}, model={enterprise_model}). Set enterprise_llm_provider='bedrock' or 'anthropic' for Sonnet 4.5.")
-                response = self.client.responses.create(
-                    model=enterprise_model,
-                    reasoning={"effort": self.reasoning_effort},
-                    input=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": "Write your initial outreach message."}
-                    ],
-                    max_output_tokens=150
-                )
                 text = response.output_text.strip()
                 input_tokens = response.usage.input_tokens
                 output_tokens = response.usage.output_tokens
