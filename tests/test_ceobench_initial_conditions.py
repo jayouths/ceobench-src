@@ -2,13 +2,74 @@
 
 import pytest
 
+from saas_bench.agents.bash_agent.agent import BashAgent
+from saas_bench.agents.bash_agent.run_test import BashAgentRunner
 from saas_bench.config import INITIAL_CUSTOMER_GROUPS
+from saas_bench.customer_llm import _optional_reasoning
 from saas_bench.database import (
     get_cash,
     get_global_state,
     get_group_info_level,
     get_undiscovered_groups,
 )
+
+
+def test_runner_preserves_reasoning_configuration():
+    omitted = BashAgentRunner(
+        model="test-model",
+        provider="openai",
+        base_url="http://localhost:11434/v1",
+        api_key="test",
+    )
+    disabled = BashAgentRunner(
+        model="test-model",
+        provider="openai",
+        base_url="http://localhost:11434/v1",
+        api_key="test",
+        reasoning_effort="none",
+    )
+
+    assert omitted.reasoning_effort is None
+    assert disabled.reasoning_effort == "none"
+    assert omitted.temperature is None
+    assert omitted.top_p is None
+
+
+def test_runner_preserves_sampling_configuration():
+    runner = BashAgentRunner(
+        model="test-model",
+        provider="openai",
+        base_url="http://localhost:11434/v1",
+        api_key="test",
+        temperature=0.6,
+        top_p=0.95,
+    )
+
+    assert runner.temperature == pytest.approx(0.6)
+    assert runner.top_p == pytest.approx(0.95)
+
+
+def test_simulator_reasoning_omits_only_unconfigured_value():
+    assert _optional_reasoning(None) == {}
+    assert _optional_reasoning("none") == {"reasoning": {"effort": "none"}}
+    assert _optional_reasoning("high") == {"reasoning": {"effort": "high"}}
+
+
+def test_bash_agent_routes_supported_endpoint_to_responses_api():
+    agent = BashAgent.__new__(BashAgent)
+    agent.use_anthropic = False
+    agent.supports_responses_api = True
+    agent._call_openai = lambda: "chat"
+    agent._call_openai_responses = lambda: "responses"
+
+    agent.reasoning_effort = None
+    assert agent._call_llm() == "responses"
+
+    agent.reasoning_effort = "none"
+    assert agent._call_llm() == "responses"
+
+    agent.supports_responses_api = False
+    assert agent._call_llm() == "chat"
 
 
 def test_initial_state_matches_benchmark_defaults(make_initialized_sim):

@@ -123,6 +123,7 @@ tests/*
 !tests/test_ceobench_customer_choice.py
 !tests/test_ceobench_group_research_and_insights.py
 !tests/test_ceobench_initial_conditions.py
+!tests/test_experiment_config.py
 !tests/test_ceobench_rnd_projects.py
 !tests/test_ceobench_segment_discovery.py
 tools/

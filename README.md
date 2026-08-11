@@ -144,7 +144,7 @@ runs the full 500-day loop with checkpointing and logging. The full process:
 **1. Install dependencies** (one-time):
 
 ```bash
-uv sync
+uv sync --frozen
 ```
 
 **2. Set provider credentials** in a `.env` file at the repo root. Which keys you
@@ -167,13 +167,8 @@ simulator does not receive the agent-only `--api-key`.
 **3. Run.** `public/` ships prebuilt, so there is no build step:
 
 ```bash
-uv run python -m saas_bench.agents.bash_agent.run_test \
-    --model us.anthropic.claude-sonnet-4-6 \
-    --provider bedrock \
-    --reasoning-effort max \
-    --seed 42 \
-    --days 500 \
-    --workspace bash_agent_runs
+uv run --frozen python -m saas_bench.agents.bash_agent.run_test \
+    --config experiments/full.toml
 ```
 
 **4. Output.** Each run lands at `bash_agent_runs/run_<id>/`: `world.nmdb`
