@@ -6,28 +6,27 @@ of simulation runs — viewing all tables, hidden columns, internal state.
 
 Usage:
     # Decode .nmdb to plain SQLite
-    uv run python scripts/decode_db.py sessions/<id>/world.nmdb -o decoded.db
+    uv run --frozen python scripts/decode_db.py sessions/<id>/world.nmdb -o decoded.db
 
     # Decode and dump all tables as JSON
-    uv run python scripts/decode_db.py sessions/<id>/world.nmdb --dump
+    uv run --frozen python scripts/decode_db.py sessions/<id>/world.nmdb --dump
 
     # Decode and dump specific tables
-    uv run python scripts/decode_db.py sessions/<id>/world.nmdb --dump --tables customer_state,ledger
+    uv run --frozen python scripts/decode_db.py sessions/<id>/world.nmdb --dump --tables customer_state,ledger
 
     # Decode and open interactive sqlite3 shell
-    uv run python scripts/decode_db.py sessions/<id>/world.nmdb --shell
+    uv run --frozen python scripts/decode_db.py sessions/<id>/world.nmdb --shell
 
     # Export all data as CSV files
-    uv run python scripts/decode_db.py sessions/<id>/world.nmdb --csv-dir output_csvs/
+    uv run --frozen python scripts/decode_db.py sessions/<id>/world.nmdb --csv-dir output_csvs/
 
     # Summary statistics
-    uv run python scripts/decode_db.py sessions/<id>/world.nmdb --summary
+    uv run --frozen python scripts/decode_db.py sessions/<id>/world.nmdb --summary
 """
 
 import argparse
 import csv
 import json
-import os
 import sqlite3
 import subprocess
 import sys

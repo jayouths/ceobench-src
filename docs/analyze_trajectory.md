@@ -22,7 +22,7 @@ compiled `saas_bench._embedded_key` module.
 **One-shot decrypt to plain SQLite:**
 
 ```bash
-uv run python scripts/decode_db.py <run_dir>/world.nmdb -o /tmp/world.db
+uv run --frozen python scripts/decode_db.py <run_dir>/world.nmdb -o /tmp/world.db
 sqlite3 /tmp/world.db ".tables"
 ```
 
