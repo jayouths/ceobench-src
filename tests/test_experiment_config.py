@@ -1,6 +1,9 @@
 import json
+import os
 import re
+import shutil
 import sqlite3
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +21,9 @@ from saas_bench.customer_llm import CustomerSimulator
 from saas_bench.database import add_api_cost, get_api_usage_summary
 from saas_bench.experiment_config import load_experiment_config
 from saas_bench.api_server import NovaMindAPIServer, _APIHandler
+from saas_bench import _public_cli
+from saas_bench.novamind_api import _client as novamind_client
+from saas_bench.novamind_api._transport import request_json
 from saas_bench.event_logger import EventLogger
 from saas_bench.server_entry import (
     _apply_simulator_llm_config,
@@ -938,6 +944,42 @@ def test_api_requests_fresh_snapshot_after_state_revision_changes():
     assert calls == [(7, True)]
 
 
+def test_api_server_serves_and_cleans_up_unix_socket():
+    socket_dir = Path(tempfile.mkdtemp(prefix="ceobench-test-"))
+    socket_path = socket_dir / "api.sock"
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=7))
+
+    server.start(unix_socket_path=socket_path)
+    try:
+        assert request_json("GET", "/health", socket_path=str(socket_path)) == {
+            "status": "ok"
+        }
+        assert request_json("GET", "/vars", socket_path=str(socket_path)) == {
+            "current_day": 7
+        }
+        assert socket_path.stat().st_mode & 0o777 == 0o600
+    finally:
+        server.stop()
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+    assert not socket_path.exists()
+
+
+def test_public_cli_and_sdk_prefer_unix_socket(monkeypatch):
+    socket_dir = Path(tempfile.mkdtemp(prefix="ceobench-test-"))
+    socket_path = socket_dir / "api.sock"
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=11))
+    server.start(unix_socket_path=socket_path)
+    monkeypatch.setenv("NOVAMIND_API_SOCKET", str(socket_path))
+    monkeypatch.setenv("NOVAMIND_API_PORT", "1")
+    try:
+        assert _public_cli._api_call(1, "GET", "/health") == {"status": "ok"}
+        assert novamind_client.get_vars() == {"current_day": 11}
+    finally:
+        server.stop()
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+
 def test_api_finalizes_completed_run_once_at_target_day():
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE ledger (amount REAL NOT NULL)")
@@ -1669,6 +1711,99 @@ def test_bwrap_mounts_uv_python_alias_target(tmp_path, monkeypatch):
         command[index:index + len(mount_pair)] == mount_pair
         for index in range(len(command) - len(mount_pair) + 1)
     )
+
+
+def test_bwrap_exposes_only_agent_api_socket_without_network(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    socket_dir = tmp_path / "socket"
+    workspace.mkdir()
+    socket_dir.mkdir()
+    socket_path = socket_dir / "api.sock"
+    socket_path.touch()
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/bwrap")
+
+    executor = BashAgentToolExecutor(workspace, api_socket_path=socket_path)
+    command = executor._build_bwrap_cmd(
+        "./novamind-operation status",
+        str(workspace),
+        {"PATH": "/usr/bin:/bin", "NOVAMIND_API_SOCKET": str(socket_path)},
+    )
+
+    assert "--share-net" not in command
+    socket_mount_index = command.index(str(socket_dir))
+    assert command[socket_mount_index - 1:socket_mount_index + 2] == [
+        "--ro-bind", str(socket_dir), "/run/novamind"
+    ]
+    socket_env_index = command.index("NOVAMIND_API_SOCKET")
+    assert command[socket_env_index + 1] == "/run/novamind/api.sock"
+
+
+def test_isolated_bash_agent_requires_bubblewrap(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    socket_path = tmp_path / "api.sock"
+    socket_path.touch()
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    executor = BashAgentToolExecutor(workspace, api_socket_path=socket_path)
+
+    with pytest.raises(RuntimeError, match="bubblewrap is required"):
+        executor._build_bwrap_cmd("true", str(workspace), {"PATH": "/usr/bin"})
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not Path("/proc").exists() or not shutil.which("bwrap"),
+    reason="requires Linux and bubblewrap",
+)
+def test_real_bwrap_allows_only_unix_socket_api(tmp_path):
+    workspace = tmp_path / "workspace"
+    shutil.copytree(PROJECT_ROOT / "public", workspace)
+    socket_dir = Path(tempfile.mkdtemp(prefix="ceobench-test-"))
+    socket_path = socket_dir / "api.sock"
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    server = NovaMindAPIServer(
+        tools=SimpleNamespace(current_day=13),
+        conn=conn,
+    )
+    server.start(unix_socket_path=socket_path)
+    try:
+        executor = BashAgentToolExecutor(workspace, api_socket_path=socket_path)
+
+        sdk_result = executor.execute(
+            "bash",
+            {"command": "./novamind-operation python-c 'import novamind_api as nm; print(nm.vars.current_day)'"},
+        )
+        cli_result = executor.execute(
+            "bash",
+            {"command": "./novamind-operation query 'SELECT 1 AS value'"},
+        )
+        internet_result = executor.execute(
+            "bash",
+            {"command": "python -c \"import socket; socket.create_connection(('1.1.1.1', 443), 1)\""},
+        )
+        tcp_result = executor.execute(
+            "bash",
+            {"command": f"python -c \"import socket; socket.create_connection(('127.0.0.1', {server.port}), 1)\""},
+        )
+        import_result = executor.execute(
+            "bash",
+            {"command": "python -c 'import saas_bench'"},
+        )
+        source_result = executor.execute(
+            "bash",
+            {"command": f"test -e {PROJECT_ROOT / 'src/saas_bench/simulation.py'}"},
+        )
+    finally:
+        server.stop()
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+    assert sdk_result.strip() == "13"
+    assert '"value": 1' in cli_result
+    assert "[exit code:" in internet_result
+    assert "[exit code:" in tcp_result
+    assert "is blocked inside the bash_agent sandbox" in import_result
+    assert "[exit code:" in source_result
 
 
 def test_file_tools_reject_sibling_path_with_workspace_prefix(tmp_path):

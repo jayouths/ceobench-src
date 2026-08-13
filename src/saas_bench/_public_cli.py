@@ -19,10 +19,13 @@ import signal
 import subprocess
 import sys
 import time
-import urllib.request
-import urllib.error
 import argparse
 from pathlib import Path
+
+try:
+    from _novamind_transport import HTTPTransportError, request_json
+except ModuleNotFoundError:  # Source-tree tests; zipapp uses the top-level module.
+    from saas_bench.novamind_api._transport import HTTPTransportError, request_json
 
 
 def _zipapp_path() -> Path:
@@ -94,7 +97,7 @@ def _get_latest_session() -> str:
 
 
 def _resolve_session(session_id: str = None) -> str:
-    if os.environ.get("NOVAMIND_API_PORT"):
+    if os.environ.get("NOVAMIND_API_SOCKET") or os.environ.get("NOVAMIND_API_PORT"):
         return "__env__"
     if session_id:
         return session_id
@@ -114,6 +117,9 @@ def _session_meta(session_id: str) -> dict:
 
 
 def _ensure_server_running(session_id: str) -> int:
+    # Agent 沙箱只获得 Socket，禁止在连接失败时自行启动或探测 TCP 服务。
+    if os.environ.get("NOVAMIND_API_SOCKET"):
+        return 0
     env_port = os.environ.get("NOVAMIND_API_PORT")
     if env_port:
         return int(env_port)
@@ -170,26 +176,17 @@ def _ensure_server_running(session_id: str) -> int:
 
 
 def _api_call(port: int, method: str, path: str, body: dict = None) -> dict:
-    url = f"http://127.0.0.1:{port}{path}"
-    data = json.dumps(body or {}).encode() if method == "POST" else None
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"} if data else {},
-        method=method,
-    )
     try:
-        with urllib.request.urlopen(req, timeout=1800) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body_bytes = e.read()
-        try:
-            return json.loads(body_bytes)
-        except Exception:
-            print(f"Error: HTTP {e.code}: {body_bytes.decode('utf-8', errors='replace')[:500]}", file=sys.stderr)
-            sys.exit(1)
-    except urllib.error.URLError as e:
-        print(f"Error: Failed to connect to server: {e}", file=sys.stderr)
+        return request_json(method, path, body if method in {"POST", "DELETE"} else None,
+                            timeout=1800, port=port)
+    except HTTPTransportError as exc:
+        if isinstance(exc.payload, dict):
+            return exc.payload
+        text = exc.body.decode('utf-8', errors='replace')[:500]
+        print(f"Error: HTTP {exc.status}: {text}", file=sys.stderr)
+        sys.exit(1)
+    except (ConnectionError, OSError, ValueError) as exc:
+        print(f"Error: Failed to connect to server: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -283,7 +280,8 @@ def _execute_python(session_id: str, port: int, code: str, source: str = "unknow
     PYTHONPATH in user scripts — that keeps ``saas_bench`` out of reach.
     """
     env = os.environ.copy()
-    env["NOVAMIND_API_PORT"] = str(port)
+    if not env.get("NOVAMIND_API_SOCKET"):
+        env["NOVAMIND_API_PORT"] = str(port)
 
     docs_dir = _base_dir() / "docs"
     if session_id == "__env__":
@@ -358,6 +356,7 @@ def cmd_status(args):
             meta = {"session_id": "__env__"}
         meta["server_running"] = True
         meta["server_port"] = int(os.environ.get("NOVAMIND_API_PORT", 0)) or None
+        meta["server_socket"] = bool(os.environ.get("NOVAMIND_API_SOCKET"))
         print(json.dumps(meta, indent=2))
         return
 

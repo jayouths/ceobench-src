@@ -1,11 +1,9 @@
 """HTTP client for communicating with the NovaMind API server."""
 
-import json
-import os
 import sys
-import urllib.request
-import urllib.error
 from typing import Any, Dict, Optional
+
+from ._transport import HTTPTransportError, request_json
 
 
 class NovaMindAPIError(Exception):
@@ -23,18 +21,17 @@ class _Vars:
         return data.get('current_day', 0)
 
 
-def _get_port() -> int:
-    """Get the API server port from environment."""
-    port_str = os.environ.get('NOVAMIND_API_PORT', '')
-    if not port_str:
-        raise NovaMindAPIError(
-            "NOVAMIND_API_PORT not set. Are you running inside a novamind-operation environment?"
-        )
-    return int(port_str)
-
-
-def _base_url() -> str:
-    return f"http://127.0.0.1:{_get_port()}"
+def _request(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Call the API through Unix Socket when available, otherwise localhost TCP."""
+    try:
+        return request_json(method, path, body)
+    except HTTPTransportError as exc:
+        if isinstance(exc.payload, dict):
+            raise NovaMindAPIError(exc.payload.get('error', f'HTTP {exc.status}'))
+        text = exc.body.decode('utf-8', errors='replace')[:500]
+        raise NovaMindAPIError(f"HTTP {exc.status}: {text}")
+    except (ConnectionError, OSError, ValueError) as exc:
+        raise NovaMindAPIError(f"Failed to connect to API server: {exc}")
 
 
 def call(tool_name: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -50,23 +47,7 @@ def call(tool_name: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     Raises:
         NovaMindAPIError: On failure (also prints to stderr)
     """
-    url = f"{_base_url()}/call"
-    payload = json.dumps({"tool": tool_name, "args": args or {}}).encode()
-
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={'Content-Type': 'application/json'},
-        method='POST',
-    )
-
-    try:
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read())
-    except urllib.error.URLError as e:
-        raise NovaMindAPIError(f"Failed to connect to API server: {e}")
-    except json.JSONDecodeError as e:
-        raise NovaMindAPIError(f"Invalid JSON response: {e}")
+    result = _request('POST', '/call', {"tool": tool_name, "args": args or {}})
 
     if not result.get('success', False):
         error_msg = result.get('error', 'Unknown error')
@@ -113,7 +94,7 @@ def next_week(predictions: Dict[str, Any] = None, rationale: str = None) -> Dict
             "upper": float(p["upper"]),
         }
 
-    body = json.dumps({
+    body = {
         "rationale": rationale,
         "predictions": {
             "cash_1wk":  _entry(predictions["cash_1wk"]),
@@ -121,29 +102,8 @@ def next_week(predictions: Dict[str, Any] = None, rationale: str = None) -> Dict
             "cash_12wk": _entry(predictions["cash_12wk"]),
             "cash_26wk": _entry(predictions["cash_26wk"]),
         },
-    }).encode('utf-8')
-
-    url = f"{_base_url()}/next-week"
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={'Content-Type': 'application/json'},
-        method='POST',
-    )
-
-    try:
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read()
-        try:
-            result = json.loads(body)
-            error_msg = result.get('error', f'HTTP {e.code}')
-        except Exception:
-            error_msg = f"HTTP {e.code}: {body.decode('utf-8', errors='replace')[:500]}"
-        raise NovaMindAPIError(error_msg)
-    except urllib.error.URLError as e:
-        raise NovaMindAPIError(f"Failed to connect to API server: {e}")
+    }
+    result = _request('POST', '/next-week', body)
 
     if not result.get('success', False):
         error_msg = result.get('error', 'Unknown error')
@@ -170,29 +130,7 @@ def query(sql: str) -> Dict[str, Any]:
     Raises:
         NovaMindAPIError: On failure (blocked query, syntax error, etc.)
     """
-    url = f"{_base_url()}/query"
-    payload = json.dumps({"sql": sql}).encode()
-
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={'Content-Type': 'application/json'},
-        method='POST',
-    )
-
-    try:
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read()
-        try:
-            result = json.loads(body)
-        except Exception:
-            raise NovaMindAPIError(f"Query failed: HTTP {e.code}")
-        error_msg = result.get('error', f'HTTP {e.code}')
-        raise NovaMindAPIError(error_msg)
-    except urllib.error.URLError as e:
-        raise NovaMindAPIError(f"Failed to connect to API server: {e}")
+    result = _request('POST', '/query', {"sql": sql})
 
     if not result.get('success', False):
         error_msg = result.get('error', 'Unknown error')
@@ -213,53 +151,22 @@ def query(sql: str) -> Dict[str, Any]:
 
 def get_vars() -> Dict[str, Any]:
     """Get simulator variables."""
-    url = f"{_base_url()}/vars"
-    req = urllib.request.Request(url, method='GET')
-
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
-    except urllib.error.URLError as e:
-        raise NovaMindAPIError(f"Failed to connect to API server: {e}")
+    return _request('GET', '/vars')
 
 
 def _post(path: str, body: Dict[str, Any] = None) -> Dict[str, Any]:
     """Generic POST to the API server."""
-    url = f"{_base_url()}{path}"
-    payload = json.dumps(body or {}).encode()
-    req = urllib.request.Request(url, data=payload,
-                                 headers={'Content-Type': 'application/json'},
-                                 method='POST')
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
-    except urllib.error.URLError as e:
-        raise NovaMindAPIError(f"POST {path} failed: {e}")
+    return _request('POST', path, body or {})
 
 
 def _get(path: str) -> Dict[str, Any]:
     """Generic GET from the API server."""
-    url = f"{_base_url()}{path}"
-    req = urllib.request.Request(url, method='GET')
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
-    except urllib.error.URLError as e:
-        raise NovaMindAPIError(f"GET {path} failed: {e}")
+    return _request('GET', path)
 
 
 def _delete(path: str, body: Dict[str, Any] = None) -> Dict[str, Any]:
     """Generic DELETE to the API server."""
-    url = f"{_base_url()}{path}"
-    payload = json.dumps(body or {}).encode()
-    req = urllib.request.Request(url, data=payload,
-                                 headers={'Content-Type': 'application/json'},
-                                 method='DELETE')
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
-    except urllib.error.URLError as e:
-        raise NovaMindAPIError(f"DELETE {path} failed: {e}")
+    return _request('DELETE', path, body or {})
 
 
 # Singleton vars instance

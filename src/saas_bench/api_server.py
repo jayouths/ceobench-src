@@ -1,8 +1,8 @@
 """HTTP JSON-RPC server for NovaMind API.
 
 Bridges the novamind_api Python library (running in a subprocess) to the
-AgentTools instance (running in the main runner process). Communication
-is via HTTP on localhost with a random OS-assigned port.
+AgentTools instance (running in the main runner process). The Runner uses
+localhost HTTP; an isolated Agent can use HTTP over a Unix Socket.
 """
 
 import json
@@ -10,6 +10,7 @@ import math
 import os
 import re
 import sqlite3
+import socketserver
 import sys
 import threading
 import traceback
@@ -27,6 +28,10 @@ _ORACLE_MODE: bool = os.environ.get("ORACLE_MODE") == "1"
 from .tools import AgentTools, ToolResult
 from .database import TABLE_DOCS
 from .environment import build_weekly_dashboard
+
+
+class _ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
 
 
 # ---- Hidden columns / tables (same policy as python_exec sandbox) ----
@@ -782,6 +787,9 @@ class NovaMindAPIServer:
         self.run_finalize_callback = run_finalize_callback
         self._httpd: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+        self._unix_httpd: Optional[_ThreadingUnixHTTPServer] = None
+        self._unix_thread: Optional[threading.Thread] = None
+        self.unix_socket_path: Optional[str] = None
         self.port: int = 0
         self._lock = threading.RLock()
         self._last_dashboard: str = ""
@@ -812,19 +820,43 @@ class NovaMindAPIServer:
                 # Best-effort: some sqlite builds may not support it.
                 pass
 
-    def start(self):
-        """Start the HTTP server in a background thread."""
+    def start(self, unix_socket_path=None):
+        """Start localhost TCP and, when requested, a Unix Socket endpoint."""
         self._httpd = ThreadingHTTPServer(('127.0.0.1', 0), _APIHandler)
         self._httpd._api_server = self
         self.port = self._httpd.server_address[1]
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
 
+        if unix_socket_path:
+            socket_path = os.fspath(unix_socket_path)
+            if os.path.exists(socket_path):
+                os.unlink(socket_path)
+            self._unix_httpd = _ThreadingUnixHTTPServer(socket_path, _APIHandler)
+            self._unix_httpd._api_server = self
+            os.chmod(socket_path, 0o600)
+            self.unix_socket_path = socket_path
+            self._unix_thread = threading.Thread(
+                target=self._unix_httpd.serve_forever, daemon=True
+            )
+            self._unix_thread.start()
+
     def stop(self):
         """Stop the HTTP server."""
         if self._httpd:
             self._httpd.shutdown()
+            self._httpd.server_close()
             self._httpd = None
+        if self._unix_httpd:
+            self._unix_httpd.shutdown()
+            self._unix_httpd.server_close()
+            self._unix_httpd = None
+        if self.unix_socket_path:
+            try:
+                os.unlink(self.unix_socket_path)
+            except FileNotFoundError:
+                pass
+            self.unix_socket_path = None
 
     def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> Any:
         """Execute a tool call with thread safety."""

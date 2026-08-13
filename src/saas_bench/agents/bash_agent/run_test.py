@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time as _time
 import urllib.request
 import urllib.error
@@ -292,6 +293,8 @@ class BashAgentRunner:
         self.tool_executor = None
         self._server_proc = None
         self._server_port = None
+        self._server_socket_dir = None
+        self._server_socket_path = None
         self._session_id = None
 
     # =========================================================================
@@ -724,12 +727,16 @@ __pycache__/
         # deadlocks every subsequent /call. (run 27c000a5 d105 hang.)
         self._server_stderr_path = self.logs_dir / "api_server_stderr.log"
         self._server_stderr_file = open(self._server_stderr_path, "ab", buffering=0)
+        # 短路径避免 Unix Socket 的系统长度限制；目录不放进 Agent 可写工作区。
+        self._server_socket_dir = Path(tempfile.mkdtemp(prefix=f"ceobench-{self.run_id}-"))
+        self._server_socket_path = self._server_socket_dir / "api.sock"
         self._server_proc = subprocess.Popen(
             [
                 sys.executable, str(zipapp_path),
                 "--base", str(self.agent_workspace),
                 "start-server",
                 "--session", self._session_id,
+                "--unix-socket", str(self._server_socket_path),
             ],
             stdout=subprocess.PIPE,
             stderr=self._server_stderr_file,
@@ -747,6 +754,8 @@ __pycache__/
 
         server_info = json.loads(first_line)
         self._server_port = server_info["port"]
+        if server_info.get("unix_socket") != str(self._server_socket_path):
+            raise RuntimeError("Server did not expose the requested Agent API socket")
         print(f"  Server started: port={self._server_port}, pid={server_info['pid']}")
 
         # Wait for health check
@@ -771,6 +780,11 @@ __pycache__/
                 server_proc.wait()
             self._server_proc = None
         self._server_port = None
+        socket_dir = getattr(self, "_server_socket_dir", None)
+        if socket_dir:
+            shutil.rmtree(socket_dir, ignore_errors=True)
+        self._server_socket_dir = None
+        self._server_socket_path = None
         f = getattr(self, "_server_stderr_file", None)
         if f is not None:
             try:
@@ -1510,11 +1524,9 @@ __pycache__/
             self._launch_server_from_prepared_checkpoint()
 
             # ── Step 3: Create tool executor + agent ──
-            # Pass NOVAMIND_API_PORT so the CLI (./novamind-operation) connects to
-            # the already-running server instead of trying to start a new one.
             self.tool_executor = BashAgentToolExecutor(
                 workspace_path=self.agent_workspace,
-                env={"NOVAMIND_API_PORT": str(self._server_port)},
+                api_socket_path=self._server_socket_path,
             )
 
             tool_descriptions = get_bash_agent_tool_descriptions()

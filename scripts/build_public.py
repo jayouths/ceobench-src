@@ -67,6 +67,7 @@ _ENGINE_MODULES = [
 _ENGINE_API_MODULES = [
     "__init__",
     "_client",
+    "_transport",
     "analytics",
     "enterprise",
     "infrastructure",
@@ -206,6 +207,7 @@ def _build_zipapp():
         staging/
             __main__.py                     # entry point (HASHSEED + dispatch)
             _public_cli.pyc                 # user-facing CLI body
+            _novamind_transport.pyc         # local TCP/Unix Socket transport
             saas_bench/                     # engine (compiled to .pyc)
                 *.pyc
                 novamind_api/*.pyc
@@ -221,6 +223,11 @@ def _build_zipapp():
         # Compile _public_cli.py → _public_cli.pyc at the archive root
         src_cli = SRC_DIR / "_public_cli.py"
         _compile_pyc(src_cli, staging / "_public_cli.pyc", "_public_cli.py")
+        _compile_pyc(
+            SRC_DIR / "novamind_api" / "_transport.py",
+            staging / "_novamind_transport.pyc",
+            "_novamind_transport.py",
+        )
 
         # Build saas_bench/ package inside the archive
         engine_dir = staging / "saas_bench"

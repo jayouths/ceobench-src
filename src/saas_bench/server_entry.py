@@ -472,7 +472,7 @@ def cmd_start_server(args, base: Path):
         checkpoint_persist_callback=_persist_checkpoint,
         run_finalize_callback=_finalize_run,
     )
-    api_server.start()
+    api_server.start(unix_socket_path=args.unix_socket)
 
     # Set API port on tools so Python sandbox routes queries through HTTP
     tools.api_port = api_server.port
@@ -494,6 +494,8 @@ def cmd_start_server(args, base: Path):
         "pid": os.getpid(),
         "status": "running",
     }
+    if api_server.unix_socket_path:
+        info["unix_socket"] = api_server.unix_socket_path
     print(json.dumps(info))
     sys.stdout.flush()
 
@@ -651,6 +653,8 @@ def main():
     # start-server
     p_start = subparsers.add_parser("start-server", help="Start API server for a session")
     p_start.add_argument("--session", type=str, default=None, help="Session ID (default: latest)")
+    p_start.add_argument("--unix-socket", type=str, default=None,
+                         help="Optional Unix Socket path for the Agent API")
 
     # stop-server
     p_stop = subparsers.add_parser("stop-server", help="Stop a running API server")

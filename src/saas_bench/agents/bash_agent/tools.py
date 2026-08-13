@@ -202,17 +202,19 @@ class BashAgentToolExecutor:
     """Executes bash_agent tools within a working directory."""
 
     def __init__(self, workspace_path: Path, env: Optional[Dict[str, str]] = None,
-                 bash_timeout: int = 1200):
+                 bash_timeout: int = 1200, api_socket_path: Optional[Path] = None):
         """Initialize the tool executor.
 
         Args:
             workspace_path: Agent's working directory.
             env: Extra environment variables for bash commands.
             bash_timeout: Timeout in seconds for bash commands (default 20 min).
+            api_socket_path: Host-side simulator Socket exposed read-only in bwrap.
         """
         self.workspace_path = workspace_path
         self.extra_env = env or {}
         self.bash_timeout = bash_timeout
+        self.api_socket_path = Path(api_socket_path) if api_socket_path else None
 
     def execute(self, tool_name: str, args: Dict[str, Any]) -> str:
         """Execute a tool and return the result string."""
@@ -277,6 +279,9 @@ class BashAgentToolExecutor:
         import shutil
         bwrap = shutil.which('bwrap')
         if not bwrap:
+            if self.api_socket_path:
+                # 主实验要求断网隔离；缺少 bwrap 时必须失败，不能静默降级为可联网执行。
+                raise RuntimeError("bubblewrap is required for isolated Bash Agent runs")
             return None  # Fall back to unsandboxed execution
 
         env = self._scrub_sandbox_env(env)
@@ -368,11 +373,20 @@ class BashAgentToolExecutor:
         # The agent workspace — ONLY writable directory
         cmd.extend(['--bind', ws, ws])
 
+        if self.api_socket_path:
+            socket_dir = self.api_socket_path.parent
+            if not self.api_socket_path.exists():
+                raise FileNotFoundError(f"NovaMind API socket not found: {self.api_socket_path}")
+            # Agent 只看到固定的来宾路径，不能枚举宿主运行目录或其他端口。
+            cmd.extend(['--dir', '/run'])
+            cmd.extend(['--ro-bind', str(socket_dir), '/run/novamind'])
+            env['NOVAMIND_API_SOCKET'] = '/run/novamind/api.sock'
+
         # Set working directory
         cmd.extend(['--chdir', ws])
 
         # Unshare namespaces for isolation
-        cmd.extend(['--unshare-all', '--share-net'])  # Keep network for API calls
+        cmd.extend(['--unshare-all'])
 
         # Set environment variables
         for k, v in env.items():
@@ -410,6 +424,9 @@ class BashAgentToolExecutor:
             'TERM': os.environ.get('TERM', 'xterm'),
         }
         env.update(self.extra_env)
+        if self.api_socket_path:
+            # macOS 软隔离使用宿主路径；Linux bwrap 会替换为固定来宾路径。
+            env['NOVAMIND_API_SOCKET'] = str(self.api_socket_path)
         env = self._scrub_sandbox_env(env)
 
         # Try bwrap sandbox; fall back to basic Popen if unavailable
