@@ -2345,7 +2345,17 @@ def main(argv: Optional[List[str]] = None):
     import argparse
 
     parser = argparse.ArgumentParser(description="Run bash agent for SaaS Bench")
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_EXPERIMENT_CONFIG,
+        help=(
+            "Complete TOML configuration for a new experiment "
+            f"(default: {DEFAULT_EXPERIMENT_CONFIG})"
+        ),
+    )
+    mode.add_argument(
         "--resume",
         help="Resume a run by run id or run directory using its saved configuration",
     )
@@ -2353,7 +2363,7 @@ def main(argv: Optional[List[str]] = None):
     runner = (
         _resume_runner(args.resume)
         if args.resume
-        else _new_experiment_runner(DEFAULT_EXPERIMENT_CONFIG)
+        else _new_experiment_runner(args.config)
     )
     result = runner.run(verbose=True)
     print(f"\nResult: {result['outcome']}")

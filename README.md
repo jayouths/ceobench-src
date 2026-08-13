@@ -155,10 +155,18 @@ Local unauthenticated endpoints must set `api_key_required = false`.
 uv run --frozen python -m saas_bench.agents.bash_agent.run_test
 ```
 
-The runner reads `experiments/experiment.toml`. CLI flags do not override
-experiment or model settings. To resume an existing run, pass only
-`--resume <run_id-or-directory>`; the runner then reads that run's saved
-`config.json` and ignores the current TOML.
+The runner reads `experiments/experiment.toml` by default. To start a new run
+from another complete profile, select it explicitly:
+
+```bash
+uv run --frozen python -m saas_bench.agents.bash_agent.run_test \
+  --config experiments/smoke-deepseek.toml
+```
+
+CLI flags do not override individual experiment or model settings. To resume
+an existing run, pass only `--resume <run_id-or-directory>`; the runner then
+reads that run's saved `config.json`. `--config` and `--resume` are mutually
+exclusive.
 
 **4. Output.** Each run lands at `bash_agent_runs/run_<id>/`: `result.json`
 (machine-readable outcome), `world.nmdb` (encrypted ledger), `config.json`,

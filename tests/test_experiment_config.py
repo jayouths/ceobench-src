@@ -1077,7 +1077,7 @@ def test_prediction_persistence_failure_prevents_world_advance(monkeypatch):
     assert server._week_advance_failed is True
 
 
-def test_main_starts_new_run_from_the_fixed_toml_without_cli_configuration(monkeypatch):
+def test_main_starts_new_run_from_the_default_toml(monkeypatch):
     calls = []
     assert run_test.DEFAULT_EXPERIMENT_CONFIG == PROJECT_ROOT / "experiments/experiment.toml"
     assert run_test.DEFAULT_EXPERIMENT_CONFIG.is_file()
@@ -1105,6 +1105,34 @@ def test_main_starts_new_run_from_the_fixed_toml_without_cli_configuration(monke
     run_test.main([])
 
     assert calls == [run_test.DEFAULT_EXPERIMENT_CONFIG]
+
+
+def test_main_starts_new_run_from_explicit_config(monkeypatch):
+    calls = []
+    config_path = PROJECT_ROOT / "experiments/smoke-deepseek.toml"
+
+    class Runner:
+        def run(self, verbose):
+            return {
+                "outcome": "completed",
+                "final_cash": 1_000_000.0,
+                "workspace_dir": "/tmp/run",
+            }
+
+    monkeypatch.setattr(
+        run_test,
+        "_new_experiment_runner",
+        lambda path: calls.append(path) or Runner(),
+    )
+    monkeypatch.setattr(
+        run_test,
+        "_resume_runner",
+        lambda value: pytest.fail("resume path should not be used"),
+    )
+
+    run_test.main(["--config", str(config_path)])
+
+    assert calls == [config_path]
 
 
 def test_main_resume_uses_only_saved_run_identity(monkeypatch):
@@ -1137,7 +1165,6 @@ def test_main_resume_uses_only_saved_run_identity(monkeypatch):
 @pytest.mark.parametrize(
     "args",
     [
-        ["--config", "experiments/smoke.toml"],
         ["--model", "other-model"],
         ["--days", "7"],
         ["--temperature", "0.1"],
