@@ -5,7 +5,6 @@ import pytest
 from saas_bench.agents.bash_agent.agent import BashAgent
 from saas_bench.agents.bash_agent.run_test import BashAgentRunner
 from saas_bench.config import INITIAL_CUSTOMER_GROUPS
-from saas_bench.customer_llm import _optional_reasoning
 from saas_bench.database import (
     get_cash,
     get_global_state,
@@ -17,15 +16,25 @@ from saas_bench.database import (
 def test_runner_preserves_reasoning_configuration():
     omitted = BashAgentRunner(
         model="test-model",
-        provider="openai",
+        provider="openai_compatible",
+        api_type="openai_responses",
         base_url="http://localhost:11434/v1",
-        api_key="test",
+        api_key_required=False,
+        max_output_tokens=100,
+        max_decision_turns_per_batch=100,
+        max_invalid_responses_per_turn=3,
+        pricing={"test-model": {"input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
     )
     disabled = BashAgentRunner(
         model="test-model",
-        provider="openai",
+        provider="openai_compatible",
+        api_type="openai_responses",
         base_url="http://localhost:11434/v1",
-        api_key="test",
+        api_key_required=False,
+        max_output_tokens=100,
+        max_decision_turns_per_batch=100,
+        max_invalid_responses_per_turn=3,
+        pricing={"test-model": {"input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
         reasoning_effort="none",
     )
 
@@ -38,9 +47,14 @@ def test_runner_preserves_reasoning_configuration():
 def test_runner_preserves_sampling_configuration():
     runner = BashAgentRunner(
         model="test-model",
-        provider="openai",
+        provider="openai_compatible",
+        api_type="openai_responses",
         base_url="http://localhost:11434/v1",
-        api_key="test",
+        api_key_required=False,
+        max_output_tokens=100,
+        max_decision_turns_per_batch=100,
+        max_invalid_responses_per_turn=3,
+        pricing={"test-model": {"input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
         temperature=0.6,
         top_p=0.95,
     )
@@ -49,27 +63,18 @@ def test_runner_preserves_sampling_configuration():
     assert runner.top_p == pytest.approx(0.95)
 
 
-def test_simulator_reasoning_omits_only_unconfigured_value():
-    assert _optional_reasoning(None) == {}
-    assert _optional_reasoning("none") == {"reasoning": {"effort": "none"}}
-    assert _optional_reasoning("high") == {"reasoning": {"effort": "high"}}
-
-
-def test_bash_agent_routes_supported_endpoint_to_responses_api():
+def test_bash_agent_routes_by_explicit_api_type():
     agent = BashAgent.__new__(BashAgent)
-    agent.use_anthropic = False
-    agent.supports_responses_api = True
+    agent._call_anthropic = lambda: "anthropic"
     agent._call_openai = lambda: "chat"
     agent._call_openai_responses = lambda: "responses"
 
-    agent.reasoning_effort = None
+    agent.api_type = "openai_responses"
     assert agent._call_llm() == "responses"
-
-    agent.reasoning_effort = "none"
-    assert agent._call_llm() == "responses"
-
-    agent.supports_responses_api = False
+    agent.api_type = "openai_chat_completions"
     assert agent._call_llm() == "chat"
+    agent.api_type = "anthropic_messages"
+    assert agent._call_llm() == "anthropic"
 
 
 def test_initial_state_matches_benchmark_defaults(make_initialized_sim):

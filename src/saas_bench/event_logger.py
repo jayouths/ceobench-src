@@ -9,10 +9,12 @@ Provides detailed JSON logging of all simulation events including:
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field, asdict
+
+from .json_io import write_json_atomic
 
 
 @dataclass
@@ -57,7 +59,16 @@ class EventLogger:
         run_{id}_meta.json — metadata (written at start + end)
     """
 
-    def __init__(self, run_id: str, output_dir: Path, seed: int, scenario: str, config: Dict[str, Any]):
+    def __init__(
+        self,
+        run_id: str,
+        output_dir: Path,
+        seed: int,
+        scenario: str,
+        config: Dict[str, Any],
+        starting_llm_cost_usd: float = 0.0,
+        start_time: Optional[str] = None,
+    ):
         self.run_id = run_id
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -69,19 +80,33 @@ class EventLogger:
             run_id=run_id,
             seed=seed,
             scenario=scenario,
-            start_time=datetime.utcnow().isoformat() + "Z",
+            start_time=start_time or self._now(),
             config=config
         )
 
-        self.current_day = 0
-        self._total_llm_cost = 0.0
+        if starting_llm_cost_usd < 0:
+            raise ValueError("starting_llm_cost_usd must be non-negative")
+        # 日期必须由事件发生处显式传入，避免并发和断点恢复后读到过期状态。
+        self._accumulated_llm_cost_usd = float(starting_llm_cost_usd)
         self._event_count = 0
 
         # Open JSONL file for streaming writes
         self._file = open(self.log_file, 'a')
 
     def _now(self) -> str:
-        return datetime.utcnow().isoformat() + "Z"
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _compact_result(result: Any, max_chars: int = 500) -> Any:
+        """Keep structured small results; compact oversized values for JSONL safety."""
+        try:
+            serialized = json.dumps(result, default=str, ensure_ascii=False)
+        except (TypeError, ValueError):
+            serialized = str(result)
+        if len(serialized) <= max_chars:
+            return result
+        # 大结果只用于运行审计，日志中限长避免长期实验无界增长。
+        return serialized[:max_chars] + "..."
 
     def _write_event(self, entry: EventLogEntry):
         """Write a single event to disk immediately."""
@@ -91,18 +116,15 @@ class EventLogger:
         if self._event_count % 10 == 0:
             self._file.flush()
 
-    def set_day(self, day: int):
-        self.current_day = day
-
     # =========================================================================
     # Simulator Events
     # =========================================================================
 
-    def log_shock(self, shock_type: str, details: Dict[str, Any]):
+    def log_shock(self, day: int, shock_type: str, details: Dict[str, Any]):
         """Log a shock event (demand_surge, etc.)."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="simulator",
             category="shock",
             details={
@@ -111,11 +133,11 @@ class EventLogger:
             }
         ))
 
-    def log_outage(self, downtime_minutes: int, overload: float):
+    def log_outage(self, day: int, downtime_minutes: int, overload: float):
         """Log a service outage event."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="simulator",
             category="outage",
             details={
@@ -124,12 +146,12 @@ class EventLogger:
             }
         ))
 
-    def log_customer_signup(self, customer_id: int, group_id: str, plan: str,
+    def log_customer_signup(self, day: int, customer_id: int, group_id: str, plan: str,
                            price: float, is_enterprise: bool, seat_count: Optional[int] = None):
         """Log a new customer subscription."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="simulator",
             category="customer_signup",
             details={
@@ -142,12 +164,12 @@ class EventLogger:
             }
         ))
 
-    def log_customer_churn(self, customer_id: int, group_id: str, plan: str,
+    def log_customer_churn(self, day: int, customer_id: int, group_id: str, plan: str,
                           reason: str, satisfaction: Optional[float] = None):
         """Log a customer cancellation."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="simulator",
             category="customer_churn",
             details={
@@ -159,12 +181,12 @@ class EventLogger:
             }
         ))
 
-    def log_plan_change(self, customer_id: int, old_plan: str, new_plan: str,
+    def log_plan_change(self, day: int, customer_id: int, old_plan: str, new_plan: str,
                        old_price: float, new_price: float, direction: str):
         """Log a plan upgrade or downgrade."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="simulator",
             category="plan_change",
             details={
@@ -177,12 +199,12 @@ class EventLogger:
             }
         ))
 
-    def log_social_post(self, customer_id: int, group_id: str, sentiment: str,
+    def log_social_post(self, day: int, customer_id: int, group_id: str, sentiment: str,
                        virality_score: float, reputation_impact: float):
         """Log a social media post and its impact."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="simulator",
             category="social_post",
             details={
@@ -194,12 +216,12 @@ class EventLogger:
             }
         ))
 
-    def log_negotiation_event(self, thread_id: int, customer_id: int, event: str,
+    def log_negotiation_event(self, day: int, thread_id: int, customer_id: int, event: str,
                              details: Dict[str, Any]):
         """Log an enterprise negotiation event."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="simulator",
             category="negotiation",
             details={
@@ -210,10 +232,11 @@ class EventLogger:
             }
         ))
 
-    def log_deal_closed(self, customer_id: int, thread_id: int, thread_type: str,
+    def log_deal_closed(self, day: int, customer_id: int, thread_id: int, thread_type: str,
                         agreed_price: float, seat_count: int):
         """Log an enterprise deal closure."""
         self.log_negotiation_event(
+            day=day,
             thread_id=thread_id,
             customer_id=customer_id,
             event="deal_closed",
@@ -224,11 +247,11 @@ class EventLogger:
             }
         )
 
-    def log_issue(self, customer_id: int, event: str, days_open: Optional[int] = None):
+    def log_issue(self, day: int, customer_id: int, event: str, days_open: Optional[int] = None):
         """Log a customer issue event."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="simulator",
             category="issue",
             details={
@@ -242,27 +265,27 @@ class EventLogger:
     # Agent Actions
     # =========================================================================
 
-    def log_agent_action(self, tool_name: str, arguments: Dict[str, Any],
-                        result: str, success: bool):
+    def log_agent_action(self, day: int, tool_name: str, arguments: Dict[str, Any],
+                        result: Any, success: bool):
         """Log an agent tool call and its result."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="agent_action",
             category=tool_name,
             details={
                 "arguments": arguments,
-                "result": result[:500] if len(result) > 500 else result,  # Truncate long results
+                "result": self._compact_result(result),
                 "success": success
             }
         ))
 
-    def log_agent_turn(self, turn: int, model: str, input_tokens: int,
+    def log_agent_turn(self, day: int, turn: int, model: str, input_tokens: int,
                       output_tokens: int, tool_calls: List[str]):
         """Log an agent turn (one LLM call cycle)."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="agent_action",
             category="turn",
             details={
@@ -278,14 +301,14 @@ class EventLogger:
     # LLM Calls (Simulation-side)
     # =========================================================================
 
-    def log_llm_call(self, purpose: str, model: str, input_tokens: int,
+    def log_llm_call(self, day: int, purpose: str, model: str, input_tokens: int,
                     output_tokens: int, cost_usd: float, details: Optional[Dict] = None):
         """Log a simulation-side LLM call (customer simulation, negotiations, etc.)."""
-        self._total_llm_cost += cost_usd
+        self._accumulated_llm_cost_usd += cost_usd
 
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="llm_call",
             category=purpose,  # 'social_post', 'negotiation_response', 'initial_message', etc.
             details={
@@ -301,7 +324,7 @@ class EventLogger:
     # State Changes
     # =========================================================================
 
-    def log_daily_state(self, cash: float, mrr: float, subscribers: int,
+    def log_daily_state(self, day: int, cash: float, mrr: float, subscribers: int,
                        usage: int, overload: float, outage: bool,
                        group_reputations: Dict[str, float],
                        group_awareness: Dict[str, float],
@@ -309,7 +332,7 @@ class EventLogger:
         """Log end-of-day state snapshot."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="state_change",
             category="daily_snapshot",
             details={
@@ -324,11 +347,11 @@ class EventLogger:
             }
         ))
 
-    def log_config_change(self, field: str, old_value: Any, new_value: Any, source: str):
+    def log_config_change(self, day: int, field: str, old_value: Any, new_value: Any, source: str):
         """Log a configuration change."""
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="state_change",
             category="config_change",
             details={
@@ -357,24 +380,24 @@ class EventLogger:
             }
         ))
 
-    def log_run_end(self, final_cash: float, days_run: int, outcome: str):
+    def log_run_end(self, day: int, final_cash: float, days_run: int, outcome: str):
         """Log the end of the simulation run."""
         self.metadata.end_time = self._now()
         self.metadata.final_cash = final_cash
         self.metadata.days_run = days_run
-        self.metadata.total_llm_cost = self._total_llm_cost
+        self.metadata.total_llm_cost = self._accumulated_llm_cost_usd
         self.metadata.outcome = outcome
 
         self._write_event(EventLogEntry(
             timestamp=self._now(),
-            day=self.current_day,
+            day=day,
             event_type="lifecycle",
             category="run_end",
             details={
                 "final_cash": final_cash,
                 "days_run": days_run,
                 "outcome": outcome,
-                "total_llm_cost": self._total_llm_cost
+                "total_llm_cost": self._accumulated_llm_cost_usd
             }
         ))
 
@@ -385,8 +408,7 @@ class EventLogger:
     def save(self):
         """Flush JSONL and write metadata file."""
         self._file.flush()
-        with open(self.meta_file, 'w') as f:
-            json.dump(asdict(self.metadata), f, indent=2)
+        write_json_atomic(self.meta_file, asdict(self.metadata))
 
     def save_incremental(self):
         """Flush pending writes to disk."""
@@ -428,7 +450,8 @@ class EventLogger:
             output_dir=log_file.parent,
             seed=metadata['seed'],
             scenario=metadata['scenario'],
-            config=metadata['config']
+            config=metadata['config'],
+            starting_llm_cost_usd=metadata.get('total_llm_cost') or 0.0,
         )
         logger.metadata = RunMetadata(**metadata)
         return logger

@@ -298,6 +298,7 @@ class AsyncSaver:
         self._pending: Optional[str] = None
         self._busy: bool = False
         self._shutdown: bool = False
+        self._last_error: Optional[BaseException] = None
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="AsyncSaver"
         )
@@ -340,8 +341,14 @@ class AsyncSaver:
                 self._busy = True
             try:
                 encrypt_plain_atomic(p, self._nmdb_path, key=self._key)
-            except Exception:
+            except Exception as exc:
+                with self._cond:
+                    self._last_error = exc
                 traceback.print_exc(file=sys.stderr)
+            else:
+                # 只保留最近一次保存的结果；旧快照失败后，新快照成功即可恢复健康状态。
+                with self._cond:
+                    self._last_error = None
             finally:
                 try:
                     if os.path.exists(p):
@@ -368,6 +375,13 @@ class AsyncSaver:
                         return False
                     self._cond.wait(timeout=remaining)
             return True
+
+    def raise_if_failed(self) -> None:
+        """Raise when the background worker failed to persist a snapshot."""
+        with self._cond:
+            error = self._last_error
+        if error is not None:
+            raise RuntimeError("Asynchronous database persistence failed") from error
 
     def shutdown(
         self, *, wait: bool = True, timeout: Optional[float] = None

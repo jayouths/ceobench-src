@@ -12,7 +12,7 @@ runtime list whose length is not bounded.
 """
 
 import sqlite3
-from typing import Iterable, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 # SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999 on the bundled python sqlite3
 # build for cpython <3.12. Leave headroom for any extra_params the caller passes.

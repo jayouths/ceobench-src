@@ -3,10 +3,10 @@
 import sqlite3
 import json
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Tuple
 from numpy.random import Generator, PCG64
 
-from .config import ScenarioPack, MODEL_TIERS
+from .config import ScenarioPack
 
 
 @dataclass

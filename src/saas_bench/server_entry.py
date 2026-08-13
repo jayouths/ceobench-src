@@ -19,18 +19,20 @@ import signal
 import sqlite3
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from numpy.random import Generator, PCG64
 
 from saas_bench.config import BenchmarkConfig, SCENARIO_PACKS, ScenarioPack
-from saas_bench.database import init_database
+from saas_bench.database import get_total_api_cost, init_database
 from saas_bench.simulation import Simulator
 from saas_bench.customer_llm import CustomerSimulator
 from saas_bench.tools import AgentTools
 from saas_bench.shocks import ShockManager
 from saas_bench.event_logger import EventLogger
+from saas_bench.json_io import write_json_atomic
 from saas_bench.api_server import NovaMindAPIServer
 from saas_bench.db_protection import (
     protect_db,
@@ -44,6 +46,7 @@ from saas_bench.docs_generator import initialize_workspace
 
 _SIMULATOR_LLM_CONFIG_FIELDS = (
     "social_post_llm_provider",
+    "social_post_llm_api_type",
     "social_post_llm_model",
     "social_post_llm_base_url",
     "social_post_llm_api_key_env",
@@ -53,20 +56,9 @@ _SIMULATOR_LLM_CONFIG_FIELDS = (
     "social_post_llm_top_p",
     "social_post_llm_max_tokens",
     "social_post_llm_timeout_seconds",
-    "social_post_llm_input_cost_per_million",
-    "social_post_llm_output_cost_per_million",
-    "enterprise_llm_provider",
-    "enterprise_llm_model",
-    "enterprise_llm_base_url",
-    "enterprise_llm_api_key_env",
-    "enterprise_llm_api_key_required",
-    "enterprise_llm_reasoning_effort",
-    "enterprise_llm_temperature",
-    "enterprise_llm_top_p",
-    "enterprise_llm_max_tokens",
-    "enterprise_llm_timeout_seconds",
-    "enterprise_llm_input_cost_per_million",
-    "enterprise_llm_output_cost_per_million",
+    "social_post_llm_pricing",
+    "social_post_llm_request_options",
+    "social_post_llm_task_parameters",
 )
 _SIMULATOR_LLM_CONFIG_ENV = "CEOBENCH_SIMULATOR_LLM_CONFIG"
 
@@ -146,11 +138,15 @@ def _resolve_session(base: Path, session_id: Optional[str]) -> str:
 
 def _apply_simulator_llm_config(config: BenchmarkConfig) -> dict:
     """Validate and serialize simulator-side LLM provider/model config."""
-    valid_providers = {"bedrock", "anthropic", "openai"}
-    for prefix in ("social_post_llm", "enterprise_llm"):
+    from saas_bench.llm_provider import validate_provider_api_type
+
+    for prefix in ("social_post_llm",):
         provider = getattr(config, f"{prefix}_provider")
-        if provider not in valid_providers:
-            print(f"Error: invalid simulator LLM provider for {prefix}: {provider!r}", file=sys.stderr)
+        api_type = getattr(config, f"{prefix}_api_type")
+        try:
+            validate_provider_api_type(provider, api_type, prefix)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         if not getattr(config, f"{prefix}_model"):
             print(f"Error: simulator model is empty for {prefix}", file=sys.stderr)
@@ -165,20 +161,18 @@ def _apply_simulator_llm_config(config: BenchmarkConfig) -> dict:
         if top_p is not None and not 0 <= top_p <= 1:
             print(f"Error: invalid top_p for {prefix}: {top_p}", file=sys.stderr)
             sys.exit(1)
+        if max_tokens is None:
+            print(f"Error: max_tokens is not configured for {prefix}", file=sys.stderr)
+            sys.exit(1)
         if max_tokens <= 0 or timeout <= 0:
             print(f"Error: max_tokens and timeout must be positive for {prefix}", file=sys.stderr)
             sys.exit(1)
-        for suffix in ("input_cost_per_million", "output_cost_per_million"):
-            price = getattr(config, f"{prefix}_{suffix}")
-            if price is not None and price < 0:
-                print(f"Error: {suffix} must be non-negative for {prefix}", file=sys.stderr)
-                sys.exit(1)
-        input_price = getattr(config, f"{prefix}_input_cost_per_million")
-        output_price = getattr(config, f"{prefix}_output_cost_per_million")
-        if (input_price is None) != (output_price is None):
-            print(f"Error: input and output costs must be configured together for {prefix}", file=sys.stderr)
+        pricing = getattr(config, f"{prefix}_pricing")
+        model = getattr(config, f"{prefix}_model")
+        if model not in pricing:
+            print(f"Error: pricing is missing configured model {model!r} for {prefix}", file=sys.stderr)
             sys.exit(1)
-        if provider in {"openai", "anthropic"}:
+        if provider not in {"bedrock"}:
             api_key_env = getattr(config, f"{prefix}_api_key_env")
             api_key_required = getattr(config, f"{prefix}_api_key_required")
             if api_key_required and (not api_key_env or not os.environ.get(api_key_env)):
@@ -216,25 +210,22 @@ def _restore_simulator_llm_config(config: BenchmarkConfig, meta: dict) -> None:
             setattr(config, attr, simulator_llm[attr])
 
 
-def _create_simulator_openai_client(config: BenchmarkConfig, prefix: str):
-    if getattr(config, f"{prefix}_provider") != "openai":
-        return None
+def _create_simulator_llm_client(config: BenchmarkConfig, prefix: str):
+    from saas_bench.llm_provider import create_llm_client
 
-    from openai import OpenAI
-
+    provider = getattr(config, f"{prefix}_provider")
     api_key_env = getattr(config, f"{prefix}_api_key_env")
     api_key_required = getattr(config, f"{prefix}_api_key_required")
     api_key = os.environ.get(api_key_env) if api_key_env else None
     if not api_key_required:
         api_key = api_key or "not-required"
-    kwargs = {
-        "api_key": api_key,
-        "timeout": getattr(config, f"{prefix}_timeout_seconds"),
-    }
-    base_url = getattr(config, f"{prefix}_base_url")
-    if base_url:
-        kwargs["base_url"] = base_url
-    return OpenAI(**kwargs)
+    return create_llm_client(
+        provider=provider,
+        api_type=getattr(config, f"{prefix}_api_type"),
+        api_key=api_key,
+        base_url=getattr(config, f"{prefix}_base_url"),
+        timeout_seconds=getattr(config, f"{prefix}_timeout_seconds"),
+    )
 
 
 # =========================================================================
@@ -265,8 +256,7 @@ def cmd_new_session(args, base: Path):
 
     # Initialize simulator with customer simulator
     customer_sim = CustomerSimulator(
-        social_openai_client=_create_simulator_openai_client(config, "social_post_llm"),
-        enterprise_openai_client=_create_simulator_openai_client(config, "enterprise_llm"),
+        social_client=_create_simulator_llm_client(config, "social_post_llm"),
         conn=conn,
         config=config,
     )
@@ -294,7 +284,7 @@ def cmd_new_session(args, base: Path):
         "status": "created",
         "simulator_llm": simulator_llm,
     }
-    _session_meta_path(base, session_id).write_text(json.dumps(meta, indent=2))
+    write_json_atomic(_session_meta_path(base, session_id), meta)
 
     # Initialize empty history
     _session_history_path(base, session_id).write_text("")
@@ -352,8 +342,7 @@ def cmd_start_server(args, base: Path):
     meta["simulator_llm"] = _apply_simulator_llm_config(config)
 
     customer_sim = CustomerSimulator(
-        social_openai_client=_create_simulator_openai_client(config, "social_post_llm"),
-        enterprise_openai_client=_create_simulator_openai_client(config, "enterprise_llm"),
+        social_client=_create_simulator_llm_client(config, "social_post_llm"),
         conn=conn,
         config=config,
     )
@@ -384,9 +373,18 @@ def cmd_start_server(args, base: Path):
         run_id=session_id,
         output_dir=logs_dir,
         seed=seed,
-        scenario="default",
+        scenario=scenario_name,
         config={"seed": seed, "total_days": total_days},
+        # api_costs 随数据库断点恢复，logger 的累计值必须以它为准。
+        starting_llm_cost_usd=get_total_api_cost(conn),
+        # 服务端可能多次重启，实验起始时间必须来自会话创建时刻。
+        start_time=datetime.fromtimestamp(
+            meta["created_at"], tz=timezone.utc
+        ).isoformat().replace("+00:00", "Z"),
     )
+    if event_logger.log_file.stat().st_size == 0:
+        event_logger.log_run_start()
+        event_logger.save_incremental()
     simulator.set_event_logger(event_logger)
     tools.set_event_logger(event_logger)
 
@@ -402,17 +400,66 @@ def cmd_start_server(args, base: Path):
     # the worker thread does the ~90s encrypt + atomic-replace off the
     # next-week response path. Drained on shutdown.
     async_saver = AsyncSaver(nmdb_path)
+    last_submitted_day: Optional[int] = None
+    last_persisted_day = current_day
 
     # Day callback — save state after each day
     def _day_callback(day, dashboard):
+        nonlocal last_submitted_day
         meta["current_day"] = day
         meta["status"] = "running"
-        _session_meta_path(base, session_id).write_text(json.dumps(meta, indent=2))
+        write_json_atomic(_session_meta_path(base, session_id), meta)
         # Snapshot synchronously, queue encrypt to background worker.
         plain = snapshot_to_plain(conn, nmdb_path.parent)
         async_saver.submit(plain)
+        last_submitted_day = day
         # Log to history
         _log_history({"type": "next_week", "day": day, "timestamp": time.time()})
+
+    def _persist_checkpoint(day: int, require_fresh_snapshot: bool = False) -> dict:
+        """Make simulator state durable and return its exact file boundaries."""
+        nonlocal last_submitted_day, last_persisted_day
+        # 正常周结束时复用 day_callback 的快照；同一天发生过工具调用则重新快照。
+        if require_fresh_snapshot or (
+            last_submitted_day != day and last_persisted_day != day
+        ):
+            plain = snapshot_to_plain(conn, nmdb_path.parent)
+            async_saver.submit(plain)
+            last_submitted_day = day
+        if last_submitted_day == day:
+            if not async_saver.drain(timeout=300.0):
+                raise TimeoutError(f"Timed out persisting database for day {day}")
+            async_saver.raise_if_failed()
+        last_persisted_day = day
+        meta["persisted_day"] = day
+        write_json_atomic(_session_meta_path(base, session_id), meta)
+        # 断点不仅要固定数据库，也要固定服务端追加日志的边界。
+        # EventLogger 每 10 条才自动 flush，因此必须先主动刷盘再取字节偏移。
+        event_logger.save_incremental()
+        return {
+            "persisted_day": last_persisted_day,
+            "server_log_offsets": {
+                "history": history_path.stat().st_size if history_path.exists() else 0,
+                "event_log": event_logger.log_file.stat().st_size,
+            },
+        }
+
+    def _finalize_run(outcome: str, day: int, final_cash: float) -> None:
+        """Write terminal event artifacts only after API-side semantic checks pass."""
+        event_logger.log_run_end(
+            day=day,
+            final_cash=final_cash,
+            days_run=day,
+            outcome=outcome,
+        )
+        event_logger.save()
+        meta.update({
+            "status": outcome,
+            "current_day": day,
+            "final_cash": final_cash,
+            "completed_at": time.time(),
+        })
+        write_json_atomic(_session_meta_path(base, session_id), meta)
 
     # Create and start API server
     api_server = NovaMindAPIServer(
@@ -422,6 +469,8 @@ def cmd_start_server(args, base: Path):
         day_callback=_day_callback,
         shock_manager=shock_manager,
         event_logger=event_logger,
+        checkpoint_persist_callback=_persist_checkpoint,
+        run_finalize_callback=_finalize_run,
     )
     api_server.start()
 
@@ -436,7 +485,7 @@ def cmd_start_server(args, base: Path):
     meta["status"] = "running"
     meta["port"] = api_server.port
     meta["pid"] = os.getpid()
-    _session_meta_path(base, session_id).write_text(json.dumps(meta, indent=2))
+    write_json_atomic(_session_meta_path(base, session_id), meta)
 
     # Print server info
     info = {
@@ -457,18 +506,19 @@ def cmd_start_server(args, base: Path):
             return
         shutdown_requested = True
         api_server.stop()
-        # Drain the async encrypter, then write a fresh synchronous save so
-        # any post-day-callback writes (agent tool calls between days) land
-        # before exit.
+        # Runner 通常已先完成断点持久化。若仍有稳定的新状态，则在退出前补一次保存。
         try:
+            api_server.persist_checkpoint(tools.current_day)
             async_saver.shutdown(wait=True, timeout=180.0)
         except Exception:
             pass
-        save_session_db(conn, nmdb_path)
-        meta["status"] = "stopped"
+        event_logger.close()
+        # completed/bankrupt 是实验终态，不能被进程退出状态覆盖。
+        if meta.get("status") not in {"completed", "bankrupt"}:
+            meta["status"] = "stopped"
         meta.pop("port", None)
         meta.pop("pid", None)
-        _session_meta_path(base, session_id).write_text(json.dumps(meta, indent=2))
+        write_json_atomic(_session_meta_path(base, session_id), meta)
         # Clean up PID/port files
         for f in [_pid_file(base, session_id), _port_file(base, session_id)]:
             if f.exists():

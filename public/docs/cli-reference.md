@@ -1,145 +1,169 @@
-# NovaMind CLI Reference
+# CEOBench CLI Reference
 
-## `novamind-operation`
+```text
+usage: novamind-operation [-h]
+                          {new-session,next-week,python,python-c,query,status,history,list-sessions,stop} ...
 
-The primary CLI for interacting with the NovaMind SaaS simulator.
+CEOBench Simulation CLI
 
-### Session Management
+positional arguments:
+  {new-session,next-week,python,python-c,query,status,history,list-sessions,stop}
+    new-session         Create a new simulation session
+    next-week           Advance simulation by one week (7 days). Requires a
+                        rationale string + 12 cash forecasts.
+    python              Execute a Python script with novamind_api
+    python-c            Execute inline Python code with novamind_api
+    query               Execute a SQL query
+    status              Get session status
+    history             View action history
+    list-sessions       List all sessions
+    stop                Stop the simulation server
 
-#### `novamind-operation new-session`
-Create a new simulation session.
+options:
+  -h, --help            show this help message and exit
 
-```bash
-novamind-operation new-session [--days 365] [--seed 42] [--cash 1000000]
+Examples:
+  ./novamind-operation new-session --days 365 --seed 42
+  ./novamind-operation next-week "Holding prices, raising ad spend on E1 to push enterprise pipeline"                                   1050000 1000000 1100000  1200000 1050000 1400000  1800000 1400000 2300000  3000000 2000000 4500000
+                                  # rationale (required, non-empty) + 12 cash forecasts:
+                                  # per horizon (+7d/+28d/+84d/+182d), submit point + 95% CI low/high
+  ./novamind-operation python my_strategy.py
+  ./novamind-operation python-c "import novamind_api as nm; nm.pricing.set_prices(A=25)"
+  ./novamind-operation query "SELECT * FROM subscriptions LIMIT 10"
+  ./novamind-operation status
+  ./novamind-operation history --tail 20
+  ./novamind-operation list-sessions
+  ./novamind-operation stop
 ```
 
-**Options:**
-- `--days`: Total simulation days (default: 365)
-- `--seed`: Random seed for reproducibility (default: 42)
-- `--cash`: Initial cash balance (default: 1,000,000)
+## `./novamind-operation new-session`
 
-**Returns:** JSON with `session_id`, `seed`, `total_days`, `initial_cash`, `workspace` path.
+```text
+usage: novamind-operation new-session [-h] [--days DAYS] [--seed SEED]
+                                      [--cash CASH]
 
-#### `novamind-operation list-sessions`
-List all existing sessions.
-
-```bash
-novamind-operation list-sessions
+options:
+  -h, --help   show this help message and exit
+  --days DAYS  Total simulation days (default: 365)
+  --seed SEED  Random seed (default: 42)
+  --cash CASH  Initial cash (default: 1000000)
 ```
 
-#### `novamind-operation status [--session ID]`
-Get the current status of a session.
+## `./novamind-operation next-week`
 
-```bash
-novamind-operation status
-novamind-operation status --session abc123def456
+```text
+usage: novamind-operation next-week [-h] [--session SESSION]
+                                    rationale cash_1wk_point cash_1wk_lower
+                                    cash_1wk_upper cash_4wk_point
+                                    cash_4wk_lower cash_4wk_upper
+                                    cash_12wk_point cash_12wk_lower
+                                    cash_12wk_upper cash_26wk_point
+                                    cash_26wk_lower cash_26wk_upper
+
+Advance the simulation by 7 days. You MUST submit: 1. A rationale string (your
+strategic reasoning for this week's actions, non-empty). 2. Cash forecasts at
+four horizons (+7d, +28d, +84d, +182d). For EACH horizon submit a point
+estimate plus 95% CI lower and upper bounds (lower <= point <= upper). 12
+numbers total. Scored on point-percent-error, CI coverage, and sharpness at
+each horizon. Rationale replaces the old standalone log_rationale tool — it is
+now a required argument here.
+
+positional arguments:
+  rationale          Your strategic reasoning for this week's actions
+                     (required, non-empty)
+  cash_1wk_point     Point estimate of cash +7 days
+  cash_1wk_lower     95% CI lower bound, +7 days
+  cash_1wk_upper     95% CI upper bound, +7 days
+  cash_4wk_point     Point estimate of cash +28 days
+  cash_4wk_lower     95% CI lower bound, +28 days
+  cash_4wk_upper     95% CI upper bound, +28 days
+  cash_12wk_point    Point estimate of cash +84 days
+  cash_12wk_lower    95% CI lower bound, +84 days
+  cash_12wk_upper    95% CI upper bound, +84 days
+  cash_26wk_point    Point estimate of cash +182 days (~6 months)
+  cash_26wk_lower    95% CI lower bound, +182 days
+  cash_26wk_upper    95% CI upper bound, +182 days
+
+options:
+  -h, --help         show this help message and exit
+  --session SESSION  Session ID (default: latest)
 ```
 
-#### `novamind-operation stop [--session ID]`
-Stop the simulation server for a session.
+## `./novamind-operation python`
 
-```bash
-novamind-operation stop
+```text
+usage: novamind-operation python [-h] [--session SESSION] script
+
+positional arguments:
+  script             Path to Python script
+
+options:
+  -h, --help         show this help message and exit
+  --session SESSION  Session ID (default: latest)
 ```
 
----
+## `./novamind-operation python-c`
 
-### Simulation Control
+```text
+usage: novamind-operation python-c [-h] [--session SESSION] code
 
-#### `novamind-operation next-week <cash_1wk> <cash_4wk> <cash_12wk> [--session ID]`
-Advance the simulation by one week (7 days). **Requires 3 cash predictions** as positional arguments — all three are mandatory, numeric (dollars).
+positional arguments:
+  code               Python code to execute
 
-```bash
-novamind-operation next-week 1050000 1200000 1800000
+options:
+  -h, --help         show this help message and exit
+  --session SESSION  Session ID (default: latest)
 ```
 
-**Arguments:**
-- `cash_1wk`: Predicted cash 1 week from today (+7 days)
-- `cash_4wk`: Predicted cash 4 weeks from today (+28 days)
-- `cash_12wk`: Predicted cash 12 weeks from today (+84 days)
+## `./novamind-operation query`
 
-Predictions are stored in the `predictions` table at submission time and scored on percent error `(predicted - actual) / actual` when the actual cash at each horizon is known. The agent is evaluated on prediction accuracy at each horizon in addition to realized cash.
+```text
+usage: novamind-operation query [-h] [--session SESSION] sql
 
-**Output:** The weekly dashboard showing cash, subscribers, MRR, this week's metrics, current config, product quality, and inbox notifications.
+positional arguments:
+  sql                SQL query string
 
----
-
-### Code Execution
-
-#### `novamind-operation python <script.py> [--session ID]`
-Execute a Python script in the simulation environment with `novamind_api` available.
-
-```bash
-novamind-operation python my_strategy.py
+options:
+  -h, --help         show this help message and exit
+  --session SESSION  Session ID (default: latest)
 ```
 
-The script runs with `novamind_api` importable. Example script:
-```python
-import novamind_api as nm
+## `./novamind-operation status`
 
-# Set prices
-nm.pricing.set_prices(A=25, B=69, C=179)
+```text
+usage: novamind-operation status [-h] [--session SESSION]
 
-# Check current day
-print(f"Day: {nm.vars.current_day}")
-
-# Query data
-result = nm.query("SELECT COUNT(*) as n FROM subscriptions WHERE status='active'")
-print(f"Active subscribers: {result['rows'][0]['n']}")
+options:
+  -h, --help         show this help message and exit
+  --session SESSION  Session ID (default: latest)
 ```
 
-#### `novamind-operation python-c "<code>" [--session ID]`
-Execute inline Python code.
+## `./novamind-operation history`
 
-```bash
-novamind-operation python-c "import novamind_api as nm; nm.pricing.set_prices(A=29.99)"
+```text
+usage: novamind-operation history [-h] [--session SESSION] [--tail TAIL]
+
+options:
+  -h, --help         show this help message and exit
+  --session SESSION  Session ID (default: latest)
+  --tail TAIL        Number of recent entries (default: 50)
 ```
 
----
+## `./novamind-operation list-sessions`
 
-### Database Queries
+```text
+usage: novamind-operation list-sessions [-h]
 
-#### `novamind-operation query "<SQL>" [--session ID]`
-Execute a read-only SQL query against the simulation database.
-
-```bash
-novamind-operation query "SELECT * FROM subscriptions WHERE status='active' LIMIT 10"
-novamind-operation query "SELECT group_id, COUNT(*) as n FROM subscriptions WHERE status='active' GROUP BY group_id"
+options:
+  -h, --help  show this help message and exit
 ```
 
-**Restrictions:**
-- Read-only (SELECT only) — no INSERT/UPDATE/DELETE
-- Schema introspection blocked (no PRAGMA, sqlite_master)
-- Some internal tables and columns are hidden
-- Results capped at 5,000 rows
+## `./novamind-operation stop`
 
-See `docs/tables-reference.md` for available tables and columns.
+```text
+usage: novamind-operation stop [-h] [--session SESSION]
 
----
-
-### History
-
-#### `novamind-operation history [--tail N] [--session ID]`
-View the action history for a session.
-
-```bash
-novamind-operation history
-novamind-operation history --tail 100
-```
-
-Shows recent tool calls, queries, next-day advancements, and Python executions.
-
----
-
-### Session ID
-
-All commands accept `--session <id>` to target a specific session. If omitted, the most recently created session is used.
-
-```bash
-# These are equivalent (both use latest session):
-novamind-operation next-day
-novamind-operation next-day --session <latest-id>
-
-# Target a specific session:
-novamind-operation next-day --session abc123def456
+options:
+  -h, --help         show this help message and exit
+  --session SESSION  Session ID (default: latest)
 ```

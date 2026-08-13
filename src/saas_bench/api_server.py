@@ -6,6 +6,7 @@ is via HTTP on localhost with a random OS-assigned port.
 """
 
 import json
+import math
 import os
 import re
 import sqlite3
@@ -305,8 +306,10 @@ class _APIHandler(BaseHTTPRequestHandler):
                 self._handle_next_week()
             elif self.path == '/query':
                 self._handle_query()
-            elif self.path == '/daily-scripts':
-                self._handle_daily_scripts_post()
+            elif self.path == '/persist-checkpoint':
+                self._handle_persist_checkpoint()
+            elif self.path == '/finalize-run':
+                self._handle_finalize_run()
             elif self.path == '/reinitialize':
                 self._handle_reinitialize()
             else:
@@ -320,8 +323,6 @@ class _APIHandler(BaseHTTPRequestHandler):
                 self._handle_vars()
             elif self.path == '/health':
                 self._send_json({"status": "ok"})
-            elif self.path == '/daily-scripts':
-                self._handle_daily_scripts_get()
             elif self.path == '/dashboard':
                 self._handle_dashboard_get()
             elif self.path == '/game-status':
@@ -333,10 +334,7 @@ class _APIHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         try:
-            if self.path == '/daily-scripts':
-                self._handle_daily_scripts_delete()
-            else:
-                self._send_json({"error": f"Unknown endpoint: {self.path}"}, 404)
+            self._send_json({"error": f"Unknown endpoint: {self.path}"}, 404)
         except Exception as exc:
             self._send_internal_error(exc, op=f"DELETE {self.path}")
 
@@ -489,6 +487,13 @@ class _APIHandler(BaseHTTPRequestHandler):
                         "error": f"Prediction '{key}' fields point/lower/upper must all be numbers, got {entry!r}.",
                     }, 400)
                     return
+                # NaN/Infinity 会污染预测评分，必须在推进世界前拒绝。
+                if not all(math.isfinite(value) for value in (point, lower, upper)):
+                    self._send_json({
+                        "success": False,
+                        "error": f"Prediction '{key}' fields point/lower/upper must all be finite numbers.",
+                    }, 400)
+                    return
                 if lower > upper:
                     self._send_json({
                         "success": False,
@@ -507,6 +512,26 @@ class _APIHandler(BaseHTTPRequestHandler):
             self._send_json(result)
         except Exception as e:
             self._send_internal_error(e, op="next-week")
+
+    def _handle_persist_checkpoint(self):
+        """Persist the in-memory simulator state before the harness checkpoints."""
+        server: NovaMindAPIServer = self.server._api_server
+        body = self._read_body() or {}
+        expected_day = body.get("expected_day")
+        try:
+            expected_day = int(expected_day)
+        except (TypeError, ValueError):
+            self._send_json({"success": False, "error": "expected_day must be an integer"}, 400)
+            return
+        result = server.persist_checkpoint(expected_day)
+        self._send_json(result, 200 if result.get("success") else 409)
+
+    def _handle_finalize_run(self):
+        """Commit one explicit terminal outcome for the experiment."""
+        server: NovaMindAPIServer = self.server._api_server
+        body = self._read_body() or {}
+        result = server.finalize_run(body.get("outcome"))
+        self._send_json(result, 200 if result.get("success") else 409)
 
     def _handle_query(self):
         """Handle SQL queries: POST /query {"sql": "SELECT ..."}
@@ -625,44 +650,6 @@ class _APIHandler(BaseHTTPRequestHandler):
             # NOT leak details — route through the centralized scrubber.
             self._send_internal_error(e, op="query")
 
-    def _handle_daily_scripts_post(self):
-        """Register a daily script snapshot: POST /daily-scripts {"name": "x.py", "content": "..."}."""
-        try:
-            body = self._read_body()
-            name = body.get('name', '')
-            content = body.get('content', '')
-            if not name:
-                self._send_json({"success": False, "error": "name required"}, 400)
-                return
-            server: NovaMindAPIServer = self.server._api_server
-            with server._lock:
-                server._daily_scripts[name] = content
-            self._send_json({"success": True, "data": {"name": name, "registered": True}})
-        except Exception as e:
-            self._send_internal_error(e, op="daily-scripts:post")
-
-    def _handle_daily_scripts_get(self):
-        """List registered daily scripts: GET /daily-scripts."""
-        server: NovaMindAPIServer = self.server._api_server
-        with server._lock:
-            scripts = [{"name": n, "size": len(c)} for n, c in server._daily_scripts.items()]
-        self._send_json({"success": True, "data": {"scripts": scripts}})
-
-    def _handle_daily_scripts_delete(self):
-        """Remove a daily script: DELETE /daily-scripts {"name": "x.py"}."""
-        try:
-            body = self._read_body()
-            name = body.get('name', '')
-            server: NovaMindAPIServer = self.server._api_server
-            with server._lock:
-                if name not in server._daily_scripts:
-                    self._send_json({"success": False, "error": f"Script not found: {name}"}, 404)
-                    return
-                del server._daily_scripts[name]
-            self._send_json({"success": True, "data": {"removed": name}})
-        except Exception as e:
-            self._send_internal_error(e, op="daily-scripts:delete")
-
     def _handle_vars(self):
         """Handle variable queries: GET /vars."""
         server: NovaMindAPIServer = self.server._api_server
@@ -693,6 +680,12 @@ class _APIHandler(BaseHTTPRequestHandler):
         """
         from .database import get_cash, get_active_subscriber_count
         server: NovaMindAPIServer = self.server._api_server
+        if server._week_advance_in_progress:
+            self._send_json({
+                "success": False,
+                "error": "week_advance_in_progress",
+            }, 409)
+            return
         cash = 0
         subs = 0
         if server.conn:
@@ -702,7 +695,8 @@ class _APIHandler(BaseHTTPRequestHandler):
             "day": server.tools.current_day,
             "cash": cash,
             "subscribers": subs,
-            "timed_out": server._step_day_timed_out,
+            "timed_out": server._step_week_timed_out,
+            "week_advance_failed": server._week_advance_failed,
         })
 
 
@@ -760,7 +754,8 @@ class NovaMindAPIServer:
 
     def __init__(self, tools: AgentTools, simulator=None, conn=None,
                  day_callback=None, dashboard_callback=None,
-                 shock_manager=None, event_logger=None):
+                 shock_manager=None, event_logger=None,
+                 checkpoint_persist_callback=None, run_finalize_callback=None):
         """Initialize the API server.
 
         Args:
@@ -771,6 +766,10 @@ class NovaMindAPIServer:
             dashboard_callback: Optional callback(day) -> dashboard string
             shock_manager: Optional ShockManager for generating shocks each day
             event_logger: Optional EventLogger for logging events
+            checkpoint_persist_callback: Callback(day, require_fresh_snapshot)
+                that durably saves the simulator database and server log boundaries.
+            run_finalize_callback: Callback(outcome, day, cash) that writes terminal
+                event metadata after the server validates the requested outcome.
         """
         self.tools = tools
         self.simulator = simulator
@@ -779,14 +778,20 @@ class NovaMindAPIServer:
         self.dashboard_callback = dashboard_callback
         self.shock_manager = shock_manager
         self.event_logger = event_logger
+        self.checkpoint_persist_callback = checkpoint_persist_callback
+        self.run_finalize_callback = run_finalize_callback
         self._httpd: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self.port: int = 0
         self._lock = threading.RLock()
         self._last_dashboard: str = ""
         self._last_day_result = None
-        self._daily_scripts: Dict[str, str] = {}  # name -> content snapshot
-        self._step_day_timed_out: bool = False  # Set when step_day exceeds timeout
+        self._step_week_timed_out: bool = False
+        self._week_advance_in_progress: bool = False
+        self._week_advance_failed: bool = False
+        self._state_revision: int = 0
+        self._checkpoint_snapshot_revision: int = 0
+        self._finalized_outcome: Optional[str] = None
 
         # Per-query wall-clock deadline (monotonic seconds; 0 = disabled).
         # Set inside _handle_query before cursor.execute, cleared in finally.
@@ -824,13 +829,141 @@ class NovaMindAPIServer:
     def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> Any:
         """Execute a tool call with thread safety."""
         with self._lock:
+            if self._week_advance_failed:
+                return ToolResult(False, "week_advance_failed")
+            if self._week_advance_in_progress:
+                return ToolResult(False, "week_advance_in_progress")
             dispatch_fn = _TOOL_DISPATCH.get(tool_name)
             if dispatch_fn is None:
                 return ToolResult(False, f"Unknown tool: {tool_name}")
-            return dispatch_fn(self.tools, args)
+            result = dispatch_fn(self.tools, args)
+            # 工具可能修改同一天的经营状态，断点不能继续复用周末时生成的旧快照。
+            self._state_revision += 1
+            return result
 
-    # Maximum allowed time for step_week before auto-quit (seconds)
-    STEP_WEEK_TIMEOUT = 4200  # 7× longer than old per-day timeout
+    def persist_checkpoint(self, expected_day: int) -> Dict[str, Any]:
+        """Persist one exact simulator day and report the committed day."""
+        from .database import get_api_usage_summary, get_cash
+
+        with self._lock:
+            # step_week 超时后工作线程不一定真正停止，数据库可能仍在变化。
+            # 此时拒绝生成断点，Runner 会保留上一个已确认完整的断点。
+            if (
+                self._week_advance_in_progress
+                or self._step_week_timed_out
+                or self._week_advance_failed
+            ):
+                return {
+                    "success": False,
+                    "error": "week_advance_not_stable",
+                    "expected_day": expected_day,
+                    "actual_day": self.tools.current_day,
+                }
+            actual_day = self.tools.current_day
+            if actual_day != expected_day:
+                return {
+                    "success": False,
+                    "error": "checkpoint_day_mismatch",
+                    "expected_day": expected_day,
+                    "actual_day": actual_day,
+                }
+            if self.checkpoint_persist_callback is None:
+                return {"success": False, "error": "checkpoint_persistence_unavailable"}
+            require_fresh_snapshot = (
+                self._checkpoint_snapshot_revision != self._state_revision
+            )
+            persistence = self.checkpoint_persist_callback(
+                actual_day, require_fresh_snapshot
+            )
+            if not isinstance(persistence, dict):
+                return {"success": False, "error": "invalid_checkpoint_persistence_result"}
+            persisted_day = persistence.get("persisted_day")
+            if persisted_day != actual_day:
+                return {
+                    "success": False,
+                    "error": "persisted_day_mismatch",
+                    "expected_day": actual_day,
+                    "persisted_day": persisted_day,
+                }
+            self._checkpoint_snapshot_revision = self._state_revision
+            return {
+                "success": True,
+                "persisted_day": persisted_day,
+                "checkpoint_cash": get_cash(self.conn) if self.conn is not None else 0.0,
+                "environment_llm_usage": (
+                    get_api_usage_summary(self.conn)
+                    if self.conn is not None
+                    else {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cost_usd": 0.0,
+                        "by_purpose": {},
+                    }
+                ),
+                "server_log_offsets": persistence.get("server_log_offsets"),
+            }
+
+    def finalize_run(self, outcome: Any) -> Dict[str, Any]:
+        """Validate and commit a terminal experiment outcome exactly once."""
+        from .database import get_cash
+
+        with self._lock:
+            if outcome not in {"completed", "bankrupt"}:
+                return {"success": False, "error": "invalid_terminal_outcome"}
+            if (
+                self._week_advance_in_progress
+                or self._step_week_timed_out
+                or self._week_advance_failed
+            ):
+                return {"success": False, "error": "week_advance_not_stable"}
+            if self.run_finalize_callback is None:
+                return {"success": False, "error": "run_finalization_unavailable"}
+
+            day = self.tools.current_day
+            cash = get_cash(self.conn) if self.conn is not None else 0.0
+            total_days = getattr(getattr(self.tools, "config", None), "total_days", None)
+            if outcome == "completed" and (total_days is None or day < total_days):
+                return {
+                    "success": False,
+                    "error": "completion_before_target_day",
+                    "day": day,
+                    "target_day": total_days,
+                }
+            if outcome == "completed" and cash < 0:
+                return {
+                    "success": False,
+                    "error": "completion_with_negative_cash",
+                    "cash": cash,
+                }
+            if outcome == "bankrupt" and cash >= 0:
+                return {
+                    "success": False,
+                    "error": "bankruptcy_without_negative_cash",
+                    "cash": cash,
+                }
+            if self._finalized_outcome is not None:
+                if self._finalized_outcome != outcome:
+                    return {"success": False, "error": "run_already_finalized"}
+                return {
+                    "success": True,
+                    "outcome": outcome,
+                    "day": day,
+                    "final_cash": cash,
+                    "already_finalized": True,
+                }
+
+            self.run_finalize_callback(outcome, day, cash)
+            self._finalized_outcome = outcome
+            return {
+                "success": True,
+                "outcome": outcome,
+                "day": day,
+                "final_cash": cash,
+                "already_finalized": False,
+            }
+
+    # 单次周推进的最长等待时间，超时后禁止再为不稳定状态生成断点。
+    STEP_WEEK_TIMEOUT = 4200
 
     # Hard server-side deadline for a single /query SQL execution. If exceeded,
     # the query is interrupted via the progress handler and server._lock is
@@ -839,6 +972,28 @@ class NovaMindAPIServer:
 
     def advance_week(self, predictions: Optional[Dict[int, Dict[str, float]]] = None,
                      rationale: Optional[str] = None) -> Dict[str, Any]:
+        """Run one exclusive week advancement and keep timeout state quarantined."""
+        with self._lock:
+            if self._week_advance_failed:
+                return {"success": False, "error": "week_advance_failed"}
+            if self._week_advance_in_progress:
+                return {"success": False, "error": "week_advance_in_progress"}
+            self._week_advance_in_progress = True
+        try:
+            result = self._advance_week_impl(predictions, rationale)
+        except Exception:
+            with self._lock:
+                self._week_advance_in_progress = False
+                # 本周可能已按天提交了部分状态，当前服务实例不得继续用于实验。
+                self._week_advance_failed = True
+            raise
+        if result.get("error") != "step_week_timeout":
+            with self._lock:
+                self._week_advance_in_progress = False
+        return result
+
+    def _advance_week_impl(self, predictions: Optional[Dict[int, Dict[str, float]]] = None,
+                           rationale: Optional[str] = None) -> Dict[str, Any]:
         """Advance the simulator by one week (7 days) and return the dashboard.
 
         Enforces a hard timeout (STEP_WEEK_TIMEOUT seconds) on step_week().
@@ -869,6 +1024,7 @@ class NovaMindAPIServer:
         if rationale and self.event_logger:
             try:
                 self.event_logger.log_agent_action(
+                    day=old_day,
                     tool_name='log_rationale',
                     arguments={'rationale': rationale},
                     result={'logged': True},
@@ -882,18 +1038,10 @@ class NovaMindAPIServer:
         # the day the prediction was made, not the post-step day).
         if predictions and self.conn is not None:
             from saas_bench.database import save_predictions as _save_predictions
-            _pred_exc_tb = None
-            try:
-                with self._lock:
-                    _save_predictions(self.conn, old_day, predictions, _time.time())
-                    self.conn.commit()
-            except Exception:
-                import traceback
-                _pred_exc_tb = traceback.format_exc()
-            if _pred_exc_tb is not None:
-                # Log AFTER releasing the lock so a buffered stderr write can't
-                # back-pressure the lock holder. (run 27c000a5 d105 hang.)
-                print(_pred_exc_tb, file=sys.stderr, flush=True)
+            # 预测是 benchmark 的正式评测输入；落库失败时不能继续推进世界。
+            with self._lock:
+                _save_predictions(self.conn, old_day, predictions, _time.time())
+                self.conn.commit()
 
         # Check for shocks BEFORE step_week (so shock effects apply this week)
         if self.shock_manager:
@@ -901,7 +1049,7 @@ class NovaMindAPIServer:
                 new_shocks = self.shock_manager.check_and_generate_shocks(d)
                 if self.event_logger:
                     for shock in new_shocks:
-                        self.event_logger.log_shock(shock.shock_type, shock.details)
+                        self.event_logger.log_shock(d, shock.shock_type, shock.details)
 
         # Run step_week in a worker thread so we can enforce a timeout.
         _step_start = _time.monotonic()
@@ -916,7 +1064,7 @@ class NovaMindAPIServer:
         except FuturesTimeoutError:
             elapsed = _time.monotonic() - _step_start
             self._last_step_elapsed = elapsed
-            self._step_day_timed_out = True
+            self._step_week_timed_out = True
             executor.shutdown(wait=False, cancel_futures=True)
             return {
                 "success": False,
@@ -942,14 +1090,12 @@ class NovaMindAPIServer:
             week_start = old_day + 1
             inbox.extend(get_thread_inbox_items(self.conn, new_day, week_start_day=week_start))
 
-        # Build dashboard OUTSIDE the lock so weekly scripts can call back
-        # to the API server (e.g., nm.query()) without deadlocking.
+        # Dashboard generation stays outside the lock because it performs
+        # database analysis and may be comparatively expensive.
         if self.dashboard_callback:
             dashboard = self.dashboard_callback(new_day, week_result)
         elif self.conn:
-            # Run weekly scripts if available
-            calc_outputs = self._run_daily_scripts_internal() if hasattr(self, '_daily_script_snapshots') else None
-            dashboard = build_weekly_dashboard(self.conn, new_day, week_result, calc_outputs, inbox)
+            dashboard = build_weekly_dashboard(self.conn, new_day, week_result, None, inbox)
         else:
             week = (new_day + 6) // 7
             dashboard = f"=== Week {week} Dashboard (Day {new_day}) ===\n(No dashboard data available)"
@@ -960,6 +1106,11 @@ class NovaMindAPIServer:
         if self.day_callback:
             self.day_callback(new_day, dashboard)
 
+        with self._lock:
+            # day_callback 提交的快照与当前 revision 对应，可供紧随其后的断点复用。
+            self._state_revision += 1
+            self._checkpoint_snapshot_revision = self._state_revision
+
         return {
             "success": True,
             "day": new_day,
@@ -969,13 +1120,3 @@ class NovaMindAPIServer:
     @property
     def last_dashboard(self) -> str:
         return self._last_dashboard
-
-    def get_daily_scripts(self) -> Dict[str, str]:
-        """Get all registered daily script snapshots (name -> content)."""
-        with self._lock:
-            return dict(self._daily_scripts)
-
-    def set_daily_scripts(self, scripts: Dict[str, str]):
-        """Restore daily scripts from checkpoint."""
-        with self._lock:
-            self._daily_scripts = dict(scripts)

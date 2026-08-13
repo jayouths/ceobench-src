@@ -1,32 +1,27 @@
 """Customer LLM simulation for SaaS Bench.
 
-This module generates:
-1. Social media posts from customers (via Bedrock Haiku 4.5)
-2. Enterprise negotiation responses (via Bedrock Sonnet 4.5)
-3. VC negotiation responses (via same LLM as enterprise)
+This module generates social media posts and reactions from customers.
 
-Social media uses Haiku 4.5 (fast/cheap for short creative posts).
-Enterprise and VC negotiation use Sonnet 4.5 (smarter for complex negotiations).
-Both default to AWS Bedrock, but can fall back to OpenAI if configured.
+The provider, API protocol, model, request parameters, and pricing are
+supplied by the experiment configuration.
 """
 
 import sqlite3
-import json
+import os
 import random as _random
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 
-from openai import OpenAI
-
-from .config import BenchmarkConfig, CUSTOMER_GROUPS, ChurnReason
+from .config import BenchmarkConfig, ChurnReason
+from .llm_provider import (
+    TextLLMResult,
+    call_text_model,
+    create_llm_client,
+    model_token_cost_usd,
+)
 from .database import (
     get_customer_persona, get_group_characteristics, get_world_context,
     add_social_media_post, add_notification
-)
-from .enterprise import (
-    NegotiationState, get_negotiation_state,
-    compute_customer_offer_price, compute_max_accepting_price,
-    evaluate_agent_offer, add_customer_message
 )
 
 
@@ -122,35 +117,6 @@ EVENT_DESCRIPTION_VARIANTS = {
 }
 
 
-def _create_bedrock_client(config: BenchmarkConfig, prefix: str):
-    """Create an AnthropicBedrock client for Bedrock API calls."""
-    from anthropic import AnthropicBedrock
-    return AnthropicBedrock(
-        aws_region=config.bedrock_region,
-        timeout=getattr(config, f"{prefix}_timeout_seconds"),
-    )
-
-
-def _create_anthropic_client(config: BenchmarkConfig, prefix: str):
-    """Create a role-specific direct Anthropic API client."""
-    import os
-    from anthropic import Anthropic
-
-    api_key_env = getattr(config, f"{prefix}_api_key_env")
-    api_key_required = getattr(config, f"{prefix}_api_key_required")
-    api_key = os.environ.get(api_key_env) if api_key_env else None
-    if not api_key_required:
-        api_key = api_key or "not-required"
-    kwargs = {
-        "api_key": api_key,
-        "timeout": getattr(config, f"{prefix}_timeout_seconds"),
-    }
-    base_url = getattr(config, f"{prefix}_base_url")
-    if base_url:
-        kwargs["base_url"] = base_url
-    return Anthropic(**kwargs)
-
-
 @dataclass
 class CustomerLLMResponse:
     """Response from customer LLM."""
@@ -160,193 +126,92 @@ class CustomerLLMResponse:
     sentiment: Optional[str] = None  # 'positive', 'neutral', 'negative' for posts
     input_tokens: int = 0
     output_tokens: int = 0
-
-
-def _optional_reasoning(effort: Optional[str]) -> Dict[str, Any]:
-    """Return a Responses API reasoning argument only when explicitly set."""
-    if effort is None:
-        return {}
-    return {"reasoning": {"effort": effort}}
+    model: Optional[str] = None
 
 
 class CustomerSimulator:
-    """LLM-based customer simulation using Bedrock Claude models.
-
-    Social media posts use Haiku 4.5 (fast/cheap).
-    Enterprise negotiation uses Sonnet 4.5 (smarter).
-    Falls back to OpenAI if provider is set to "openai" in config.
-    """
+    """LLM-based social simulation using an explicitly configured model."""
 
     def __init__(
         self,
         conn: sqlite3.Connection,
         config: BenchmarkConfig,
-        social_openai_client: Optional[OpenAI] = None,
-        enterprise_openai_client: Optional[OpenAI] = None,
-        client: Optional[OpenAI] = None,
+        social_client: Any = None,
     ):
-        # `client` remains as a compatibility fallback for direct callers.
-        self.social_openai_client = social_openai_client or client
-        self.enterprise_openai_client = enterprise_openai_client or client
-        self.client = self.social_openai_client or self.enterprise_openai_client
+        self._social_client = social_client
         self.conn = conn
         self.config = config
-        self.model = config.agent_llm_model  # Fallback model (used when provider != bedrock)
         self.event_logger = None  # Optional event logger
         self.current_day = 0  # Track current day for logging
 
-        # Initialize Anthropic-compatible clients lazily (only when needed)
-        self._social_bedrock_client = None
-        self._enterprise_bedrock_client = None
-        self._social_anthropic_client = None
-        self._enterprise_anthropic_client = None
-
-    @property
-    def social_bedrock_client(self):
-        """Lazy-initialize the social-post AnthropicBedrock client."""
-        if self._social_bedrock_client is None:
-            self._social_bedrock_client = _create_bedrock_client(
-                self.config, "social_post_llm"
-            )
-        return self._social_bedrock_client
-
-    @property
-    def enterprise_bedrock_client(self):
-        """Lazy-initialize the enterprise AnthropicBedrock client."""
-        if self._enterprise_bedrock_client is None:
-            self._enterprise_bedrock_client = _create_bedrock_client(
-                self.config, "enterprise_llm"
-            )
-        return self._enterprise_bedrock_client
-
-    @property
-    def social_anthropic_client(self):
-        """Lazy-initialize the social-post Anthropic client."""
-        if self._social_anthropic_client is None:
-            self._social_anthropic_client = _create_anthropic_client(
-                self.config, "social_post_llm"
-            )
-        return self._social_anthropic_client
-
-    @property
-    def enterprise_anthropic_client(self):
-        """Lazy-initialize the enterprise Anthropic client."""
-        if self._enterprise_anthropic_client is None:
-            self._enterprise_anthropic_client = _create_anthropic_client(
-                self.config, "enterprise_llm"
-            )
-        return self._enterprise_anthropic_client
-
-    @property
-    def social_post_client(self):
-        """Return whichever Anthropic-compatible client matches social_post_llm_provider.
-
-        Both AnthropicBedrock and Anthropic SDKs expose the same .messages.create()
-        interface, so call sites can use this client without further branching as
-        long as the provider is one of {"bedrock", "anthropic"}.
-        Raises ValueError for "openai" (caller must dispatch to the OpenAI path).
-        """
-        provider = self.config.social_post_llm_provider
-        if provider == "bedrock":
-            return self.social_bedrock_client
-        if provider == "anthropic":
-            return self.social_anthropic_client
-        raise ValueError(
-            f"social_post_client only supports 'bedrock' or 'anthropic'; got {provider!r}. "
-            f"For OpenAI, dispatch via self.social_openai_client.responses.create()."
+    def _get_client(self):
+        existing = self._social_client
+        if existing is not None:
+            return existing
+        prefix = "social_post_llm"
+        api_key_env = getattr(self.config, f"{prefix}_api_key_env")
+        api_key = os.environ.get(api_key_env) if api_key_env else None
+        if not getattr(self.config, f"{prefix}_api_key_required"):
+            api_key = api_key or "not-required"
+        created = create_llm_client(
+            provider=getattr(self.config, f"{prefix}_provider"),
+            api_type=getattr(self.config, f"{prefix}_api_type"),
+            api_key=api_key,
+            base_url=getattr(self.config, f"{prefix}_base_url"),
+            timeout_seconds=getattr(self.config, f"{prefix}_timeout_seconds"),
         )
-
-    @property
-    def enterprise_client(self):
-        provider = self.config.enterprise_llm_provider
-        if provider == "bedrock":
-            return self.enterprise_bedrock_client
-        if provider == "anthropic":
-            return self.enterprise_anthropic_client
-        raise ValueError(
-            f"enterprise_client only supports 'bedrock' or 'anthropic'; got {provider!r}."
-        )
-
-    @staticmethod
-    def _optional_sampling(temperature: Optional[float], top_p: Optional[float]) -> Dict[str, Any]:
-        params: Dict[str, Any] = {}
-        if temperature is not None:
-            params["temperature"] = temperature
-        if top_p is not None:
-            params["top_p"] = top_p
-        return params
+        self._social_client = created
+        return created
 
     def create_social_response(
         self,
         system_prompt: str,
         user_prompt: str,
-        task_max_tokens: Optional[int] = None,
-    ):
+        task: Optional[str] = None,
+    ) -> TextLLMResult:
         """Call the configured social LLM with one effective parameter path."""
-        config = self.config
-        max_tokens = config.social_post_llm_max_tokens
-        if task_max_tokens is not None:
-            max_tokens = min(max_tokens, task_max_tokens)
-        sampling = self._optional_sampling(
-            config.social_post_llm_temperature,
-            config.social_post_llm_top_p,
-        )
-        if config.social_post_llm_provider in ("bedrock", "anthropic"):
-            return self.social_post_client.messages.create(
-                model=config.social_post_llm_model,
-                max_tokens=max_tokens,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
-                **sampling,
-            )
-        if self.social_openai_client is None:
-            raise RuntimeError("social OpenAI client is not configured")
-        return self.social_openai_client.responses.create(
-            model=config.social_post_llm_model,
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_output_tokens=max_tokens,
-            **sampling,
-            **_optional_reasoning(config.social_post_llm_reasoning_effort),
-        )
+        return self._create_text_response(system_prompt, user_prompt, task)
 
-    def create_enterprise_response(
+    def _create_text_response(
         self,
         system_prompt: str,
         user_prompt: str,
-        task_max_tokens: Optional[int] = None,
-    ):
-        """Call the configured enterprise LLM with one effective parameter path."""
+        task: Optional[str],
+    ) -> TextLLMResult:
+        prefix = "social_post_llm"
         config = self.config
-        max_tokens = config.enterprise_llm_max_tokens
-        if task_max_tokens is not None:
-            max_tokens = min(max_tokens, task_max_tokens)
-        sampling = self._optional_sampling(
-            config.enterprise_llm_temperature,
-            config.enterprise_llm_top_p,
+        task_values = dict(getattr(config, f"{prefix}_task_parameters").get(task, {}))
+        request_options = {
+            key: dict(value)
+            for key, value in getattr(config, f"{prefix}_request_options").items()
+        }
+        for key, value in task_values.get("request_options", {}).items():
+            request_options.setdefault(key, {}).update(value)
+        max_tokens = task_values.get(
+            "max_output_tokens", getattr(config, f"{prefix}_max_tokens")
         )
-        if config.enterprise_llm_provider in ("bedrock", "anthropic"):
-            return self.enterprise_client.messages.create(
-                model=config.enterprise_llm_model,
-                max_tokens=max_tokens,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
-                **sampling,
-            )
-        if self.enterprise_openai_client is None:
-            raise RuntimeError("enterprise OpenAI client is not configured")
-        return self.enterprise_openai_client.responses.create(
-            model=config.enterprise_llm_model,
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+        response = call_text_model(
+            client=self._get_client(),
+            api_type=getattr(config, f"{prefix}_api_type"),
+            model=getattr(config, f"{prefix}_model"),
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
             max_output_tokens=max_tokens,
-            **sampling,
-            **_optional_reasoning(config.enterprise_llm_reasoning_effort),
+            temperature=task_values.get(
+                "temperature", getattr(config, f"{prefix}_temperature")
+            ),
+            top_p=task_values.get("top_p", getattr(config, f"{prefix}_top_p")),
+            reasoning_effort=task_values.get(
+                "reasoning_effort", getattr(config, f"{prefix}_reasoning_effort")
+            ),
+            request_options=request_options,
         )
+        # Provider 返回成功但正文为空同样不能构成有效环境响应，禁止后续伪造模板结果。
+        if not response.text:
+            raise RuntimeError(
+                f"{prefix} returned an empty response for task {task or 'default'}"
+            )
+        return response
 
     def set_event_logger(self, event_logger):
         """Set the event logger for detailed LLM cost logging."""
@@ -364,37 +229,21 @@ class CustomerSimulator:
         purpose: Optional[str] = None,
     ) -> float:
         """Calculate cost based on model used."""
-        used_model = model or self.model
-        if purpose in {"customer_negotiation", "customer_initial_outreach"}:
-            input_price = self.config.enterprise_llm_input_cost_per_million
-            output_price = self.config.enterprise_llm_output_cost_per_million
-        else:
-            input_price = self.config.social_post_llm_input_cost_per_million
-            output_price = self.config.social_post_llm_output_cost_per_million
-        if input_price is not None and output_price is not None:
-            return (
-                input_tokens * input_price / 1_000_000
-                + output_tokens * output_price / 1_000_000
-            )
-        if 'haiku' in used_model:
-            input_cost = input_tokens * self.config.bedrock_haiku_input_cost_per_1k / 1000
-            output_cost = output_tokens * self.config.bedrock_haiku_output_cost_per_1k / 1000
-        elif 'sonnet' in used_model:
-            input_cost = input_tokens * self.config.bedrock_sonnet_input_cost_per_1k / 1000
-            output_cost = output_tokens * self.config.bedrock_sonnet_output_cost_per_1k / 1000
-        elif used_model and 'gpt-5.2' in used_model:
-            input_cost = input_tokens * self.config.gpt52_medium_thinking_input_cost_per_1k / 1000
-            output_cost = output_tokens * self.config.gpt52_medium_thinking_output_cost_per_1k / 1000
-        else:
-            raise ValueError(
-                f"No token pricing configured for model {used_model!r}; "
-                "set input_cost_per_million and output_cost_per_million"
-            )
-        return input_cost + output_cost
+        if not model:
+            raise ValueError("model is required for simulator LLM cost accounting")
+        used_model = model
+        return model_token_cost_usd(
+            used_model,
+            input_tokens,
+            output_tokens,
+            self.config.social_post_llm_pricing,
+        )
 
     def _log_cost(self, day: int, purpose: str, input_tokens: int, output_tokens: int, model: str = None):
         """Log API cost to database and event logger."""
-        used_model = model or self.model
+        if not model:
+            raise ValueError("model is required for simulator LLM cost logging")
+        used_model = model
         cost = self._calculate_cost(
             input_tokens,
             output_tokens,
@@ -410,6 +259,7 @@ class CustomerSimulator:
         # Log to event logger if available
         if self.event_logger:
             self.event_logger.log_llm_call(
+                day=day,
                 purpose=purpose,
                 model=used_model,
                 input_tokens=input_tokens,
@@ -667,9 +517,6 @@ Output ONLY the post text, nothing else."""
 
         user_prompt = f"Write a {sentiment} social media post about your experience with {product_name}."
 
-        social_model = self.config.social_post_llm_model
-        social_provider = self.config.social_post_llm_provider
-
         # LLM-replay cache: when BOSSBENCH_LLM_REPLAY_DB is set, return cached
         # content from the source run instead of calling the live LLM.
         from . import llm_replay as _llm_replay
@@ -682,392 +529,27 @@ Output ONLY the post text, nothing else."""
                 output_tokens=0,
             )
 
-        response = self.create_social_response(system_prompt, user_prompt)
-        if social_provider in ("bedrock", "anthropic"):
-            post_text = response.content[0].text.strip()
-            input_tokens = response.usage.input_tokens
-            output_tokens = response.usage.output_tokens
-        else:
-            post_text = response.output_text.strip()
-            input_tokens = response.usage.input_tokens
-            output_tokens = response.usage.output_tokens
+        response = self.create_social_response(
+            system_prompt, user_prompt, task="customer_post"
+        )
+        post_text = response.text
+        input_tokens = response.input_tokens
+        output_tokens = response.output_tokens
 
         # Debug: Log if empty response
         if not post_text:
             print(f"[DEBUG] Empty post for customer {customer_id}, group {group_id}, sentiment {sentiment}")
 
         if not _skip_log_cost:
-            self._log_cost(day, 'customer_social_post', input_tokens, output_tokens, model=social_model)
+            self._log_cost(day, 'customer_social_post', input_tokens, output_tokens, model=response.model)
 
         return CustomerLLMResponse(
             text=post_text,
+            model=response.model,
             sentiment=sentiment,
             input_tokens=input_tokens,
             output_tokens=output_tokens
         )
-
-    # =========================================================================
-    # Enterprise Negotiation Response Generation
-    # =========================================================================
-
-    def generate_negotiation_response(
-        self,
-        day: int,
-        thread_id: int,
-        agent_message: str,
-        agent_offer: Optional[Dict] = None
-    ) -> CustomerLLMResponse:
-        """Generate an enterprise customer's response in a negotiation.
-
-        The chassis (enterprise.py) determines the acceptable price range and
-        decision logic. This function generates the natural language response.
-
-        Args:
-            day: Current simulation day
-            thread_id: The negotiation thread
-            agent_message: The agent's last message
-            agent_offer: Structured offer from agent (if any)
-
-        Returns:
-            CustomerLLMResponse with response text, decision, and offer price
-        """
-        state = get_negotiation_state(self.conn, thread_id)
-        if not state:
-            return CustomerLLMResponse(
-                text="I'm not sure what you're referring to.",
-                decision='reject'
-            )
-
-        # Get persona and group info
-        persona = get_customer_persona(self.conn, state.customer_id)
-        group_chars = get_group_characteristics(self.conn, state.customer_id)
-        group = CUSTOMER_GROUPS.get(state.customer_id)
-
-        # Get current config for quality calculation
-        from .enterprise import get_quality_for_plan
-
-        # Determine quality for best available plan
-        best_quality = 0.7  # Default assumption
-        if state.current_plan:
-            best_quality = get_quality_for_plan(
-                self.conn, state.current_plan, state.customer_id, self.config
-            )
-
-        # Initial-negotiation perceived-quality noise (enterprise new_lead threads only).
-        # Sticky per customer_id so this customer sees the same noise multiplier across
-        # every turn of their initial negotiation. Renewal / renegotiation / plan_change /
-        # churn_prevention threads do NOT receive this noise. The simulator back-ref is
-        # set by Simulator.__init__; if absent (e.g. unit tests instantiating
-        # CustomerSimulator directly), the noise is simply skipped.
-        if state.thread_type == 'new_lead':
-            sim = getattr(self, 'simulator', None)
-            if sim is not None:
-                best_quality *= sim._get_customer_quality_noise(state.customer_id)
-
-        # Compute chassis values
-        max_accepting_price = compute_max_accepting_price(state, best_quality)
-        customer_offer_price = compute_customer_offer_price(state, best_quality, self.config)
-
-        # Evaluate agent's offer (if any)
-        decision = 'counter'
-        final_offer_price = customer_offer_price
-
-        if agent_offer and 'price_per_seat' in agent_offer:
-            agent_price = agent_offer['price_per_seat']
-            decision, counter_price, _ = evaluate_agent_offer(state, agent_price, best_quality, self.config)
-
-            if decision == 'accept':
-                final_offer_price = agent_price
-            elif decision == 'counter':
-                final_offer_price = counter_price
-            else:
-                final_offer_price = customer_offer_price
-
-        # Get conversation history from enterprise_turns
-        messages = self.conn.execute("""
-            SELECT sender, message_text, offer_json FROM enterprise_turns
-            WHERE thread_id = ?
-            ORDER BY message_id DESC
-            LIMIT 5
-        """, (thread_id,)).fetchall()
-
-        conversation_history = "\n".join([
-            f"{'Agent' if m['sender'] == 'agent' else 'Customer'}: {m['message_text'] or '(structural offer)'}"
-            for m in reversed(messages)
-        ])
-
-        # Build persona context from multi-axis persona
-        persona_context = ""
-        if persona:
-            # Check if this is the new multi-axis persona format
-            if persona.get('persona_description'):
-                # Get company profile for enterprise customers
-                company_context = ""
-                if persona.get('company_culture'):
-                    company_context = f"""
-Company Profile:
-- Industry: {persona.get('persona_industry', 'enterprise')}
-- Size: {persona.get('company_size_descriptor', 'established')}
-- Culture: {persona.get('company_culture', 'professional')}
-- Decision Style: {persona.get('company_decision_style', 'thorough')}
-- Primary Concern: {persona.get('company_primary_concern', 'value')}
-"""
-                persona_context = f"""
-Customer Profile:
-- Description: {persona.get('persona_description', '')}
-- Role: {persona.get('persona_role', 'decision-maker')}
-- Experience: {persona.get('persona_experience', 'experienced')}
-- Communication Style: {persona.get('persona_communication', 'professional')}
-{company_context}
-- Negotiation Style: {group_chars.get('enterprise_negotiation_style', 'Standard') if group_chars else 'Standard'}
-"""
-            else:
-                # Fall back to old persona format
-                persona_context = f"""
-Customer Profile:
-- Name: {persona.get('name', 'Enterprise Customer')}
-- Title: {persona.get('job_title', 'Decision Maker')}
-- Company: {persona.get('company_name', 'Enterprise Corp')}
-- Communication Style: {persona.get('communication_style', 'Professional')}
-- Negotiation Style: {group_chars.get('enterprise_negotiation_style', 'Standard') if group_chars else 'Standard'}
-"""
-
-        # Build context about negotiation
-        negotiation_context = f"""
-Negotiation Context:
-- Thread Type: {state.thread_type}
-- Current State: {state.state}
-- Turn: {state.negotiation_turn}
-- Seats: {state.seat_count}
-- Relationship Score: {state.relationship:.2f} (0=poor, 1=excellent)
-- Current Subscription: {state.current_plan or 'None'} at ${state.current_price or 0}/month
-
-Your Position (INTERNAL - do not reveal exact numbers):
-- Maximum you'd pay: ${max_accepting_price:.2f}/seat/month
-- Your current offer: ${customer_offer_price:.2f}/seat/month
-- Decision on agent's offer: {decision.upper()}
-"""
-
-        # Build system prompt
-        system_prompt = f"""You ARE this enterprise customer. React and respond like a real person would in a business negotiation.
-
-{persona_context}
-
-=== YOUR INTERNAL KNOWLEDGE (reference only when relevant) ===
-- You need {state.seat_count} seats
-- Your budget ceiling: ${max_accepting_price:.2f}/seat/month (don't reveal this)
-- Your target price: ${customer_offer_price:.2f}/seat/month
-- Current subscription: {state.current_plan or 'None'} at ${state.current_price or 0}/month
-- Relationship with this vendor: {state.relationship:.0%} (affects trust level)
-- Thread context: {state.thread_type}
-=== END INTERNAL KNOWLEDGE ===
-
-Recent Conversation:
-{conversation_history}
-
-HOW TO RESPOND:
-1. Read the agent's message carefully. What are they actually saying?
-2. React naturally as a human would:
-   - If their message is unclear or confusing → ask for clarification
-   - If they're being pushy → push back or express hesitation
-   - If they make a compelling point → acknowledge it
-   - If they ask a question → answer it naturally
-   - If they make an offer → evaluate it against your budget
-
-3. Your current position on pricing: {decision.upper()}
-   - ACCEPT: Their offer (${agent_offer.get('price_per_seat', 0) if agent_offer else 0:.2f}/seat) works for you
-   - COUNTER: Propose ${final_offer_price:.2f}/seat/month
-   - REJECT: Price is too high or deal doesn't work
-
-4. Keep it natural:
-   - Don't robotically state your decision
-   - Respond to what they said, THEN weave in your position
-   - Show appropriate emotion (enthusiasm, frustration, caution)
-   - 2-4 sentences, like a real email/chat response
-
-Output JSON:
-{{
-    "response": "Your natural response as this person",
-    "decision": "{decision}",
-    "offer_price": {final_offer_price:.2f}
-}}"""
-
-        user_prompt = f"Agent says: \"{agent_message}\"\n\nRespond as the enterprise customer."
-
-        enterprise_model = self.config.enterprise_llm_model
-        enterprise_provider = self.config.enterprise_llm_provider
-
-        try:
-            response = self.create_enterprise_response(system_prompt, user_prompt)
-            if enterprise_provider in ("bedrock", "anthropic"):
-                response_text = response.content[0].text.strip()
-                input_tokens = response.usage.input_tokens
-                output_tokens = response.usage.output_tokens
-            else:
-                response_text = response.output_text.strip()
-                input_tokens = response.usage.input_tokens
-                output_tokens = response.usage.output_tokens
-
-            self._log_cost(day, 'customer_negotiation', input_tokens, output_tokens, model=enterprise_model)
-
-            # Try to parse JSON response
-            try:
-                # Handle potential markdown code blocks
-                if response_text.startswith('```'):
-                    response_text = response_text.split('```')[1]
-                    if response_text.startswith('json'):
-                        response_text = response_text[4:]
-
-                parsed = json.loads(response_text)
-                return CustomerLLMResponse(
-                    text=parsed.get('response', response_text),
-                    decision=parsed.get('decision', decision),
-                    offer_price=parsed.get('offer_price', final_offer_price),
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens
-                )
-            except json.JSONDecodeError:
-                # If not valid JSON, use the raw text
-                return CustomerLLMResponse(
-                    text=response_text,
-                    decision=decision,
-                    offer_price=final_offer_price,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens
-                )
-
-        except Exception as e:
-            # Fallback response
-            fallback_responses = {
-                'accept': f"That works for us. We'll proceed with ${final_offer_price:.2f}/seat.",
-                'counter': f"We can do ${final_offer_price:.2f}/seat. Can you meet us there?",
-                'reject': "I appreciate the offer, but it doesn't fit our budget constraints right now."
-            }
-            return CustomerLLMResponse(
-                text=fallback_responses.get(decision, "Let me get back to you."),
-                decision=decision,
-                offer_price=final_offer_price if decision != 'reject' else None,
-                input_tokens=0,
-                output_tokens=0
-            )
-
-    def generate_initial_outreach(
-        self,
-        day: int,
-        customer_id: int,
-        thread_type: str
-    ) -> CustomerLLMResponse:
-        """Generate an initial message from an enterprise customer starting a thread.
-
-        Args:
-            day: Current simulation day
-            customer_id: The enterprise customer
-            thread_type: 'new_lead', 'plan_change', 'churn_prevention'
-
-        Returns:
-            CustomerLLMResponse with initial message
-        """
-        persona = get_customer_persona(self.conn, customer_id)
-        group_id = self.conn.execute(
-            "SELECT group_id FROM customers WHERE customer_id = ?",
-            (customer_id,)
-        ).fetchone()
-        group_id = group_id['group_id'] if group_id else 'E1'
-
-        group_chars = get_group_characteristics(self.conn, group_id)
-        product_name = get_world_context(self.conn, 'product_name') or 'NovaMind'
-
-        # Context based on thread type
-        type_contexts = {
-            'new_lead': "You're interested in exploring the product for your organization.",
-            'plan_change': "You want to change your subscription plan to better fit your needs.",
-            'churn_prevention': "You're unhappy with the service and considering cancellation."
-        }
-
-        type_context = type_contexts.get(thread_type, "You want to discuss your subscription.")
-
-        persona_context = ""
-        if persona:
-            # Check if this is the new multi-axis persona format
-            if persona.get('persona_description'):
-                # Get company profile for enterprise customers
-                company_context = ""
-                if persona.get('company_culture'):
-                    company_context = f"""
-Your Company:
-- Industry: {persona.get('persona_industry', 'enterprise')}
-- Size: {persona.get('company_size_descriptor', 'established')}
-- Culture: {persona.get('company_culture', 'professional')}
-- Decision Style: {persona.get('company_decision_style', 'thorough')}
-- Primary Concern: {persona.get('company_primary_concern', 'value')}
-"""
-                persona_context = f"""
-You are:
-- Description: {persona.get('persona_description', '')}
-- Role: {persona.get('persona_role', 'decision-maker')}
-- Experience: {persona.get('persona_experience', 'experienced')}
-- Communication Style: {persona.get('persona_communication', 'professional')}
-{company_context}"""
-            else:
-                # Fall back to old persona format
-                persona_context = f"""
-You are:
-- Name: {persona.get('name', 'Enterprise Customer')}
-- Title: {persona.get('job_title', 'Decision Maker')}
-- Company: {persona.get('company_name', 'Enterprise Corp')}
-- Style: {persona.get('communication_style', 'Professional')}
-"""
-
-        system_prompt = f"""You are an enterprise customer reaching out to {product_name}'s team.
-
-{persona_context}
-
-Situation: {type_context}
-
-Write a professional initial message to start the conversation.
-Keep it concise (2-3 sentences) and appropriate for business communication.
-
-Output ONLY the message text."""
-
-        enterprise_model = self.config.enterprise_llm_model
-        enterprise_provider = self.config.enterprise_llm_provider
-
-        try:
-            response = self.create_enterprise_response(
-                system_prompt,
-                "Write your initial outreach message.",
-                task_max_tokens=150,
-            )
-            if enterprise_provider in ("bedrock", "anthropic"):
-                text = response.content[0].text.strip()
-                input_tokens = response.usage.input_tokens
-                output_tokens = response.usage.output_tokens
-            else:
-                text = response.output_text.strip()
-                input_tokens = response.usage.input_tokens
-                output_tokens = response.usage.output_tokens
-
-            self._log_cost(day, 'customer_initial_outreach', input_tokens, output_tokens, model=enterprise_model)
-
-            return CustomerLLMResponse(
-                text=text,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens
-            )
-
-        except Exception as e:
-            fallback_messages = {
-                'new_lead': f"Hi, I'm interested in learning more about {product_name} for my organization. Can we schedule a call?",
-                'plan_change': f"We've been using {product_name} and would like to discuss changing our plan.",
-                'churn_prevention': f"I have some concerns about the service that I'd like to address."
-            }
-            return CustomerLLMResponse(
-                text=fallback_messages.get(thread_type, "I'd like to discuss our subscription."),
-                input_tokens=0,
-                output_tokens=0
-            )
-
-
 
 # V2.1: Churn reason message generation
 # (Promise extraction system removed — agent no longer sends text messages)
@@ -1149,7 +631,7 @@ def generate_churn_message(
 # =========================================================================
 
 def judge_agent_social_post(
-    bedrock_client,
+    social_text_call,
     config,
     post_content: str,
     group_id: str,
@@ -1162,10 +644,10 @@ def judge_agent_social_post(
 ) -> tuple:
     """Judge an agent's social media post from a specific customer group's perspective.
 
-    Uses Haiku 4.5 on Bedrock. Returns (effect, reasoning) where effect is [-1.0, 1.0].
+    Returns (effect, reasoning) where effect is [-1.0, 1.0].
 
     Args:
-        bedrock_client: AnthropicBedrock client
+        social_text_call: Configured social-model call function
         config: BenchmarkConfig
         post_content: The agent's post text
         group_id: Customer group being judged from
@@ -1188,8 +670,8 @@ def judge_agent_social_post(
         cached = _llm_replay.get_cache().get_judge_by_content(post_content, group_id)
         if cached is not None:
             effect, reasoning = cached
-            return effect, reasoning, 0, 0
-        return 0.0, "", 0, 0
+            return effect, reasoning, 0, 0, config.social_post_llm_model
+        return 0.0, "", 0, 0, config.social_post_llm_model
 
     # Build recent posts context (up to 10, with original post for replies)
     history_str = ""
@@ -1245,17 +727,15 @@ Respond in EXACTLY this format:
 SCORE: <number between -1.0 and 1.0>
 REASON: <one sentence why>"""
 
-    social_model = config.social_post_llm_model
-    response = bedrock_client.messages.create(
-        model=social_model,
-        max_tokens=100,
-        temperature=0.3,
-        messages=[{"role": "user", "content": prompt}],
+    response = social_text_call(
+        "",
+        prompt,
+        task="agent_post_judge",
     )
 
-    text = response.content[0].text.strip()
-    input_tokens = response.usage.input_tokens
-    output_tokens = response.usage.output_tokens
+    text = response.text
+    input_tokens = response.input_tokens
+    output_tokens = response.output_tokens
 
     # Parse structured response: "SCORE: <number>\nREASON: <text>"
     effect = 0.0
@@ -1269,11 +749,11 @@ REASON: <one sentence why>"""
             effect = float(fallback.group(1))
     effect = max(-1.0, min(1.0, effect))
 
-    return effect, text, input_tokens, output_tokens
+    return effect, text, input_tokens, output_tokens, response.model
 
 
 def generate_customer_reply_to_agent(
-    bedrock_client,
+    social_text_call,
     config,
     agent_post_content: str,
     group_id: str,
@@ -1287,7 +767,7 @@ def generate_customer_reply_to_agent(
     Only called for viral reactions (|effect| >= threshold).
 
     Args:
-        bedrock_client: AnthropicBedrock client
+        social_text_call: Configured social-model call function
         config: BenchmarkConfig
         agent_post_content: The agent's post text
         group_id: Customer group replying
@@ -1297,7 +777,7 @@ def generate_customer_reply_to_agent(
         reply_to_content: If the agent was replying to a customer post, that post's content
 
     Returns:
-        (reply_text: str, input_tokens: int, output_tokens: int)
+        (reply_text, input_tokens, output_tokens, served_model)
     """
     # LLM-replay cache: return the source's recorded reply text if available.
     from . import llm_replay as _llm_replay
@@ -1305,7 +785,7 @@ def generate_customer_reply_to_agent(
         cached = _llm_replay.get_cache().get_reply_by_content(
             agent_post_content, group_id
         )
-        return (cached or ""), 0, 0
+        return (cached or ""), 0, 0, config.social_post_llm_model
 
     sentiment_desc = "strongly positive" if effect_score > 0 else "strongly negative"
 
@@ -1323,16 +803,14 @@ The NovaMind CEO posted:
 {context}
 Your reaction is {sentiment_desc} (score: {effect_score:.2f}). Write ONLY the reply tweet. Nothing else. Keep it SHORT — real people don't write essays in tweet replies. Do not include any meta-commentary or explanation."""
 
-    social_model = config.social_post_llm_model
-    response = bedrock_client.messages.create(
-        model=social_model,
-        max_tokens=150,
-        temperature=0.9,
-        messages=[{"role": "user", "content": prompt}],
+    response = social_text_call(
+        "",
+        prompt,
+        task="agent_post_reply",
     )
 
-    text = response.content[0].text.strip()
+    text = response.text
     # Clean up any quotes/formatting artifacts
     text = text.strip('"').strip("'").strip()
 
-    return text, response.usage.input_tokens, response.usage.output_tokens
+    return text, response.input_tokens, response.output_tokens, response.model

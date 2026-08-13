@@ -652,18 +652,6 @@ __pycache__/
                 f.write(json.dumps(entry) + "\n")
             print(f"  ⚠️  TAMPER ALERT day {day}: {len(tamper_hits)} suspicious file(s): {tamper_hits[:5]}")
 
-        # Get daily scripts from server
-        daily_scripts = {}
-        try:
-            resp = self._http_get('/daily-scripts')
-            if resp.get('success'):
-                # The GET endpoint returns script names/sizes, not content
-                # For full content we need to query differently
-                # For now, save empty — the scripts are also in the session dir
-                pass
-        except Exception:
-            pass
-
         checkpoint = {
             'day': day,
             'run_id': self.run_id,
@@ -676,7 +664,6 @@ __pycache__/
             'total_output_tokens': self.agent.total_output_tokens if self.agent else 0,
             'total_cached_tokens': self.agent.total_cached_tokens if self.agent else 0,
             'total_reasoning_tokens': self.agent.total_reasoning_tokens if self.agent else 0,
-            'daily_scripts': daily_scripts,
             'session_id': self._session_id,
         }
         checkpoint_file = self.workspace_dir / "checkpoint.json"

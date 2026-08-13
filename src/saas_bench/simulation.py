@@ -78,6 +78,7 @@ from .database import (
     get_all_group_parameters, get_global_drift, update_global_drift,
 )
 from ._sql_chunk import chunked_select, chunked_execute
+from .llm_provider import MissingModelPricingError
 
 
 def sigmoid(x: float) -> float:
@@ -1565,6 +1566,7 @@ class Simulator:
                 "SELECT group_id FROM customers WHERE customer_id = ?", (customer_id,)
             ).fetchone()
             self.event_logger.log_customer_signup(
+                day=self.current_day,
                 customer_id=customer_id,
                 group_id=customer['group_id'] if customer else 'unknown',
                 plan=plan,
@@ -1796,6 +1798,7 @@ class Simulator:
                 cancellations += 1
                 if self.event_logger:
                     self.event_logger.log_customer_churn(
+                        day=self.current_day,
                         customer_id=customer_id,
                         group_id=group_id,
                         plan=current_plan,
@@ -1856,6 +1859,7 @@ class Simulator:
                 # Log churn
                 if self.event_logger:
                     self.event_logger.log_customer_churn(
+                        day=self.current_day,
                         customer_id=sub['customer_id'],
                         group_id=sub['group_id'],
                         plan=current_plan,
@@ -1890,6 +1894,7 @@ class Simulator:
                 # Log plan change
                 if self.event_logger:
                     self.event_logger.log_plan_change(
+                        day=self.current_day,
                         customer_id=sub['customer_id'],
                         old_plan=current_plan,
                         new_plan=best_plan,
@@ -2399,6 +2404,7 @@ class Simulator:
                         "SELECT group_id FROM customers WHERE customer_id = ?", (cid,)
                     ).fetchone()
                     self.event_logger.log_customer_signup(
+                        day=self.current_day,
                         customer_id=cid,
                         group_id=customer['group_id'] if customer else 'unknown',
                         plan=plan,
@@ -4018,172 +4024,6 @@ class Simulator:
         # Return work items + context for unified parallel execution
         return all_post_work, influence_cache
 
-    def _execute_all_social_posts_parallel(
-        self, regular_work: list, influence_cache: dict, macro_work: list
-    ):
-        """Execute ALL social media post LLM calls in parallel via one ThreadPoolExecutor.
-
-        Combines regular customer posts and macro economy posts into a single parallel
-        batch. Each gets its own thread and Bedrock Haiku call.
-
-        Args:
-            regular_work: List of customer post work items (from _generate_sampled_social_posts)
-            influence_cache: Group influence scores for regular posts
-            macro_work: List of macro post work items (from _collect_macro_* methods)
-        """
-        from .personas import (
-            determine_post_sentiment, calculate_virality,
-            generate_template_post
-        )
-        from .database import add_social_media_post, add_notification
-
-        if not self.customer_simulator:
-            # No LLM — fallback to templates for regular posts, skip macro posts
-            if regular_work:
-                self._generate_posts_template(regular_work, influence_cache)
-            return
-
-        # Fetch recent posts once (shared across all calls for dedup)
-        recent_posts_rows = self.conn.execute("""
-            SELECT content FROM social_media_posts
-            WHERE day >= ?
-            ORDER BY post_id DESC LIMIT 20
-        """, (max(0, self.current_day - 14),)).fetchall()
-        recent_post_texts = [r['content'] for r in recent_posts_rows] if recent_posts_rows else []
-
-        # === Pre-fetch all DB data BEFORE threading (thread-safety fix) ===
-        # SQLite connections are not thread-safe — concurrent reads/writes from
-        # ThreadPoolExecutor threads cause "cannot start a transaction within a
-        # transaction" errors. Pre-fetch everything here on the main thread.
-        from .database import get_customer_persona, get_group_characteristics, get_world_context
-        product_name = get_world_context(self.conn, 'product_name') or 'NovaMind'
-        company_name = get_world_context(self.conn, 'company_name') or 'NovaMind AI'
-
-        # Batch pre-fetch personas and group characteristics (2 queries instead of ~40)
-        from .database import get_all_group_characteristics
-        all_group_chars = get_all_group_characteristics(self.conn)
-        prefetched_groups = {cand['group_id']: all_group_chars.get(cand['group_id']) for cand in regular_work}
-
-        # Batch-fetch personas for all unique customer IDs
-        unique_cids = list({cand['customer_id'] for cand in regular_work})
-        prefetched_personas = {}
-        if unique_cids:
-            persona_rows = chunked_select(self.conn, """
-                SELECT customer_id, group_id, customer_type,
-                       persona_industry, persona_role, persona_experience,
-                       persona_work_style, persona_tech_savvy, persona_communication,
-                       company_size_descriptor, company_culture, company_decision_style,
-                       company_primary_concern, persona_description,
-                       seat_count, email
-                FROM customers
-                WHERE customer_id IN ({ph}) AND persona_description IS NOT NULL
-            """, unique_cids)
-            from .database import _get_writing_style_from_persona
-            for row in persona_rows:
-                persona = dict(row)
-                persona['description'] = persona['persona_description']
-                persona['industry'] = persona['persona_industry']
-                persona['role'] = persona['persona_role']
-                persona['communication_style'] = persona['persona_communication']
-                persona['writing_style'] = _get_writing_style_from_persona(persona)
-                prefetched_personas[row['customer_id']] = persona
-            # Fallback for customers without persona_description (legacy)
-            missing_cids = [cid for cid in unique_cids if cid not in prefetched_personas]
-            for cid in missing_cids:
-                prefetched_personas[cid] = get_customer_persona(self.conn, cid)
-
-        # === Build unified call list ===
-        # Each item: {'type': 'regular'|'macro', 'call_fn': callable, ...metadata}
-        unified_calls = []
-
-        # Regular customer posts
-        for cand in regular_work:
-            if cand.get('is_churned'):
-                sentiment = 'negative'
-            else:
-                sentiment = determine_post_sentiment(cand['satisfaction'], self.rng)
-            cand_with_sentiment = {**cand, 'sentiment': sentiment}
-
-            # Build pre-fetched data for this customer (no DB access in thread)
-            prefetched = {
-                'persona': prefetched_personas.get(cand['customer_id']),
-                'group_chars': prefetched_groups.get(cand['group_id']),
-                'product_name': product_name,
-                'company_name': company_name,
-            }
-
-            def _make_regular_call(inp=cand_with_sentiment, pf=prefetched):
-                try:
-                    response = self.customer_simulator.generate_social_post(
-                        day=self.current_day,
-                        customer_id=inp['customer_id'],
-                        satisfaction=inp['satisfaction'],
-                        group_id=inp['group_id'],
-                        sentiment=inp['sentiment'],
-                        post_type=inp['post_type'],
-                        event_context=inp['event_context'],
-                        recent_posts=recent_post_texts,
-                        _prefetched=pf,
-                        _skip_log_cost=True,
-                    )
-                    return {'type': 'regular', **inp, 'text': response.text, 'success': True,
-                            'input_tokens': response.input_tokens, 'output_tokens': response.output_tokens}
-                except Exception as e:
-                    import sys
-                    print(f"[sim] social post LLM failed for customer {inp['customer_id']}: {e}", file=sys.stderr)
-                    return {'type': 'regular', **inp, 'text': None, 'success': False}
-
-            unified_calls.append(_make_regular_call)
-
-        # Macro posts (batch + publication) — each gets its own Bedrock call
-        for macro_item in macro_work:
-            def _make_macro_call(item=macro_item):
-                try:
-                    config = self.config
-                    social_provider = config.social_post_llm_provider
-                    llm_response = self.customer_simulator.create_social_response(
-                        "You are a social media content generator simulating realistic business professionals posting about economic conditions.",
-                        item['prompt'],
-                        task_max_tokens=300,
-                    )
-                    if social_provider in ("bedrock", "anthropic"):
-                        text = llm_response.content[0].text.strip()
-                    else:
-                        text = llm_response.output_text.strip()
-
-                    # Clean: strip numbering/bullets if LLM added them
-                    import re
-                    text = re.sub(r'^\d+[\.\)]\s*', '', text).strip()
-                    text = re.sub(r'^[-•]\s*', '', text).strip()
-                    text = text.strip('"').strip("'")
-
-                    return {'type': 'macro', **item, 'text': text, 'success': True,
-                            'input_tokens': llm_response.usage.input_tokens,
-                            'output_tokens': llm_response.usage.output_tokens}
-                except Exception as e:
-                    import sys
-                    print(f"[sim] macro post LLM failed: {e}", file=sys.stderr)
-                    return {'type': 'macro', **item, 'text': None, 'success': False}
-
-            unified_calls.append(_make_macro_call)
-
-        if not unified_calls:
-            return
-
-        # === Fire all calls in parallel ===
-        # Iterate futures in submission order (not completion order via
-        # `as_completed`) so DB write order is deterministic across runs —
-        # `post_id` auto-increment then matches source exactly.
-        results = []
-        max_workers = max(len(unified_calls), self.MAX_POSTS_PER_DAY)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(fn) for fn in unified_calls]
-            for future in futures:
-                results.append(future.result())
-
-        # === Process results (write to DB) ===
-        self._process_social_post_results(results, influence_cache)
-
     def _submit_social_posts_async(
         self, regular_work: list, influence_cache: dict, macro_work: list
     ):
@@ -4268,55 +4108,42 @@ class Simulator:
             }
 
             def _make_regular_call(inp=cand_with_sentiment, pf=prefetched):
-                try:
-                    response = self.customer_simulator.generate_social_post(
-                        day=self.current_day,
-                        customer_id=inp['customer_id'],
-                        satisfaction=inp['satisfaction'],
-                        group_id=inp['group_id'],
-                        sentiment=inp['sentiment'],
-                        post_type=inp['post_type'],
-                        event_context=inp['event_context'],
-                        recent_posts=recent_post_texts,
-                        _prefetched=pf,
-                        _skip_log_cost=True,
-                    )
-                    return {'type': 'regular', **inp, 'text': response.text, 'success': True,
-                            'input_tokens': response.input_tokens, 'output_tokens': response.output_tokens}
-                except Exception as e:
-                    import sys
-                    print(f"[sim] social post LLM failed for customer {inp['customer_id']}: {e}", file=sys.stderr)
-                    return {'type': 'regular', **inp, 'text': None, 'success': False}
+                response = self.customer_simulator.generate_social_post(
+                    day=self.current_day,
+                    customer_id=inp['customer_id'],
+                    satisfaction=inp['satisfaction'],
+                    group_id=inp['group_id'],
+                    sentiment=inp['sentiment'],
+                    post_type=inp['post_type'],
+                    event_context=inp['event_context'],
+                    recent_posts=recent_post_texts,
+                    _prefetched=pf,
+                    _skip_log_cost=True,
+                )
+                return {'type': 'regular', **inp, 'text': response.text, 'success': True,
+                        'input_tokens': response.input_tokens, 'output_tokens': response.output_tokens,
+                        'model': response.model}
 
             unified_calls.append(_make_regular_call)
 
         for macro_item in macro_work:
             def _make_macro_call(item=macro_item):
-                try:
-                    config = self.config
-                    social_provider = config.social_post_llm_provider
-                    llm_response = self.customer_simulator.create_social_response(
-                        "You are a social media content generator simulating realistic business professionals posting about economic conditions.",
-                        item['prompt'],
-                        task_max_tokens=300,
-                    )
-                    if social_provider in ("bedrock", "anthropic"):
-                        text = llm_response.content[0].text.strip()
-                    else:
-                        text = llm_response.output_text.strip()
+                llm_response = self.customer_simulator.create_social_response(
+                    "You are a social media content generator simulating realistic business professionals posting about economic conditions.",
+                    item['prompt'],
+                    task="macro_post",
+                )
+                text = llm_response.text
 
-                    import re
-                    text = re.sub(r'^\d+[\.\)]\s*', '', text).strip()
-                    text = re.sub(r'^[-•]\s*', '', text).strip()
-                    text = text.strip('"').strip("'")
+                import re
+                text = re.sub(r'^\d+[\.\)]\s*', '', text).strip()
+                text = re.sub(r'^[-•]\s*', '', text).strip()
+                text = text.strip('"').strip("'")
 
-                    return {'type': 'macro', **item, 'text': text, 'success': True,
-                            'input_tokens': llm_response.usage.input_tokens,
-                            'output_tokens': llm_response.usage.output_tokens}
-                except Exception as e:
-                    import sys
-                    print(f"[sim] macro post LLM failed: {e}", file=sys.stderr)
-                    return {'type': 'macro', **item, 'text': None, 'success': False}
+                return {'type': 'macro', **item, 'text': text, 'success': True,
+                        'input_tokens': llm_response.input_tokens,
+                        'output_tokens': llm_response.output_tokens,
+                        'model': llm_response.model}
 
             unified_calls.append(_make_macro_call)
 
@@ -4339,10 +4166,13 @@ class Simulator:
 
         executor, futures, influence_cache = async_state
         results = []
-        # Submission-order iteration — deterministic DB write order across runs.
-        for future in futures:
-            results.append(future.result())
-        executor.shutdown(wait=False)
+        try:
+            # Submission-order iteration — deterministic DB write order across runs.
+            for future in futures:
+                results.append(future.result())
+        finally:
+            # 某个 Provider 调用失败时不再等待尚未开始的同批任务。
+            executor.shutdown(wait=False, cancel_futures=True)
 
         self._process_social_post_results(results, influence_cache)
 
@@ -4416,13 +4246,17 @@ class Simulator:
         # No notification for macro social media posts (visible via get_social_posts tool)
 
         # === Batch log API costs (deferred from threads for thread-safety) ===
-        social_model = self.config.social_post_llm_model
         for result in results:
-            if result.get('success') and result.get('input_tokens'):
+            if result.get('success'):
+                purpose = (
+                    'macro_social_post'
+                    if result['type'] == 'macro'
+                    else 'customer_social_post'
+                )
                 self.customer_simulator._log_cost(
-                    self.current_day, 'customer_social_post',
+                    self.current_day, purpose,
                     result['input_tokens'], result['output_tokens'],
-                    model=social_model
+                    model=result['model']
                 )
 
     def _generate_posts_template(self, selected: list, influence_cache: dict):
@@ -4611,9 +4445,7 @@ class Simulator:
             WHERE s.status = 'subscribed' AND s.end_day IS NULL
         """).fetchone()[0]
 
-        # Use social_post_client (bedrock or direct anthropic) — both expose the same .messages.create() API
-        bedrock_client = self.customer_simulator.social_post_client
-        social_model = self.config.social_post_llm_model
+        social_text_call = self.customer_simulator.create_social_response
         viral_threshold = 0.6
 
         for row in rows:
@@ -4645,7 +4477,7 @@ class Simulator:
 
                     future = executor.submit(
                         judge_agent_social_post,
-                        bedrock_client, self.config, content,
+                        social_text_call, self.config, content,
                         gid, desc, tone, total_subs, mrr,
                         recent_posts, reply_to_content
                     )
@@ -4655,17 +4487,13 @@ class Simulator:
                 # Python 3.7+) — not `as_completed`, which yields in completion
                 # order and would make DB write ordering non-deterministic.
                 for future, gid in judge_futures.items():
-                    try:
-                        effect, reasoning, in_tok, out_tok = future.result()
-                        effect_by_group[gid] = effect
-                        reasoning_by_group[gid] = reasoning
-                        # Log cost
-                        self.customer_simulator._log_cost(
-                            self.current_day, 'agent_social_judge',
-                            in_tok, out_tok, model=social_model
-                        )
-                    except Exception:
-                        effect_by_group[gid] = 0.0
+                    effect, reasoning, in_tok, out_tok, served_model = future.result()
+                    effect_by_group[gid] = effect
+                    reasoning_by_group[gid] = reasoning
+                    self.customer_simulator._log_cost(
+                        self.current_day, 'agent_social_judge',
+                        in_tok, out_tok, model=served_model
+                    )
 
             # Compute views per group from effect scores
             # Linear 1x-3x below viral threshold, exponential 3x-100x above
@@ -4739,7 +4567,7 @@ class Simulator:
 
                         future = executor.submit(
                             generate_customer_reply_to_agent,
-                            bedrock_client, self.config, content,
+                            social_text_call, self.config, content,
                             gid, desc, tone, eff, reply_to_content
                         )
                         reply_futures[future] = gid
@@ -4748,57 +4576,53 @@ class Simulator:
                     # — not `as_completed`, which yields completion order and would
                     # make DB write ordering non-deterministic.
                     for future, gid in reply_futures.items():
-                        try:
-                            reply_text, in_tok, out_tok = future.result()
-                            eff = effect_by_group[gid]
+                        reply_text, in_tok, out_tok, served_model = future.result()
+                        eff = effect_by_group[gid]
 
-                            # Add as a regular social media post (visible to agent)
-                            sentiment = 'positive' if eff > 0 else 'negative'
-                            # Pick an active subscriber from this group deterministically:
-                            # count first, draw OFFSET from _customer_pick_rng, then
-                            # ORDER BY customer_id (replayable; replaces SQLite's
-                            # non-seeded ORDER BY RANDOM()). Falls back to
-                            # market_observer if no subscribers yet.
-                            n_subs_g = self.conn.execute("""
-                                SELECT COUNT(*) FROM customers c
+                        # Add as a regular social media post (visible to agent)
+                        sentiment = 'positive' if eff > 0 else 'negative'
+                        # Pick an active subscriber from this group deterministically:
+                        # count first, draw OFFSET from _customer_pick_rng, then
+                        # ORDER BY customer_id (replayable; replaces SQLite's
+                        # non-seeded ORDER BY RANDOM()). Falls back to
+                        # market_observer if no subscribers yet.
+                        n_subs_g = self.conn.execute("""
+                            SELECT COUNT(*) FROM customers c
+                            JOIN subscriptions s ON c.customer_id = s.customer_id
+                            WHERE c.group_id = ? AND s.status = 'subscribed' AND s.end_day IS NULL
+                        """, (gid,)).fetchone()[0]
+                        if n_subs_g <= 0:
+                            cust = None
+                        else:
+                            offset_g = int(self._customer_pick_rng.integers(0, n_subs_g))
+                            cust = self.conn.execute("""
+                                SELECT c.customer_id FROM customers c
                                 JOIN subscriptions s ON c.customer_id = s.customer_id
                                 WHERE c.group_id = ? AND s.status = 'subscribed' AND s.end_day IS NULL
-                            """, (gid,)).fetchone()[0]
-                            if n_subs_g <= 0:
-                                cust = None
-                            else:
-                                offset_g = int(self._customer_pick_rng.integers(0, n_subs_g))
-                                cust = self.conn.execute("""
-                                    SELECT c.customer_id FROM customers c
-                                    JOIN subscriptions s ON c.customer_id = s.customer_id
-                                    WHERE c.group_id = ? AND s.status = 'subscribed' AND s.end_day IS NULL
-                                    ORDER BY c.customer_id LIMIT 1 OFFSET ?
-                                """, (gid, offset_g)).fetchone()
-                            customer_id = cust['customer_id'] if cust else self._market_observer_id
+                                ORDER BY c.customer_id LIMIT 1 OFFSET ?
+                            """, (gid, offset_g)).fetchone()
+                        customer_id = cust['customer_id'] if cust else self._market_observer_id
 
-                            comment_pid = add_social_media_post(
-                                self.conn, self.current_day, customer_id,
-                                sentiment, reply_text,
-                                likes=self.rng.integers(0, 20),
-                                shares=self.rng.integers(0, 5),
-                                virality_score=abs(eff),
-                                reputation_impact=eff * 0.01,
-                                influence_score=0.5,
-                                reply_to_agent_post_id=post_id,
-                                source_group_id=gid
-                            )
-                            comment_post_ids.append(comment_pid)
+                        comment_pid = add_social_media_post(
+                            self.conn, self.current_day, customer_id,
+                            sentiment, reply_text,
+                            likes=self.rng.integers(0, 20),
+                            shares=self.rng.integers(0, 5),
+                            virality_score=abs(eff),
+                            reputation_impact=eff * 0.01,
+                            influence_score=0.5,
+                            reply_to_agent_post_id=post_id,
+                            source_group_id=gid
+                        )
+                        comment_post_ids.append(comment_pid)
 
-                            with open(_debug_log, "a") as _df:
-                                _df.write(f"  OK: {gid} -> post_id={comment_pid}, cust={customer_id}\n")
+                        with open(_debug_log, "a") as _df:
+                            _df.write(f"  OK: {gid} -> post_id={comment_pid}, cust={customer_id}\n")
 
-                            self.customer_simulator._log_cost(
-                                self.current_day, 'agent_social_reply',
-                                in_tok, out_tok, model=social_model
-                            )
-                        except Exception as _e:
-                            with open(_debug_log, "a") as _df:
-                                _df.write(f"  FAIL: {gid}: {_e}\n{_tb.format_exc()}\n")
+                        self.customer_simulator._log_cost(
+                            self.current_day, 'agent_social_reply',
+                            in_tok, out_tok, model=served_model
+                        )
 
             # Store comment post IDs on the agent post
             if comment_post_ids:
@@ -5684,17 +5508,14 @@ Requirements:
             competitor_name = competitor_names[int(self._competitor_rng.integers(0, len(competitor_names)))]
             perspective = perspectives[int(self._competitor_rng.integers(0, len(perspectives)))]
 
-            # Try LLM generation first, fall back to templates
             content = None
             if self.customer_simulator:
-                try:
-                    content = self._generate_competitor_post_llm(
-                        competitor_name, noisy_boost, severity,
-                        event['description'], product_name, perspective
-                    )
-                except Exception as e:
-                    print(f"[WARN] Competitor post LLM generation failed: {e}")
+                content = self._generate_competitor_post_llm(
+                    competitor_name, noisy_boost, severity,
+                    event['description'], product_name, perspective
+                )
 
+            # 未配置环境 LLM 时才使用模拟器原有的模板模式；已配置但调用失败必须上抛。
             if not content:
                 content = self._generate_competitor_post_template(
                     competitor_name, severity
@@ -5777,27 +5598,17 @@ Guidelines:
 
         user_prompt = f"Write a social media post reacting to {competitor_name}'s product launch."
 
-        social_model = self.customer_simulator.config.social_post_llm_model
-        post_max_tokens = self.config.competitor_post_llm_max_tokens
         response = self.customer_simulator.create_social_response(
             system_prompt,
             user_prompt,
-            task_max_tokens=post_max_tokens,
+            task="competitor_post",
         )
-        if self.customer_simulator.config.social_post_llm_provider in ("bedrock", "anthropic"):
-            post_text = response.content[0].text.strip()
-            self.customer_simulator._log_cost(
-                self.current_day, 'competitor_event_post',
-                response.usage.input_tokens, response.usage.output_tokens,
-                model=social_model
-            )
-        else:
-            post_text = response.output_text.strip()
-            self.customer_simulator._log_cost(
-                self.current_day, 'competitor_event_post',
-                response.usage.input_tokens, response.usage.output_tokens,
-                model=social_model
-            )
+        post_text = response.text
+        self.customer_simulator._log_cost(
+            self.current_day, 'competitor_event_post',
+            response.input_tokens, response.output_tokens,
+            model=response.model
+        )
 
         return post_text
 
@@ -6539,6 +6350,7 @@ Guidelines:
         # Log event if logger available
         if self.event_logger:
             self.event_logger.log_deal_closed(
+                day=self.current_day,
                 customer_id=customer_id,
                 thread_id=thread_id,
                 thread_type=state.thread_type,

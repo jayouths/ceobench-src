@@ -9,6 +9,7 @@ from pathlib import Path
 from saas_bench.tools import TOOL_DOCS
 from saas_bench.database import TABLE_DOCS, init_database
 from saas_bench.docs_generator import _EXCLUDED_TOOLS, _TOOL_TO_MODULE
+from saas_bench._public_cli import _build_parser, get_cli_docs
 
 
 # ── Full hidden tables list (must be kept in sync with tools.py _HIDDEN_TABLES) ──
@@ -23,6 +24,17 @@ _HIDDEN_TABLES = {
     '_hidden_satisfaction_snapshot', '_hidden_lead_multiplier_snapshot',
     'global_drift_state',
 }
+
+
+def test_cli_docs_follow_public_parser():
+    """CLI 文档必须覆盖 Agent 真实可用的命令和新版预测参数。"""
+    _, commands = _build_parser()
+    docs = get_cli_docs()
+
+    for command in commands:
+        assert f"./novamind-operation {command}" in docs
+    assert "cash_26wk_upper" in docs
+    assert "<cash_1wk> <cash_4wk> <cash_12wk>" not in docs
 
 
 def test_all_tools_mapped_or_excluded():

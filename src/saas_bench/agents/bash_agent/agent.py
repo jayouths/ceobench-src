@@ -8,7 +8,6 @@ Supports OpenAI-compatible APIs (OpenAI, xAI) and Anthropic APIs (direct, Bedroc
 
 import json
 import os
-import re
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -28,10 +27,6 @@ class Message:
     name: Optional[str] = None
 
 
-# Regex to detect dashboard in bash output (day advancement)
-_DASHBOARD_RE = re.compile(r'=== Day (\d+) Dashboard ===')
-
-
 class BashAgent(BaseAgent):
     """Bash agent for SaaS Bench — Claude Code-style.
 
@@ -44,54 +39,67 @@ class BashAgent(BaseAgent):
     contents + the new dashboard.
     """
 
+    CHECKPOINT_SNAPSHOT_FORMAT_VERSION = 2
+    # 推进命令的完整参数只在权威 CLI 文档中维护，避免多处示例过期。
+    NO_TOOL_FEEDBACK = (
+        "You must call a tool to proceed. If you need context, use read_file, "
+        "search_files, or bash. If you have nothing else to do this week, use bash "
+        "to run `./novamind-operation next-week` with all required arguments. "
+        "Read `docs/cli.md` for the current syntax."
+    )
+
     def __init__(
         self,
         tool_descriptions: List[Dict[str, Any]],
         client,
         model: Optional[str] = None,
+        api_type: Optional[str] = None,
         system_prompt: Optional[str] = None,
-        max_turns_per_day: int = 0,  # 0 = no limit
+        max_invalid_responses_per_turn: Optional[int] = None,
         response_callback: Optional[callable] = None,
         reasoning_effort: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
-        max_output_tokens: int = 16384,
+        max_output_tokens: Optional[int] = None,
         timeout_seconds: float = 600.0,
+        request_options: Optional[Dict[str, Any]] = None,
         tool_result_callback: Optional[callable] = None,
         workspace_path: Optional[Path] = None,
         total_days: int = 3650,
-        anthropic_fallback_model: Optional[str] = None,
     ):
         super().__init__(tool_descriptions)
         if not model:
             raise ValueError("agent model must be explicitly configured")
+        if not api_type:
+            raise ValueError("agent api_type must be explicitly configured")
+        if max_output_tokens is None:
+            raise ValueError("agent max_output_tokens must be explicitly configured")
+        if max_output_tokens <= 0:
+            raise ValueError("agent max_output_tokens must be positive")
+        if (
+            not isinstance(max_invalid_responses_per_turn, int)
+            or isinstance(max_invalid_responses_per_turn, bool)
+            or max_invalid_responses_per_turn <= 0
+        ):
+            raise ValueError(
+                "agent max_invalid_responses_per_turn must be explicitly configured as a positive integer"
+            )
         self.client = client
         self.model = model
-        self.max_turns_per_day = max_turns_per_day
+        self.api_type = api_type
+        self.max_invalid_responses_per_turn = max_invalid_responses_per_turn
         self.response_callback = response_callback
         self.reasoning_effort = reasoning_effort
         self.temperature = temperature
         self.top_p = top_p
         self.max_output_tokens = max_output_tokens
         self.timeout_seconds = timeout_seconds
+        self.request_options = dict(request_options or {})
         self.tool_result_callback = tool_result_callback
         self.workspace_path = workspace_path or Path('.')
         self.total_days = total_days
-        self.anthropic_fallback_model = anthropic_fallback_model
 
-        # Detect client type
-        client_type = type(client).__name__
-        self.use_anthropic = client_type in ('Anthropic', 'AnthropicBedrock')
-        self.use_portkey = client_type == 'Portkey'
-
-        # Detect if the endpoint supports OpenAI Responses API.
-        # Only OpenAI's own endpoint implements /v1/responses. Google's OpenAI-compat
-        # and Together AI only expose /v1/chat/completions. Portkey AI Gateway
-        # forwards to OpenAI for gpt-* models so /v1/responses works there too —
-        # in fact, gpt-5.x with reasoning_effort + tools REQUIRES /v1/responses.
-        base_url = str(getattr(client, 'base_url', '') or '')
-        _non_responses_hosts = ('generativelanguage.googleapis.com', 'api.together.xyz')
-        self.supports_responses_api = not any(h in base_url for h in _non_responses_hosts)
+        self.use_anthropic = api_type == "anthropic_messages"
 
         # Build system prompt
         self.system_prompt = system_prompt or self._default_system_prompt()
@@ -103,8 +111,6 @@ class BashAgent(BaseAgent):
         self._pending_tool_calls: List[Dict] = []
         self._last_observation: str = ""
         self.total_turns: int = 0
-        self._day_advanced: bool = False
-        self._new_dashboard: str = ""
         self._consecutive_errors: int = 0
 
         # Token usage tracking
@@ -117,18 +123,11 @@ class BashAgent(BaseAgent):
         self.last_cached_tokens: int = 0
         self.last_reasoning_tokens: int = 0
         self.last_serving_model: str = model
-        self.last_anthropic_fallback_used: bool = False
-        self.last_anthropic_fallbacks: List[Dict[str, str]] = []
-        self.total_anthropic_fallbacks: int = 0
 
-        # Conversation snapshot — persisted after each LLM call so a mid-day
-        # crash can restore the exact accumulated context on resume. Path is
-        # set by run_test.py after the session_id is known. Snapshot includes
-        # the conversation, _pending_tool_calls, current_day, and turns_today.
+        # 每次 LLM 调用后的可读诊断快照；精确恢复只使用 Runner 提交的不可变 checkpoint。
         self._snapshot_path: Optional[Path] = None
-        # When True, the next observation will skip _refresh_context so a
-        # restored mid-day conversation isn't wiped. Cleared after one act().
-        self._skip_next_refresh: bool = False
+        # checkpoint 已包含最后一个工具结果，恢复首轮不能再追加 Runner 新取的 Dashboard。
+        self._skip_next_observation: bool = False
 
     def _default_system_prompt(self) -> str:
         """Build the default system prompt.
@@ -182,24 +181,22 @@ class BashAgent(BaseAgent):
         prompt = self.system_prompt
         memory_path = self.workspace_path / 'MEMORY.md'
         if memory_path.exists():
-            try:
-                memory_content = memory_path.read_text().strip()
-                if memory_content:
-                    max_memory_chars = 40_000
-                    if len(memory_content) > max_memory_chars:
-                        memory_content = memory_content[:max_memory_chars] + (
-                            "\n\n--- MEMORY.md TRUNCATED ---\n"
-                            f"Showing first {max_memory_chars:,} of {len(memory_content):,} characters. "
-                            "Use the read_file tool to see the full contents if needed."
-                        )
-                    prompt += (
-                        "\n\n## Your MEMORY.md (auto-loaded)\n\n"
-                        "The following is the contents of your MEMORY.md file. "
-                        "This is automatically loaded into your context at the start of every day.\n\n"
-                        f"{memory_content}"
+            # MEMORY.md 是跨周信息的唯一自动入口，读取失败不能静默降级。
+            memory_content = memory_path.read_text().strip()
+            if memory_content:
+                max_memory_chars = 40_000
+                if len(memory_content) > max_memory_chars:
+                    memory_content = memory_content[:max_memory_chars] + (
+                        "\n\n--- MEMORY.md TRUNCATED ---\n"
+                        f"Showing first {max_memory_chars:,} of {len(memory_content):,} characters. "
+                        "Use the read_file tool to see the full contents if needed."
                     )
-            except Exception:
-                pass
+                prompt += (
+                    "\n\n## Your MEMORY.md (auto-loaded)\n\n"
+                    "The following is the contents of your MEMORY.md file. "
+                    "This is automatically loaded into your context at the start of every week.\n\n"
+                    f"{memory_content}"
+                )
         return prompt
 
     def reset(self):
@@ -209,87 +206,43 @@ class BashAgent(BaseAgent):
         self.turns_today = 0
         self._pending_tool_calls = []
         self._last_observation = ""
-        self._day_advanced = False
-        self._new_dashboard = ""
 
-    def _refresh_context(self, dashboard: str, new_day: int):
-        """Refresh conversation context for a new day.
-
-        Clears conversation, inserts system prompt + dashboard.
-        The agent reads its own files via tools when it needs context.
-        """
+    def _reset_week_context(self) -> None:
+        """Discard last week's conversation and rebuild the system context."""
         self.conversation = []
         self._pending_tool_calls = []
 
         if not self.use_anthropic:
-            # OpenAI: system prompt goes in messages
+            # OpenAI 协议把系统提示放入对话；Anthropic 在请求参数中单独传递。
             self.conversation.append(Message(
                 role='system',
                 content=self._get_system_prompt_with_memory(),
             ))
 
-    def check_day_advanced(self, bash_output: str) -> bool:
-        """Check if bash output contains a dashboard (day advanced).
-
-        Returns True if a new day dashboard was detected.
-        Stores the dashboard text for context refresh.
-        """
-        match = _DASHBOARD_RE.search(bash_output)
-        if match:
-            new_day = int(match.group(1))
-            if new_day > self.current_day:
-                self._day_advanced = True
-                # Extract dashboard from the output (everything from === Day N ===)
-                dashboard_start = bash_output.index(f"=== Day {new_day} Dashboard ===")
-                self._new_dashboard = bash_output[dashboard_start:]
-                return True
-        return False
-
-    @property
-    def day_advanced(self) -> bool:
-        """Whether the last bash command advanced the day."""
-        return self._day_advanced
-
-    @property
-    def new_dashboard(self) -> str:
-        """The dashboard text from the last day advancement."""
-        return self._new_dashboard
-
-    def clear_day_advanced(self):
-        """Clear the day-advanced flag after the runner processes it."""
-        self._day_advanced = False
-        self._new_dashboard = ""
-
     def act(self, observation: str, reward: float, done: bool, info: Dict[str, Any]) -> Optional[Action]:
         """Choose an action based on the observation.
 
         The agent processes tool outputs and decides the next action.
-        After day advancement is detected, context is refreshed.
+        After week advancement is detected, context is reset.
         """
         if done:
             return None
 
         self._last_observation = observation
 
-        # Check if this is a new day (context refresh)
+        # Day 0 是实验的合法首日；不能只用“日期变大”判断首次上下文初始化。
         current_day = info.get('day', 0)
-        if current_day > self.current_day:
-            if self._skip_next_refresh:
-                # Mid-day resume: conversation was restored from snapshot.
-                # Don't wipe it; just sync the day counter and clear the flag.
-                self.current_day = current_day
-                self._skip_next_refresh = False
-            else:
-                self._refresh_context(observation, current_day)
-                self.current_day = current_day
-                self.turns_today = 0
-
-        # Safety: force next_week if too many turns (0 = no limit)
-        if self.max_turns_per_day > 0 and self.turns_today >= self.max_turns_per_day:
-            return Action(tool='bash', arguments={'command': './novamind-operation next-week'})
+        needs_initial_context = not self.conversation and not self._skip_next_observation
+        if needs_initial_context or current_day > self.current_day:
+            self._reset_week_context()
+            self.current_day = current_day
+            self.turns_today = 0
 
         # If we have pending tool call results to process, add them
-        if self._pending_tool_calls:
+        if self._skip_next_observation:
+            # checkpoint 已把最后一次工具结果写入对话，恢复后的首轮不能重复追加 Dashboard。
+            self._skip_next_observation = False
+        elif self._pending_tool_calls:
             if self.use_anthropic:
                 partial_results = self._pending_tool_calls[0].get('_partial_results', [])
                 tool_results = [{
@@ -393,80 +346,139 @@ class BashAgent(BaseAgent):
             # Never let snapshot failure kill the run.
             print(f"[snapshot] WARN failed to save conversation snapshot: {e}")
 
-    def load_conversation_snapshot(self, path: Path) -> bool:
-        """Restore self.conversation + turn state from a snapshot file.
+    def save_checkpoint_snapshot(
+        self,
+        path: Path,
+        *,
+        resume_conversation: bool,
+        pending_observation: Optional[str] = None,
+    ) -> None:
+        """Save the exact Agent context associated with one durable checkpoint."""
+        if resume_conversation:
+            conversation = list(self.conversation)
+            pending = list(self._pending_tool_calls)
+            if pending:
+                if pending_observation is None:
+                    raise ValueError(
+                        "pending_observation is required when checkpointing a pending tool result"
+                    )
+                if self.use_anthropic:
+                    partial_results = pending[0].get('_partial_results', [])
+                    tool_results = [{
+                        'type': 'tool_result',
+                        'tool_use_id': pending[0]['id'],
+                        'content': pending_observation,
+                    }]
+                    tool_results.extend(partial_results)
+                    conversation.append(Message(role='user', content=tool_results))
+                else:
+                    for tool_call in pending:
+                        conversation.append(Message(
+                            role='tool',
+                            content=pending_observation,
+                            tool_call_id=tool_call['id'],
+                            name=tool_call['name'],
+                        ))
+            current_day = self.current_day
+            turns_today = self.turns_today
+        else:
+            # 周边界恢复应让下一轮从 Dashboard 构建全新上下文。
+            conversation = []
+            current_day = 0
+            turns_today = 0
 
-        Drops any trailing assistant message that contains tool_calls (the
-        in-flight tool was never executed/recorded, so we discard it). Clears
-        _pending_tool_calls. Sets _skip_next_refresh so the next act() does
-        not wipe the restored conversation.
+        payload = {
+            "format_version": self.CHECKPOINT_SNAPSHOT_FORMAT_VERSION,
+            "resume_conversation": resume_conversation,
+            "tool_results_applied": True,
+            "conversation": [self._serialize_message(message) for message in conversation],
+            "pending_tool_calls": [],
+            "current_day": current_day,
+            "turns_today": turns_today,
+            "total_turns": self.total_turns,
+            "saved_at": time.time(),
+        }
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp_path, "w") as file:
+            json.dump(payload, file)
+        os.replace(tmp_path, path)
 
-        Returns True if restoration succeeded, False otherwise.
-        """
-        if not path.exists():
-            return False
+    @classmethod
+    def parse_checkpoint_snapshot(cls, path: Path) -> Dict[str, Any]:
+        """Read one immutable checkpoint snapshot using its strict schema."""
         try:
-            with open(path, "r") as f:
-                payload = json.load(f)
-            raw_msgs = payload.get("conversation", [])
-            msgs: List[Message] = []
-            for m in raw_msgs:
-                msgs.append(Message(
-                    role=m.get("role", "user"),
-                    content=m.get("content", ""),
-                    tool_calls=m.get("tool_calls"),
-                    tool_call_id=m.get("tool_call_id"),
-                    name=m.get("name"),
-                ))
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("Checkpoint conversation snapshot is invalid JSON") from exc
+        required = {
+            "format_version", "resume_conversation", "tool_results_applied",
+            "conversation", "pending_tool_calls", "current_day", "turns_today",
+            "total_turns", "saved_at",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise ValueError(
+                f"Checkpoint conversation fields must contain exactly: {sorted(required)}"
+            )
+        if payload["format_version"] != cls.CHECKPOINT_SNAPSHOT_FORMAT_VERSION:
+            raise ValueError("Unsupported checkpoint conversation format_version")
+        if not isinstance(payload["resume_conversation"], bool):
+            raise ValueError("Checkpoint conversation resume_conversation must be boolean")
+        if payload["tool_results_applied"] is not True:
+            raise ValueError("Checkpoint conversation must include applied tool results")
+        if payload["pending_tool_calls"] != []:
+            raise ValueError("Checkpoint conversation cannot contain pending tool calls")
+        for field in ("current_day", "turns_today", "total_turns"):
+            value = payload[field]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"Invalid checkpoint conversation {field}: {value!r}")
+        if not isinstance(payload["saved_at"], (int, float)) or isinstance(
+            payload["saved_at"], bool
+        ):
+            raise ValueError("Checkpoint conversation saved_at must be numeric")
+        if not isinstance(payload["conversation"], list):
+            raise ValueError("Checkpoint conversation messages must be a list")
+        allowed_roles = {"system", "user", "assistant", "tool"}
+        required_message_fields = {
+            "role", "content", "tool_calls", "tool_call_id", "name"
+        }
+        for index, message in enumerate(payload["conversation"]):
+            if not isinstance(message, dict) or set(message) != required_message_fields:
+                raise ValueError(
+                    f"Invalid checkpoint conversation message at index {index}"
+                )
+            if message["role"] not in allowed_roles:
+                raise ValueError(
+                    f"Invalid checkpoint conversation role at index {index}"
+                )
+        return payload
 
-            def _has_in_flight_tool_call(msg: "Message") -> bool:
-                """Detect an assistant turn whose tool call was never executed.
-
-                Covers two shapes:
-                  - chat-completions style:  msg.tool_calls is set
-                  - Responses API style:    msg.content is a list containing
-                    `{'type': 'function_call', ...}` items
-                """
-                if msg.role != "assistant":
-                    return False
-                if msg.tool_calls:
-                    return True
-                if isinstance(msg.content, list):
-                    for item in msg.content:
-                        t = item.get("type") if isinstance(item, dict) else getattr(item, "type", "")
-                        if t == "function_call":
-                            return True
-                return False
-
-            # Drop trailing assistant w/ in-flight tool_call — that tool was
-            # never executed at crash time, so discarding leaves us at "right
-            # after the previous tool_result was delivered" — a clean re-entry
-            # point. The next LLM call regenerates from the prior context.
-            dropped = 0
-            while msgs and _has_in_flight_tool_call(msgs[-1]):
-                msgs.pop()
-                dropped += 1
-            self.conversation = msgs
-            self._pending_tool_calls = []
-            self.current_day = int(payload.get("current_day", 0) or 0)
-            self.turns_today = int(payload.get("turns_today", 0) or 0)
-            self._skip_next_refresh = True
-            print(f"[snapshot] Restored conversation: {len(msgs)} messages "
-                  f"(dropped {dropped} in-flight assistant tool_call), "
-                  f"current_day={self.current_day}, turns_today={self.turns_today}")
-            return True
-        except Exception as e:
-            print(f"[snapshot] WARN failed to load conversation snapshot: {e}")
-            return False
+    def restore_checkpoint_snapshot(self, payload: Dict[str, Any]) -> None:
+        """Apply a snapshot already validated before simulator restoration."""
+        self.conversation = [
+            Message(
+                role=message["role"],
+                content=message["content"],
+                tool_calls=message["tool_calls"],
+                tool_call_id=message["tool_call_id"],
+                name=message["name"],
+            )
+            for message in payload["conversation"]
+        ]
+        self._pending_tool_calls = []
+        self.current_day = payload["current_day"]
+        self.turns_today = payload["turns_today"]
+        self._skip_next_observation = payload["resume_conversation"]
 
     def _call_llm(self) -> Optional[Action]:
         """Call the LLM and parse the response into an action."""
-        if self.use_anthropic:
+        if self.api_type == "anthropic_messages":
             return self._call_anthropic()
-        elif self.supports_responses_api:
+        if self.api_type == "openai_responses":
             return self._call_openai_responses()
-        else:
+        if self.api_type == "openai_chat_completions":
             return self._call_openai()
+        raise ValueError(f"Unsupported decision-agent api_type: {self.api_type!r}")
 
     def _build_openai_chat_kwargs(self, messages, tools) -> Dict[str, Any]:
         params: Dict[str, Any] = {
@@ -482,6 +494,7 @@ class BashAgent(BaseAgent):
             params['top_p'] = self.top_p
         if self.reasoning_effort is not None:
             params['reasoning_effort'] = self.reasoning_effort
+        params.update(self.request_options)
         return params
 
     def _build_openai_responses_kwargs(self, input_items, tools) -> Dict[str, Any]:
@@ -499,12 +512,11 @@ class BashAgent(BaseAgent):
             params['top_p'] = self.top_p
         if self.reasoning_effort is not None:
             params['reasoning'] = {'effort': self.reasoning_effort, 'summary': 'auto'}
+        params.update(self.request_options)
         return params
 
     def _call_openai(self) -> Optional[Action]:
         """Call OpenAI-compatible API and parse the response."""
-        import time as _time
-        import traceback
         import signal
         import openai
 
@@ -516,6 +528,7 @@ class BashAgent(BaseAgent):
         def _llm_timeout_handler(signum, frame):
             raise LLMTimeoutError(f"LLM call exceeded {LLM_WALL_CLOCK_TIMEOUT}s wall-clock timeout")
 
+        invalid_responses = 0
         while True:
             messages = []
             for msg in self.conversation:
@@ -542,15 +555,6 @@ class BashAgent(BaseAgent):
 
             try:
                 api_kwargs = self._build_openai_chat_kwargs(messages, tools)
-                _is_together = 'api.together.xyz' in (str(getattr(self.client, 'base_url', '') or ''))
-                _is_together_deepseek = _is_together and 'deepseek' in self.model.lower()
-                if _is_together_deepseek:
-                    # Together's DeepSeek-V4 thinking is gated on the chat-template flag,
-                    # not on `reasoning_effort` (which Together rejects with 400 for max,
-                    # 500 for medium, and silently ignores for low/high). The flag below
-                    # produces real chain-of-thought in `message.reasoning`.
-                    api_kwargs['extra_body'] = {'chat_template_kwargs': {'thinking': True}}
-
                 # Set hard wall-clock timeout via signal.alarm
                 old_handler = signal.signal(signal.SIGALRM, _llm_timeout_handler)
                 signal.alarm(LLM_WALL_CLOCK_TIMEOUT)
@@ -561,6 +565,7 @@ class BashAgent(BaseAgent):
                     signal.signal(signal.SIGALRM, old_handler)  # Restore handler
                 self.total_turns += 1
                 self._consecutive_errors = 0
+                self.last_serving_model = str(getattr(response, 'model', None) or self.model)
 
                 # Capture token usage (OpenAI chat completions format)
                 usage = getattr(response, 'usage', None)
@@ -622,7 +627,13 @@ class BashAgent(BaseAgent):
                                 break
 
                 if json_validation_error:
+                    invalid_responses += 1
                     name, err, preview = json_validation_error
+                    if invalid_responses >= self.max_invalid_responses_per_turn:
+                        raise RuntimeError(
+                            "Decision model repeatedly returned invalid tool arguments "
+                            f"({invalid_responses} responses)"
+                        )
                     print(f"  Invalid JSON in tool_call `{name}`: {err}. Feeding error back to LLM and regenerating.")
                     self.conversation.append(Message(
                         role='user',
@@ -664,14 +675,17 @@ class BashAgent(BaseAgent):
                 ))
 
                 if not assistant_msg.tool_calls:
+                    invalid_responses += 1
+                    if invalid_responses >= self.max_invalid_responses_per_turn:
+                        raise RuntimeError(
+                            "Decision model repeatedly returned no tool call "
+                            f"({invalid_responses} responses)"
+                        )
                     # LLM emitted no tool_call — feed feedback and retry.
                     print("  LLM returned no tool_call. Feeding feedback and regenerating.")
                     self.conversation.append(Message(
                         role='user',
-                        content=(
-                            "You must call a tool to proceed. If you have nothing else to do this week, "
-                            "call `./novamind-operation next-week <cash_1wk> <cash_4wk> <cash_12wk>` via bash to advance."
-                        )
+                        content=self.NO_TOOL_FEEDBACK,
                     ))
                     continue
 
@@ -692,49 +706,12 @@ class BashAgent(BaseAgent):
                 self._pending_tool_calls = [{'id': first_tc.id, 'name': first_tc.function.name}]
                 return Action(tool=first_tc.function.name, arguments=args)
 
-            except Exception as e:
-                status = getattr(e, 'status_code', 0) or 0
-                is_retryable = isinstance(e, openai.APIStatusError) and (status >= 500 or status == 429)
-                if not is_retryable:
-                    is_retryable = isinstance(e, (openai.APIConnectionError, openai.APITimeoutError, LLMTimeoutError))
-                if not is_retryable:
-                    is_retryable = any(code in str(e) for code in ('429', '500', '502', '503', '504', '529'))
-                print(f"OpenAI LLM call error (retryable={is_retryable}, status={status}): {e}")
-                if is_retryable:
-                    # Retry with exponential backoff — keep trying forever until
-                    # the endpoint comes back. Never fall back to next-week.
-                    self._consecutive_errors = getattr(self, '_consecutive_errors', 0) + 1
-                    wait_time = min(120, 10 * (2 ** min(self._consecutive_errors - 1, 3)))
-                    print(f"  Server error ({self._consecutive_errors}), retrying in {wait_time}s...")
-                    _time.sleep(wait_time)
-                    # Free memory before retry (messages/tools rebuilt at top of loop)
-                    del messages, tools
-                    continue  # Loop back to retry
-                else:
-                    # Non-retryable error (4xx other than 429). No next-week fallback —
-                    # feed the error message back to the LLM as a user turn and regenerate.
-                    print(f"  Non-retryable error — feeding back to LLM for regeneration.")
-                    print(f"Traceback: {traceback.format_exc()}")
-                    self._consecutive_errors = getattr(self, '_consecutive_errors', 0) + 1
-                    wait_time = min(60, 5 * self._consecutive_errors)
-                    self.conversation.append(Message(
-                        role='user',
-                        content=(
-                            f"The previous API request failed with a non-retryable error:\n"
-                            f"{type(e).__name__}: {e}\n\n"
-                            f"Please re-emit your response. If the error mentions input validation, "
-                            f"check your tool_call arguments are valid JSON. "
-                            f"If the error mentions context length, produce a shorter response."
-                        )
-                    ))
-                    _time.sleep(wait_time)
-                    del messages, tools
-                    continue
+            except (openai.OpenAIError, LLMTimeoutError):
+                # SDK 已完成有限重试；继续外层重试会让本地服务故障时实验永久卡住。
+                raise
 
     def _call_openai_responses(self) -> Optional[Action]:
         """Call the OpenAI Responses API, optionally enabling reasoning."""
-        import time as _time
-        import traceback
         import signal
         import openai
 
@@ -746,6 +723,7 @@ class BashAgent(BaseAgent):
         def _llm_timeout_handler(signum, frame):
             raise LLMTimeoutError(f"LLM call exceeded {LLM_WALL_CLOCK_TIMEOUT}s wall-clock timeout")
 
+        invalid_responses = 0
         while True:
             # Build input array from conversation
             input_items = []
@@ -792,6 +770,7 @@ class BashAgent(BaseAgent):
 
                 self.total_turns += 1
                 self._consecutive_errors = 0
+                self.last_serving_model = str(getattr(response, 'model', None) or self.model)
 
                 # Capture token usage (Responses API uses input_tokens/output_tokens)
                 usage = getattr(response, 'usage', None)
@@ -854,7 +833,13 @@ class BashAgent(BaseAgent):
                             break
 
                 if json_validation_error:
+                    invalid_responses += 1
                     name, err, preview = json_validation_error
+                    if invalid_responses >= self.max_invalid_responses_per_turn:
+                        raise RuntimeError(
+                            "Decision model repeatedly returned invalid tool arguments "
+                            f"({invalid_responses} responses)"
+                        )
                     print(f"  Invalid JSON in function_call `{name}`: {err}. Feeding error back to LLM and regenerating.")
                     self.conversation.append(Message(
                         role='user',
@@ -876,14 +861,17 @@ class BashAgent(BaseAgent):
                 ))
 
                 if not function_calls:
+                    invalid_responses += 1
+                    if invalid_responses >= self.max_invalid_responses_per_turn:
+                        raise RuntimeError(
+                            "Decision model repeatedly returned no tool call "
+                            f"({invalid_responses} responses)"
+                        )
                     # LLM emitted no tool_call — feed feedback and retry.
                     print("  LLM returned no function_call. Feeding feedback and regenerating.")
                     self.conversation.append(Message(
                         role='user',
-                        content=(
-                            "You must call a tool to proceed. If you have nothing else to do this week, "
-                            "call `./novamind-operation next-week <cash_1wk> <cash_4wk> <cash_12wk>` via bash to advance."
-                        )
+                        content=self.NO_TOOL_FEEDBACK,
                     ))
                     continue
 
@@ -904,93 +892,9 @@ class BashAgent(BaseAgent):
                 self._pending_tool_calls = [{'id': first_fc.call_id, 'name': first_fc.name}]
                 return Action(tool=first_fc.name, arguments=args)
 
-            except Exception as e:
-                status = getattr(e, 'status_code', 0) or 0
-                is_retryable = isinstance(e, openai.APIStatusError) and (status >= 500 or status == 429)
-                if not is_retryable:
-                    is_retryable = isinstance(e, (openai.APIConnectionError, openai.APITimeoutError, LLMTimeoutError))
-                if not is_retryable:
-                    is_retryable = any(code in str(e) for code in ('429', '500', '502', '503', '504', '529'))
-                print(f"OpenAI Responses API error (retryable={is_retryable}, status={status}): {e}")
-                if is_retryable:
-                    self._consecutive_errors = getattr(self, '_consecutive_errors', 0) + 1
-                    wait_time = min(120, 10 * (2 ** min(self._consecutive_errors - 1, 3)))
-                    print(f"  Server error ({self._consecutive_errors}), retrying in {wait_time}s...")
-                    _time.sleep(wait_time)
-                    del input_items, tools
-                    continue  # Loop back to retry
-                else:
-                    # Non-retryable error. No next-week fallback —
-                    # feed the error message back to the LLM and regenerate.
-                    print(f"  Non-retryable error — feeding back to LLM for regeneration.")
-                    print(f"Traceback: {traceback.format_exc()}")
-                    self._consecutive_errors = getattr(self, '_consecutive_errors', 0) + 1
-                    wait_time = min(60, 5 * self._consecutive_errors)
-                    self.conversation.append(Message(
-                        role='user',
-                        content=(
-                            f"The previous API request failed with a non-retryable error:\n"
-                            f"{type(e).__name__}: {e}\n\n"
-                            f"Please re-emit your response. If the error mentions input validation, "
-                            f"check your tool_call arguments are valid JSON. "
-                            f"If the error mentions context length, produce a shorter response."
-                        )
-                    ))
-                    _time.sleep(wait_time)
-                    del input_items, tools
-                    continue
-
-    _ANTHROPIC_VALID_EFFORTS = frozenset({'low', 'medium', 'high', 'xhigh', 'max'})
-    _ANTHROPIC_HAIKU_BUDGET_BY_EFFORT = {
-        'low': 4096,
-        'medium': 16000,
-        'high': 32000,
-        'xhigh': 48000,
-        'max': 64000,
-    }
-
-    def _uses_native_128k_output(self, model: Optional[str] = None) -> bool:
-        """Return True for models whose 128K output is not beta-gated."""
-        model_name = (model or self.model).lower()
-        return 'fable' in model_name or 'mythos' in model_name
-
-    def _anthropic_extra_headers(self) -> Dict[str, str]:
-        """Return model-specific Anthropic beta headers."""
-        if self._uses_native_128k_output():
-            return {}
-        return {'anthropic-beta': 'output-128k-2025-02-19'}
-
-    def _anthropic_betas(self) -> List[str]:
-        """Return beta flags for Anthropic beta Messages requests."""
-        betas = []
-        if self.anthropic_fallback_model:
-            betas.append('server-side-fallback-2026-06-01')
-        if (
-            not self._uses_native_128k_output()
-            or (
-                self.anthropic_fallback_model
-                and not self._uses_native_128k_output(self.anthropic_fallback_model)
-            )
-        ):
-            betas.append('output-128k-2025-02-19')
-        return betas
-
-    def _apply_anthropic_reasoning_params(self, api_kwargs: Dict[str, Any]) -> None:
-        """Add Anthropic thinking/effort params for models that support them."""
-        if self.reasoning_effort not in self._ANTHROPIC_VALID_EFFORTS:
-            return
-
-        if 'haiku' in self.model.lower():
-            api_kwargs['thinking'] = {
-                'type': 'enabled',
-                'budget_tokens': self._ANTHROPIC_HAIKU_BUDGET_BY_EFFORT[self.reasoning_effort],
-            }
-            return
-
-        # Fable/Mythos and the recent Opus/Sonnet models use adaptive thinking
-        # with output_config.effort instead of fixed budget tokens.
-        api_kwargs['thinking'] = {'type': 'adaptive'}
-        api_kwargs['output_config'] = {'effort': self.reasoning_effort}
+            except (openai.OpenAIError, LLMTimeoutError):
+                # SDK 已完成有限重试；继续外层重试会让本地服务故障时实验永久卡住。
+                raise
 
     def _anthropic_content_text(self, content: Any) -> str:
         """Best-effort text extraction from Anthropic content blocks."""
@@ -1018,24 +922,9 @@ class BashAgent(BaseAgent):
         return {}
 
     def _record_anthropic_response_metadata(self, response: Any) -> None:
-        """Track served model and server-side fallback hops for logging."""
+        """Track the model actually returned by Anthropic for logging."""
         response_dict = self._anthropic_response_dict(response)
         self.last_serving_model = str(response_dict.get('model') or self.model)
-        self.last_anthropic_fallbacks = []
-
-        for block in response_dict.get('content') or []:
-            if not isinstance(block, dict) or block.get('type') != 'fallback':
-                continue
-            from_model = ((block.get('from') or {}).get('model') or '')
-            to_model = ((block.get('to') or {}).get('model') or '')
-            self.last_anthropic_fallbacks.append({
-                'from': from_model,
-                'to': to_model,
-            })
-
-        self.last_anthropic_fallback_used = bool(self.last_anthropic_fallbacks)
-        if self.last_anthropic_fallback_used:
-            self.total_anthropic_fallbacks += len(self.last_anthropic_fallbacks)
 
     def _anthropic_no_tool_feedback(self, response: Any, assistant_content: Any) -> str:
         """Feedback used when Anthropic returns text instead of a tool."""
@@ -1044,14 +933,13 @@ class BashAgent(BaseAgent):
             preview = preview[:1200] + "..."
 
         return (
-            "You must call a tool to proceed. If you need context, use read_file, "
-            "search_files, or bash. If you have nothing else to do this week, call "
-            "`./novamind-operation next-week <cash_1wk> <cash_4wk> <cash_12wk>` via bash. "
+            f"{self.NO_TOOL_FEEDBACK} "
             f"Previous non-tool response preview: {preview or '(no text)'}"
         )
 
     def _call_anthropic(self) -> Optional[Action]:
         """Call Anthropic/Bedrock API and parse the response."""
+        import anthropic
         import copy
 
         no_tool_retries = 0
@@ -1114,22 +1002,14 @@ class BashAgent(BaseAgent):
                 api_kwargs['temperature'] = self.temperature
             if self.top_p is not None:
                 api_kwargs['top_p'] = self.top_p
+            api_kwargs.update(self.request_options)
             anthropic_messages = self.client.messages
-            if self.anthropic_fallback_model:
-                anthropic_messages = self.client.beta.messages
-                api_kwargs['fallbacks'] = [{'model': self.anthropic_fallback_model}]
-                api_kwargs['betas'] = self._anthropic_betas()
-            elif (extra_headers := self._anthropic_extra_headers()):
-                # output-128k beta lets Sonnet/Opus 4.x emit up to 128K output
-                # tokens. Fable/Mythos expose 128K output without this beta.
-                api_kwargs['extra_headers'] = extra_headers
 
             # Anthropic SDK refuses non-streaming when max_tokens implies > 10min
             # budget (raised in _calculate_nonstreaming_timeout). Always stream
             # for max_tokens > 64000.
             use_streaming = api_kwargs['max_tokens'] > 64000
-            if self.reasoning_effort in self._ANTHROPIC_VALID_EFFORTS:
-                self._apply_anthropic_reasoning_params(api_kwargs)
+            if 'thinking' in api_kwargs:
                 use_streaming = True
 
             try:
@@ -1148,9 +1028,13 @@ class BashAgent(BaseAgent):
                 if usage:
                     self.last_input_tokens = getattr(usage, 'input_tokens', 0) or 0
                     self.last_output_tokens = getattr(usage, 'output_tokens', 0) or 0
-                    # Anthropic cache tracking: cache_creation_input_tokens + cache_read_input_tokens
+                    # Anthropic 的 input_tokens 不含缓存读写；这里单独记录缓存命中量。
                     self.last_cached_tokens = getattr(usage, 'cache_read_input_tokens', 0) or 0
-                    self.last_reasoning_tokens = 0  # Anthropic doesn't expose reasoning tokens separately
+                    output_details = getattr(usage, 'output_tokens_details', None)
+                    self.last_reasoning_tokens = (
+                        getattr(output_details, 'thinking_tokens', 0) or 0
+                        if output_details else 0
+                    )
                 else:
                     self.last_input_tokens = 0
                     self.last_output_tokens = 0
@@ -1167,19 +1051,6 @@ class BashAgent(BaseAgent):
                         day=self.current_day,
                         messages=messages,
                         raw_response=self._anthropic_response_dict(response) or str(response),
-                    )
-
-                if self.last_anthropic_fallback_used and self.tool_result_callback:
-                    self.tool_result_callback(
-                        self.total_turns,
-                        self.current_day,
-                        '_anthropic_fallback',
-                        {
-                            'requested_model': self.model,
-                            'served_model': self.last_serving_model,
-                            'fallbacks': self.last_anthropic_fallbacks,
-                        },
-                        '',
                     )
 
                 assistant_content = response.content
@@ -1200,7 +1071,7 @@ class BashAgent(BaseAgent):
                             {'stop_reason': stop_reason, 'attempt': no_tool_retries},
                             self._anthropic_content_text(assistant_content),
                         )
-                    if no_tool_retries > 3:
+                    if no_tool_retries >= self.max_invalid_responses_per_turn:
                         raise RuntimeError(
                             "Anthropic response did not include a tool_use block after "
                             f"{no_tool_retries} attempts (last stop_reason={stop_reason!r})."
@@ -1229,8 +1100,18 @@ class BashAgent(BaseAgent):
                 self._pending_tool_calls = [{'id': first_tool.id, 'name': first_tool.name, '_partial_results': partial_results}]
                 return Action(tool=first_tool.name, arguments=first_tool.input or {})
 
-            except Exception as e:
+            except anthropic.APIError as e:
+                # 只重试 Anthropic SDK 明确报告的 Provider 异常。
                 import traceback
+                status = getattr(e, 'status_code', 0) or 0
+                is_retryable = isinstance(
+                    e, (anthropic.APIConnectionError, anthropic.APITimeoutError)
+                ) or (
+                    isinstance(e, anthropic.APIStatusError)
+                    and (status == 429 or status >= 500)
+                )
+                if not is_retryable:
+                    raise
                 if str(e).startswith("Anthropic response did not include a tool_use block"):
                     raise
                 error_msg = f"Anthropic LLM call error: {e}"

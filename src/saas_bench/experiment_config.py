@@ -2,40 +2,29 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional
 import tomllib
 
-_API_KEY_ENV_BY_PROVIDER = {
-    "openai": "OPENAI_API_KEY",
-    "xai": "XAI_API_KEY",
-    "google": "GOOGLE_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "modal": "MODAL_API_KEY",
-    "together": "TOGETHER_API_KEY",
-    "ai_sandbox": "AI_SANDBOX_KEY",
-}
-
-_BASE_URL_BY_PROVIDER = {
-    "xai": "https://api.x.ai/v1",
-    "google": "https://generativelanguage.googleapis.com/v1beta/openai",
-    "together": "https://api.together.xyz/v1",
-}
-
-_DECISION_PROVIDERS = {
-    "openai", "xai", "google", "anthropic", "bedrock", "modal",
-    "together", "ai_sandbox",
-}
-_SIMULATOR_PROVIDERS = {"openai", "anthropic", "bedrock"}
+_DECISION_PROVIDERS = {"openai", "openai_compatible", "anthropic", "bedrock"}
+_SIMULATOR_PROVIDERS = set(_DECISION_PROVIDERS)
 _REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 _MODEL_KEYS = {
-    "provider", "model", "base_url", "api_key_env", "api_key_required", "reasoning_effort",
+    "provider", "api_type", "model", "base_url", "api_key_env", "api_key_required", "reasoning_effort",
     "temperature", "top_p", "max_output_tokens", "timeout_seconds",
-    "input_cost_per_million", "output_cost_per_million",
+    "pricing", "request_options", "tasks",
+}
+_TASK_KEYS = {
+    "reasoning_effort", "temperature", "top_p", "max_output_tokens", "request_options",
+}
+_SOCIAL_TASKS = {
+    "customer_post", "macro_post", "competitor_post", "agent_post_judge",
+    "agent_post_reply",
 }
 _EXPERIMENT_KEYS = {
     "seed", "days", "scenario", "initial_cash", "workspace", "label",
+    "max_decision_turns_per_batch", "max_invalid_responses_per_turn",
 }
 
 
@@ -47,22 +36,26 @@ class ExperimentSettings:
     initial_cash: float = 1_000_000.0
     workspace: str = "bash_agent_runs"
     label: Optional[str] = None
+    max_decision_turns_per_batch: int = 100
+    max_invalid_responses_per_turn: int = 3
 
 
 @dataclass(frozen=True)
 class ModelSettings:
     provider: str
+    api_type: str
     model: str
+    max_output_tokens: int
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
     api_key_required: bool = True
     reasoning_effort: Optional[str] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
-    max_output_tokens: Optional[int] = None
     timeout_seconds: float = 600.0
-    input_cost_per_million: Optional[float] = None
-    output_cost_per_million: Optional[float] = None
+    pricing: dict[str, dict[str, float]] = field(default_factory=dict)
+    request_options: dict[str, Any] = field(default_factory=dict)
+    tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -73,20 +66,14 @@ class ExperimentConfig:
     experiment: ExperimentSettings
     decision_agent: ModelSettings
     social_llm: ModelSettings
-    enterprise_llm: ModelSettings
 
     def simulator_overrides(self) -> dict[str, Any]:
-        return {
-            **_model_overrides("social_post_llm", self.social_llm),
-            **_model_overrides("enterprise_llm", self.enterprise_llm),
-        }
+        return _model_overrides("social_post_llm", self.social_llm)
 
 
 def load_experiment_config(path: Optional[Path]) -> ExperimentConfig:
     if path is None:
-        raise ValueError(
-            "an explicit experiment config is required; pass --config <path>"
-        )
+        raise ValueError("an explicit experiment config path is required")
 
     config_path = Path(path).expanduser().resolve()
     with config_path.open("rb") as file:
@@ -95,7 +82,7 @@ def load_experiment_config(path: Optional[Path]) -> ExperimentConfig:
     _reject_unknown(raw, {"experiment", "models"}, "root")
     experiment_raw = _table(raw.get("experiment"), "experiment")
     models_raw = _required_table(raw.get("models"), "models")
-    _reject_unknown(models_raw, {"decision_agent", "social_llm", "enterprise_llm"}, "models")
+    _reject_unknown(models_raw, {"decision_agent", "social_llm"}, "models")
 
     return ExperimentConfig(
         experiment=_load_experiment(experiment_raw, ExperimentSettings()),
@@ -103,19 +90,13 @@ def load_experiment_config(path: Optional[Path]) -> ExperimentConfig:
             _required_table(models_raw.get("decision_agent"), "models.decision_agent"),
             _DECISION_PROVIDERS,
             "models.decision_agent",
-            default_max_output_tokens=16_384,
+            valid_tasks=set(),
         ),
         social_llm=_load_model(
             _required_table(models_raw.get("social_llm"), "models.social_llm"),
             _SIMULATOR_PROVIDERS,
             "models.social_llm",
-            default_max_output_tokens=1_000,
-        ),
-        enterprise_llm=_load_model(
-            _required_table(models_raw.get("enterprise_llm"), "models.enterprise_llm"),
-            _SIMULATOR_PROVIDERS,
-            "models.enterprise_llm",
-            default_max_output_tokens=300,
+            valid_tasks=_SOCIAL_TASKS,
         ),
     )
 
@@ -124,6 +105,15 @@ def _load_experiment(
     raw: Mapping[str, Any], defaults: ExperimentSettings
 ) -> ExperimentSettings:
     _reject_unknown(raw, _EXPERIMENT_KEYS, "experiment")
+    required = {
+        "max_decision_turns_per_batch",
+        "max_invalid_responses_per_turn",
+    }
+    missing = sorted(required - set(raw))
+    if missing:
+        raise ValueError(
+            f"experiment must explicitly configure: {', '.join(missing)}"
+        )
     values = asdict(defaults)
     values.update(raw)
     if not isinstance(values["seed"], int):
@@ -138,6 +128,16 @@ def _load_experiment(
         raise ValueError("experiment.workspace must be a non-empty string")
     if values["label"] is not None and not isinstance(values["label"], str):
         raise ValueError("experiment.label must be a string")
+    max_turns = values["max_decision_turns_per_batch"]
+    if not isinstance(max_turns, int) or isinstance(max_turns, bool) or max_turns <= 0:
+        raise ValueError(
+            "experiment.max_decision_turns_per_batch must be a positive integer"
+        )
+    max_invalid = values["max_invalid_responses_per_turn"]
+    if not isinstance(max_invalid, int) or isinstance(max_invalid, bool) or max_invalid <= 0:
+        raise ValueError(
+            "experiment.max_invalid_responses_per_turn must be a positive integer"
+        )
     return ExperimentSettings(**values)
 
 
@@ -145,10 +145,10 @@ def _load_model(
     raw: Mapping[str, Any],
     valid_providers: set[str],
     section: str,
-    default_max_output_tokens: int,
+    valid_tasks: set[str],
 ) -> ModelSettings:
     _reject_unknown(raw, _MODEL_KEYS, section)
-    missing = sorted({"provider", "model"} - set(raw))
+    missing = sorted({"provider", "api_type", "model", "max_output_tokens"} - set(raw))
     if missing:
         raise ValueError(
             f"{section} must explicitly configure: {', '.join(missing)}"
@@ -160,22 +160,29 @@ def _load_model(
         raise ValueError(f"{section}.provider must be one of: {allowed}")
     if not isinstance(raw["model"], str) or not raw["model"]:
         raise ValueError(f"{section}.model must be a non-empty string")
+    api_type = raw["api_type"]
+    if not isinstance(api_type, str):
+        raise ValueError(f"{section}.api_type must be a string")
+    from .llm_provider import validate_provider_api_type, validate_reasoning_effort
+    validate_provider_api_type(provider, api_type, section)
 
     values = {
         "provider": provider,
+        "api_type": api_type,
         "model": raw["model"],
-        "base_url": raw.get("base_url", default_base_url(provider)),
-        "api_key_env": raw.get("api_key_env", default_api_key_env(provider)),
+        "base_url": raw.get("base_url"),
+        "api_key_env": raw.get("api_key_env"),
         "api_key_required": raw.get("api_key_required", True),
         "reasoning_effort": raw.get("reasoning_effort"),
         "temperature": raw.get("temperature"),
         "top_p": raw.get("top_p"),
-        "max_output_tokens": raw.get(
-            "max_output_tokens", default_max_output_tokens
-        ),
+        "max_output_tokens": raw["max_output_tokens"],
         "timeout_seconds": raw.get("timeout_seconds", 600.0),
-        "input_cost_per_million": raw.get("input_cost_per_million"),
-        "output_cost_per_million": raw.get("output_cost_per_million"),
+        "pricing": _load_pricing(raw.get("pricing"), section, raw["model"]),
+        "request_options": _load_request_options(
+            raw.get("request_options"), f"{section}.request_options", api_type
+        ),
+        "tasks": _load_tasks(raw.get("tasks"), section, valid_tasks, api_type),
     }
 
     temperature = values["temperature"]
@@ -189,34 +196,33 @@ def _load_model(
     ):
         raise ValueError(f"{section}.top_p must be between 0 and 1")
     max_tokens = values["max_output_tokens"]
-    if max_tokens is not None and (not isinstance(max_tokens, int) or max_tokens <= 0):
+    if not isinstance(max_tokens, int) or max_tokens <= 0:
         raise ValueError(f"{section}.max_output_tokens must be a positive integer")
     timeout = values["timeout_seconds"]
     if not isinstance(timeout, (int, float)) or timeout <= 0:
         raise ValueError(f"{section}.timeout_seconds must be positive")
-    for key in ("input_cost_per_million", "output_cost_per_million"):
-        price = values[key]
-        if price is not None and (
-            not isinstance(price, (int, float)) or price < 0
-        ):
-            raise ValueError(f"{section}.{key} must be non-negative")
-    configured_prices = (
-        values["input_cost_per_million"] is not None,
-        values["output_cost_per_million"] is not None,
-    )
-    if configured_prices[0] != configured_prices[1]:
-        raise ValueError(
-            f"{section} must configure input and output costs together"
-        )
     for key in ("base_url", "api_key_env", "reasoning_effort"):
         if values[key] is not None and not isinstance(values[key], str):
             raise ValueError(f"{section}.{key} must be a string")
     if not isinstance(values["api_key_required"], bool):
         raise ValueError(f"{section}.api_key_required must be a boolean")
+    if provider == "openai_compatible" and not values["base_url"]:
+        raise ValueError(f"{section}.base_url is required for openai_compatible")
+    if provider == "bedrock" and values["api_key_required"]:
+        raise ValueError(f"{section}.api_key_required must be false for bedrock")
+    if provider != "bedrock" and values["api_key_required"] and not values["api_key_env"]:
+        raise ValueError(
+            f"{section}.api_key_env is required when api_key_required is true"
+        )
     reasoning = values["reasoning_effort"]
-    if reasoning is not None and reasoning not in _REASONING_EFFORTS:
-        allowed = ", ".join(sorted(_REASONING_EFFORTS))
-        raise ValueError(f"{section}.reasoning_effort must be one of: {allowed}")
+    validate_reasoning_effort(api_type, reasoning, section)
+
+    for task_name, task_values in values["tasks"].items():
+        validate_reasoning_effort(
+            api_type,
+            task_values.get("reasoning_effort", reasoning),
+            f"{section}.tasks.{task_name}",
+        )
 
     return ModelSettings(**values)
 
@@ -224,6 +230,7 @@ def _load_model(
 def _model_overrides(prefix: str, settings: ModelSettings) -> dict[str, Any]:
     return {
         f"{prefix}_provider": settings.provider,
+        f"{prefix}_api_type": settings.api_type,
         f"{prefix}_model": settings.model,
         f"{prefix}_base_url": settings.base_url,
         f"{prefix}_api_key_env": settings.api_key_env,
@@ -233,17 +240,96 @@ def _model_overrides(prefix: str, settings: ModelSettings) -> dict[str, Any]:
         f"{prefix}_top_p": settings.top_p,
         f"{prefix}_max_tokens": settings.max_output_tokens,
         f"{prefix}_timeout_seconds": settings.timeout_seconds,
-        f"{prefix}_input_cost_per_million": settings.input_cost_per_million,
-        f"{prefix}_output_cost_per_million": settings.output_cost_per_million,
+        f"{prefix}_pricing": settings.pricing,
+        f"{prefix}_request_options": settings.request_options,
+        f"{prefix}_task_parameters": settings.tasks,
     }
 
 
-def default_api_key_env(provider: str) -> Optional[str]:
-    return _API_KEY_ENV_BY_PROVIDER.get(provider)
+def _load_tasks(
+    value: Any, section: str, valid_tasks: set[str], api_type: str
+) -> dict[str, dict[str, Any]]:
+    if value is None:
+        return {}
+    tasks = _table(value, f"{section}.tasks")
+    result: dict[str, dict[str, Any]] = {}
+    for name, raw_task in tasks.items():
+        if name not in valid_tasks:
+            allowed = ", ".join(sorted(valid_tasks)) or "none"
+            raise ValueError(
+                f"unknown {section}.tasks entry {name!r}; allowed tasks: {allowed}"
+            )
+        task_section = f"{section}.tasks.{name}"
+        task = _table(raw_task, task_section)
+        _reject_unknown(task, _TASK_KEYS, task_section)
+        values = dict(task)
+        values["request_options"] = _load_request_options(
+            values.get("request_options"), f"{task_section}.request_options", api_type
+        )
+        temperature = values.get("temperature")
+        if temperature is not None and (
+            not isinstance(temperature, (int, float)) or not 0 <= temperature <= 2
+        ):
+            raise ValueError(f"{task_section}.temperature must be between 0 and 2")
+        top_p = values.get("top_p")
+        if top_p is not None and (
+            not isinstance(top_p, (int, float)) or not 0 <= top_p <= 1
+        ):
+            raise ValueError(f"{task_section}.top_p must be between 0 and 1")
+        max_tokens = values.get("max_output_tokens")
+        if max_tokens is not None and (
+            not isinstance(max_tokens, int) or max_tokens <= 0
+        ):
+            raise ValueError(f"{task_section}.max_output_tokens must be positive")
+        reasoning = values.get("reasoning_effort")
+        if reasoning is not None and reasoning not in _REASONING_EFFORTS:
+            allowed = ", ".join(sorted(_REASONING_EFFORTS))
+            raise ValueError(f"{task_section}.reasoning_effort must be one of: {allowed}")
+        result[str(name)] = values
+    return result
 
 
-def default_base_url(provider: str) -> Optional[str]:
-    return _BASE_URL_BY_PROVIDER.get(provider)
+def _load_request_options(
+    value: Any, section: str, api_type: str
+) -> dict[str, Any]:
+    if value is None:
+        return {}
+    options = dict(_table(value, section))
+    if api_type == "anthropic_messages":
+        allowed = {"thinking", "output_config"}
+    else:
+        allowed = {"extra_body", "extra_headers", "extra_query"}
+    _reject_unknown(options, allowed, section)
+    for key, item in options.items():
+        if not isinstance(item, dict):
+            raise ValueError(f"{section}.{key} must be a TOML table")
+    return options
+
+
+def _load_pricing(
+    value: Any, section: str, configured_model: str
+) -> dict[str, dict[str, float]]:
+    raw = _required_table(value, f"{section}.pricing")
+    result: dict[str, dict[str, float]] = {}
+    for model, raw_price in raw.items():
+        price_section = f"{section}.pricing.{model}"
+        price = dict(_table(raw_price, price_section))
+        keys = {"input_cost_per_million", "output_cost_per_million"}
+        _reject_unknown(price, keys, price_section)
+        missing = sorted(keys - set(price))
+        if missing:
+            raise ValueError(
+                f"{price_section} must explicitly configure: {', '.join(missing)}"
+            )
+        for key in keys:
+            if not isinstance(price[key], (int, float)) or price[key] < 0:
+                raise ValueError(f"{price_section}.{key} must be non-negative")
+        result[str(model)] = {key: float(price[key]) for key in keys}
+    if configured_model not in result:
+        raise ValueError(
+            f"{section}.pricing must include configured model {configured_model!r}"
+        )
+    return result
 
 
 def _table(value: Any, section: str) -> Mapping[str, Any]:

@@ -13,15 +13,20 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-class NextDayTimeoutError(Exception):
-    """Raised when ./novamind-operation next-week times out.
+class NextWeekExecutionError(Exception):
+    """Raised when next-week cannot safely advance the simulation."""
 
-    This should cause the runner to save checkpoint and kill the run.
-    """
     def __init__(self, message: str, partial_stdout: str = "", partial_stderr: str = ""):
         super().__init__(message)
         self.partial_stdout = partial_stdout
         self.partial_stderr = partial_stderr
+
+
+class NextWeekTimeoutError(NextWeekExecutionError):
+    """Raised when ./novamind-operation next-week times out.
+
+    This should cause the runner to save checkpoint and kill the run.
+    """
 
 
 # =========================================================================
@@ -203,7 +208,7 @@ class BashAgentToolExecutor:
         Args:
             workspace_path: Agent's working directory.
             env: Extra environment variables for bash commands.
-            bash_timeout: Timeout in seconds for bash commands (default 5 min).
+            bash_timeout: Timeout in seconds for bash commands (default 20 min).
         """
         self.workspace_path = workspace_path
         self.extra_env = env or {}
@@ -224,7 +229,7 @@ class BashAgentToolExecutor:
             return f"Error: Unknown tool '{tool_name}'"
         try:
             return handler(args)
-        except NextDayTimeoutError:
+        except NextWeekExecutionError:
             raise
         except Exception as e:
             return f"Error: {e}"
@@ -236,9 +241,9 @@ class BashAgentToolExecutor:
             resolved = p.resolve()
         else:
             resolved = (self.workspace_path / p).resolve()
-        # Ensure it's within workspace
+        # 必须按路径层级判断，字符串前缀会把 workspace_evil 误当成子目录。
         ws_resolved = self.workspace_path.resolve()
-        if not str(resolved).startswith(str(ws_resolved)):
+        if resolved != ws_resolved and ws_resolved not in resolved.parents:
             raise ValueError(f"Path escapes workspace: {path_str}")
         return resolved
 
@@ -397,6 +402,14 @@ class BashAgentToolExecutor:
 
         # Try bwrap sandbox; fall back to basic Popen if unavailable
         bwrap_cmd = self._build_bwrap_cmd(command, ws, env)
+        if bwrap_cmd is None and env.get('ORACLE_MODE') != '1':
+            # macOS 没有 bwrap，软隔离至少必须禁止 Agent 导入可编辑安装的模拟器源码。
+            sandbox_init = str(self._SANDBOX_INIT_DIR)
+            existing_pythonpath = env.get('PYTHONPATH', '')
+            env['PYTHONPATH'] = (
+                f"{sandbox_init}:{existing_pythonpath}"
+                if existing_pythonpath else sandbox_init
+            )
 
         # Use Popen so we can explicitly kill the process group on timeout.
         # subprocess.run() does NOT kill children on TimeoutExpired, leaving
@@ -445,19 +458,37 @@ class BashAgentToolExecutor:
             if len(output) > 30000:
                 output = output[:15000] + "\n\n... (output truncated — exceeded 30,000 character limit) ...\n\n" + output[-15000:]
 
+            is_next_week = './novamind-operation next-week' in command
+
             # Engine-level next-week timeout: api_server's STEP_WEEK_TIMEOUT
             # fired (step_week didn't return within ~70min). The bash command
             # exits cleanly with returncode=1 and "step_week_timeout" in
             # stderr — the bash subprocess didn't hang, the engine did. Raise
-            # NextDayTimeoutError so the harness ends the run instead of
+            # NextWeekTimeoutError so the harness ends the run instead of
             # letting the agent retry into a wedged engine.
             if (
-                './novamind-operation next-week' in command
+                is_next_week
                 and proc.returncode != 0
                 and ('step_week_timeout' in output or 'step_day_timeout' in output)
             ):
-                raise NextDayTimeoutError(
+                raise NextWeekTimeoutError(
                     "next_week engine-side timeout (step_week_timeout)",
+                    partial_stdout=stdout or "",
+                    partial_stderr=stderr or "",
+                )
+
+            # next-week 的服务端内部错误可能发生在本周已经推进数天之后，不能作为
+            # 普通工具输出交给 Agent 继续运行；终止后只能从上一份稳定断点恢复。
+            if (
+                is_next_week
+                and proc.returncode != 0
+                and (
+                    'internal_error' in output
+                    or 'Failed to connect to server' in output
+                )
+            ):
+                raise NextWeekExecutionError(
+                    "next_week failed before a stable weekly checkpoint was created",
                     partial_stdout=stdout or "",
                     partial_stderr=stderr or "",
                 )
@@ -498,7 +529,7 @@ class BashAgentToolExecutor:
 
             # If command is ./novamind-operation next-week, raise to kill the run
             if './novamind-operation next-week' in command:
-                raise NextDayTimeoutError(
+                raise NextWeekTimeoutError(
                     f"next_week timed out after {self.bash_timeout}s",
                     partial_stdout=partial_stdout,
                     partial_stderr=partial_stderr,
@@ -618,9 +649,6 @@ class BashAgentToolExecutor:
             return "No matching files."
         result = []
         for m in matches[:200]:
-            try:
-                rel = m.relative_to(self.workspace_path)
-                result.append(str(rel))
-            except ValueError:
-                result.append(str(m))
+            resolved = self._resolve_path(str(m))
+            result.append(str(resolved.relative_to(self.workspace_path.resolve())))
         return '\n'.join(result)

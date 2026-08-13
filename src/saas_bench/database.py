@@ -1231,6 +1231,33 @@ def get_total_api_cost(conn: sqlite3.Connection) -> float:
     return float(result[0])
 
 
+def get_api_usage_summary(conn: sqlite3.Connection) -> dict:
+    """Summarize simulator-side LLM usage, split by purpose."""
+    rows = conn.execute("""
+        SELECT purpose,
+               COALESCE(SUM(input_tokens), 0) AS input_tokens,
+               COALESCE(SUM(output_tokens), 0) AS output_tokens,
+               COALESCE(SUM(cost_usd), 0) AS cost_usd
+        FROM api_costs
+        GROUP BY purpose
+        ORDER BY purpose
+    """).fetchall()
+    by_purpose = {
+        row["purpose"]: {
+            "input_tokens": int(row["input_tokens"]),
+            "output_tokens": int(row["output_tokens"]),
+            "cost_usd": float(row["cost_usd"]),
+        }
+        for row in rows
+    }
+    return {
+        "input_tokens": sum(item["input_tokens"] for item in by_purpose.values()),
+        "output_tokens": sum(item["output_tokens"] for item in by_purpose.values()),
+        "cost_usd": sum(item["cost_usd"] for item in by_purpose.values()),
+        "by_purpose": by_purpose,
+    }
+
+
 # =============================================================================
 # Group Reputation Functions
 # =============================================================================

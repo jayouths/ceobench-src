@@ -116,9 +116,11 @@ def render_cli_docs(output_dir: Path):
         output_dir: Directory to write cli.md to (e.g., workspace/docs/).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    from .novamind_cli import get_cli_docs
-    filepath = output_dir / "cli.md"
-    filepath.write_text(get_cli_docs())
+    from ._public_cli import get_cli_docs
+    content = get_cli_docs()
+    # 两个文件名为公开仓库保留，内容统一来自当前 CLI 实现。
+    for filename in ("cli.md", "cli-reference.md"):
+        (output_dir / filename).write_text(content)
 
 
 def initialize_workspace(workspace_path: Path):
@@ -128,12 +130,7 @@ def initialize_workspace(workspace_path: Path):
     repo root* (``<base>/docs/*``), not per-session. This keeps the workspace
     to just the ephemeral state the agent writes itself.
 
-    Creates:
-        workspace_path/
-            daily_scripts/    — Auto-executed scripts directory
-
     Args:
         workspace_path: Per-session scratch root for the agent.
     """
     workspace_path.mkdir(parents=True, exist_ok=True)
-    (workspace_path / "daily_scripts").mkdir(exist_ok=True)

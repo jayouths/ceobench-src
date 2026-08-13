@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 
@@ -622,9 +622,6 @@ class BenchmarkConfig:
     competitor_post_likes_ratio: float = 0.05
     competitor_post_shares_ratio: float = 0.02
 
-    # LLM max_tokens for competitor-event social posts (Haiku/GPT generation).
-    competitor_post_llm_max_tokens: int = 200
-
     # Grace period: no drift or competitor events for the first N days
     drift_grace_period_days: int = 60  # v3.4c: 100→60. No global/group/individual drift or competitor events before this day
 
@@ -673,39 +670,21 @@ class BenchmarkConfig:
     agent_llm_model: str = "gpt-5.2"
     agent_llm_reasoning_effort: str = "low"
 
-    # Social Post LLM (for generating social media posts).
-    # Supported providers: "bedrock", "anthropic", or "openai".
-    #   - "bedrock":   AnthropicBedrock SDK; requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION.
-    #                  Use a Bedrock model id (e.g. "us.anthropic.claude-haiku-4-5-20251001-v1:0").
-    #   - "anthropic": Direct Anthropic SDK; requires ANTHROPIC_API_KEY.
-    #                  Use the public model name (e.g. "claude-haiku-4-5"). No AWS credentials needed.
-    #   - "openai":    OpenAI Responses API; requires OPENAI_API_KEY.
-    social_post_llm_provider: str = "anthropic"  # "bedrock" | "anthropic" | "openai"
-    social_post_llm_model: str = "claude-haiku-4-5"
+    # Simulator LLM identity is injected from the experiment TOML before startup.
+    social_post_llm_provider: str = ""
+    social_post_llm_api_type: str = ""
+    social_post_llm_model: str = ""
     social_post_llm_base_url: Optional[str] = None
-    social_post_llm_api_key_env: Optional[str] = "ANTHROPIC_API_KEY"
+    social_post_llm_api_key_env: Optional[str] = None
     social_post_llm_api_key_required: bool = True
     social_post_llm_reasoning_effort: Optional[str] = None
     social_post_llm_temperature: Optional[float] = 0.9
     social_post_llm_top_p: Optional[float] = None
-    social_post_llm_max_tokens: int = 1000
+    social_post_llm_max_tokens: Optional[int] = None
     social_post_llm_timeout_seconds: float = 600.0
-    social_post_llm_input_cost_per_million: Optional[float] = None
-    social_post_llm_output_cost_per_million: Optional[float] = None
-
-    # Enterprise Customer LLM (for negotiation responses, initial outreach).
-    enterprise_llm_provider: str = "anthropic"  # "bedrock" | "anthropic" | "openai"
-    enterprise_llm_model: str = "claude-sonnet-4-5"
-    enterprise_llm_base_url: Optional[str] = None
-    enterprise_llm_api_key_env: Optional[str] = "ANTHROPIC_API_KEY"
-    enterprise_llm_api_key_required: bool = True
-    enterprise_llm_reasoning_effort: Optional[str] = None
-    enterprise_llm_temperature: Optional[float] = 0.7
-    enterprise_llm_top_p: Optional[float] = None
-    enterprise_llm_max_tokens: int = 300
-    enterprise_llm_timeout_seconds: float = 600.0
-    enterprise_llm_input_cost_per_million: Optional[float] = None
-    enterprise_llm_output_cost_per_million: Optional[float] = None
+    social_post_llm_pricing: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    social_post_llm_request_options: Dict[str, Any] = field(default_factory=dict)
+    social_post_llm_task_parameters: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # Bedrock configuration
     bedrock_region: str = "us-east-2"  # Ohio — AWS Bedrock region

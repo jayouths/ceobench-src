@@ -9,10 +9,12 @@ The simulation engine runs as a separate subprocess (novamind-server start-serve
 The harness communicates with it exclusively via HTTP — no direct DB or simulator
 access. This ensures the harness and the public repo have identical interfaces.
 
-Supports OpenAI, xAI/Grok, Anthropic (direct and Bedrock).
+Supports explicit OpenAI, OpenAI-compatible, Anthropic, and Bedrock clients.
 """
 
 import json
+import hashlib
+import math
 import os
 import shutil
 import subprocess
@@ -22,6 +24,7 @@ import urllib.request
 import urllib.error
 import uuid
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -30,21 +33,29 @@ package_root = Path(__file__).parent.parent.parent.parent
 if str(package_root) not in sys.path:
     sys.path.insert(0, str(package_root))
 
-from openai import OpenAI
-from saas_bench.experiment_config import (
-    default_api_key_env,
-    default_base_url,
-    load_experiment_config,
+DEFAULT_EXPERIMENT_CONFIG = package_root.parent / "experiments" / "experiment.toml"
+RUN_CONFIG_FORMAT_VERSION = 3
+RUN_CONFIG_FIELDS = {
+    "format_version", "run_id", "agent_type", "model", "provider", "api_type",
+    "base_url", "reasoning_effort", "temperature", "top_p", "max_output_tokens",
+    "timeout_seconds", "request_options", "pricing", "api_key_env",
+    "api_key_required", "seed", "scenario", "total_days", "initial_cash",
+    "max_decision_turns_per_batch", "max_invalid_responses_per_turn", "label", "simulator_llm",
+    "public_bundle_sha256", "harness_git_commit", "harness_git_dirty",
+    "harness_source_sha256",
+}
+
+from saas_bench.experiment_config import load_experiment_config
+from saas_bench.llm_provider import (
+    create_llm_client,
+    model_token_cost_usd,
+    validate_provider_api_type,
+    validate_reasoning_effort,
 )
 
-try:
-    import anthropic
-    from anthropic import AnthropicBedrock
-    ANTHROPIC_AVAILABLE = True
-except ImportError:
-    ANTHROPIC_AVAILABLE = False
-
 from saas_bench.environment import Action
+from saas_bench.agents.bash_agent.agent import BashAgent
+from saas_bench.json_io import write_json_atomic
 
 
 def now() -> str:
@@ -63,7 +74,12 @@ def load_env_file(env_path: Path) -> Dict[str, str]:
     return env_vars
 
 
-ANTHROPIC_FABLE_FALLBACK_MODEL = "claude-opus-4-8"
+@dataclass(frozen=True)
+class CheckpointRestorePlan:
+    """Fully validated in-memory state needed to apply one checkpoint."""
+
+    session_id: str
+    conversation_payload: Dict[str, Any]
 
 
 class BashAgentRunner:
@@ -74,28 +90,35 @@ class BashAgentRunner:
     checkpoint management. All simulation state is queried via HTTP.
     """
 
+    CHECKPOINT_FORMAT_VERSION = 3
+
     def __init__(
         self,
         model: Optional[str] = None,
         provider: Optional[str] = None,
+        api_type: Optional[str] = None,
         base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
         seed: int = 42,
         scenario: str = "default",
         total_days: int = 3650,
         initial_cash: float = 1_000_000.0,
+        max_decision_turns_per_batch: Optional[int] = None,
+        max_invalid_responses_per_turn: Optional[int] = None,
         workspace_base: Optional[Path] = None,
         reasoning_effort: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         max_output_tokens: Optional[int] = None,
         timeout_seconds: float = 600.0,
-        input_cost_per_million: Optional[float] = None,
-        output_cost_per_million: Optional[float] = None,
+        request_options: Optional[Dict[str, Any]] = None,
+        pricing: Optional[Dict[str, Dict[str, float]]] = None,
         api_key_env: Optional[str] = None,
         api_key_required: bool = True,
         simulator_llm_config: Optional[Dict[str, Any]] = None,
-        config_source: Optional[Path] = None,
+        public_bundle_sha256: Optional[str] = None,
+        harness_git_commit: Optional[str] = None,
+        harness_git_dirty: Optional[bool] = None,
+        harness_source_sha256: Optional[str] = None,
         continue_from: Optional[Path] = None,
         label: Optional[str] = None,
     ):
@@ -103,13 +126,36 @@ class BashAgentRunner:
             raise ValueError("decision-agent model must be explicitly configured")
         if not provider:
             raise ValueError("decision-agent provider must be explicitly configured")
+        if not api_type:
+            raise ValueError("decision-agent api_type must be explicitly configured")
+        validate_provider_api_type(provider, api_type, "models.decision_agent")
+        validate_reasoning_effort(api_type, reasoning_effort, "models.decision_agent")
         self.model = model
         self.provider = provider
+        self.api_type = api_type
         self.seed = seed
         self.scenario = scenario
-        # 实验只能按周推进，因此总天数会被四舍五入为 7 的倍数
+        # 实验只能按周推进，因此总天数会向下取整为 7 的倍数。
         self.total_days = (total_days // 7) * 7
         self.initial_cash = initial_cash
+        if (
+            not isinstance(max_decision_turns_per_batch, int)
+            or isinstance(max_decision_turns_per_batch, bool)
+            or max_decision_turns_per_batch <= 0
+        ):
+            raise ValueError(
+                "max_decision_turns_per_batch must be explicitly configured as a positive integer"
+            )
+        self.max_decision_turns_per_batch = max_decision_turns_per_batch
+        if (
+            not isinstance(max_invalid_responses_per_turn, int)
+            or isinstance(max_invalid_responses_per_turn, bool)
+            or max_invalid_responses_per_turn <= 0
+        ):
+            raise ValueError(
+                "max_invalid_responses_per_turn must be explicitly configured as a positive integer"
+            )
+        self.max_invalid_responses_per_turn = max_invalid_responses_per_turn
         # None means "not configured" and omits the API parameter. Explicit
         # values, including "none", must be forwarded unchanged.
         self.reasoning_effort = reasoning_effort
@@ -117,114 +163,82 @@ class BashAgentRunner:
             raise ValueError("temperature must be between 0 and 2")
         if top_p is not None and not 0 <= top_p <= 1:
             raise ValueError("top_p must be between 0 and 1")
-        if max_output_tokens is not None and max_output_tokens <= 0:
+        if max_output_tokens is None:
+            raise ValueError("decision-agent max_output_tokens must be configured")
+        if max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
-        for name, price in (
-            ("input_cost_per_million", input_cost_per_million),
-            ("output_cost_per_million", output_cost_per_million),
-        ):
-            if price is not None and price < 0:
-                raise ValueError(f"{name} must be non-negative")
         self.temperature = temperature
         self.top_p = top_p
-        self.max_output_tokens = max_output_tokens or (
-            128_000 if self.provider in ("anthropic", "bedrock") else 16_384
-        )
+        self.max_output_tokens = max_output_tokens
         self.timeout_seconds = float(timeout_seconds)
-        self.input_cost_per_million = input_cost_per_million
-        self.output_cost_per_million = output_cost_per_million
+        self.request_options = dict(request_options or {})
+        self.pricing = dict(pricing or {})
+        if self.model not in self.pricing:
+            raise ValueError(
+                f"decision-agent pricing must include configured model {self.model!r}"
+            )
+        self.total_decision_agent_cost_usd = 0.0
         self.api_key_env = api_key_env
         self.api_key_required = api_key_required
         self.simulator_llm_config = dict(simulator_llm_config or {})
-        self.config_source = Path(config_source).resolve() if config_source else None
+        if public_bundle_sha256 is not None and (
+            not isinstance(public_bundle_sha256, str)
+            or len(public_bundle_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in public_bundle_sha256)
+        ):
+            raise ValueError("public_bundle_sha256 must be a lowercase SHA-256 digest")
+        self.public_bundle_sha256 = public_bundle_sha256
+        self.harness_git_commit = None
+        self.harness_git_dirty = None
+        self.harness_source_sha256 = None
+        if continue_from:
+            original_identity = {
+                "harness_git_commit": harness_git_commit,
+                "harness_git_dirty": harness_git_dirty,
+                "harness_source_sha256": harness_source_sha256,
+            }
+            self._validate_harness_identity(original_identity)
+            self._ensure_harness_identity()
+            if self.harness_source_sha256 != original_identity["harness_source_sha256"]:
+                print(
+                    "WARNING: Current Harness source differs from the original run; "
+                    "resume will continue with the current code.",
+                    file=sys.stderr,
+                    flush=True,
+                )
         self.continue_from = continue_from
         self.label = label  # Optional human-readable variant tag — surfaced on the dashboard
-        self.anthropic_fallback_model = (
-            ANTHROPIC_FABLE_FALLBACK_MODEL
-            if self.provider == "anthropic" and "fable" in self.model.lower()
-            else None
-        )
-
-        # Set in _restore_from_checkpoint when last logged tool was NOT next-week;
-        # consumed once by the outer loop to skip force step_day on the resume iter.
-        self._suppress_force_step_day_once = False
-        self._existing_run_config: Optional[Dict[str, Any]] = None
-
+        self._resume_checkpoint: Optional[Dict[str, Any]] = None
+        self._last_committed_week = 0
         if continue_from:
             self.workspace_dir = Path(continue_from).resolve()
             if not self.workspace_dir.exists():
                 raise FileNotFoundError(f"Run directory not found: {self.workspace_dir}")
-            config_file = self.workspace_dir / "config.json"
-            if config_file.exists():
-                with open(config_file) as f:
-                    old_config = json.load(f)
-                self._existing_run_config = old_config
-                self.run_id = old_config['run_id']
-                # Simulator settings are part of the existing world and cannot
-                # change when a run resumes, even if a different TOML is passed.
-                if old_config.get("simulator_llm"):
-                    self.simulator_llm_config = old_config["simulator_llm"]
-            else:
-                self.run_id = self.workspace_dir.name.replace('run_', '')
+            self.run_id = _load_saved_run_config(self.workspace_dir)['run_id']
             self.workspace_base = self.workspace_dir.parent
         else:
             self.run_id = str(uuid.uuid4())[:8]
             self.workspace_base = (workspace_base or Path('./bash_agent_runs')).resolve()
             self.workspace_dir = self.workspace_base / f"run_{self.run_id}"
-            self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
         # Agent working directory (inside the run directory)
         self.agent_workspace = self.workspace_dir / "agent_workspace"
 
         # Logs directory
         self.logs_dir = self.workspace_dir / "logs"
-        self.logs_dir.mkdir(exist_ok=True)
 
         # Log file for raw responses
         self.response_log_file = self.logs_dir / f"raw_responses_{self.run_id}.jsonl"
 
-        # Timing log — fine-grained per-turn and per-day timing data
+        # 记录每次 LLM 调用、工具执行和决策批次的耗时。
         self.timing_log_file = self.logs_dir / f"timing_{self.run_id}.jsonl"
 
         # CEOBench dashboard URL for live timing push (set via env var)
         self._dashboard_url = os.environ.get("CEOBENCH_DASHBOARD_URL", "")
         self._timing_queue = None
-        if self._dashboard_url:
-            import queue, threading
-            self._timing_queue = queue.Queue(maxsize=500)
-            def _timing_poster():
-                batch = []
-                while True:
-                    try:
-                        item = self._timing_queue.get(timeout=5)
-                        if item is None:
-                            break
-                        batch.append(item)
-                        # Drain up to 20 more without blocking
-                        for _ in range(20):
-                            try:
-                                batch.append(self._timing_queue.get_nowait())
-                            except queue.Empty:
-                                break
-                    except queue.Empty:
-                        pass
-                    if batch:
-                        try:
-                            data = json.dumps(batch).encode()
-                            req = urllib.request.Request(
-                                self._dashboard_url.rstrip('/') + '/ingest',
-                                data=data,
-                                headers={'Content-Type': 'application/json'},
-                                method='POST',
-                            )
-                            urllib.request.urlopen(req, timeout=10)
-                        except Exception:
-                            pass  # Non-critical — dashboard may be down
-                        batch = []
-            self._timing_thread = threading.Thread(target=_timing_poster, daemon=True)
-            self._timing_thread.start()
+        self._timing_thread = None
 
         # Load API key
         env_file = Path(__file__).parent.parent.parent.parent.parent / ".env"
@@ -251,83 +265,27 @@ class BashAgentRunner:
                 "in .env or the environment."
             ) from exc
 
-        self.use_anthropic = self.provider in ("anthropic", "bedrock")
-        if api_key:
-            self.api_key = api_key
-        elif self.api_key_env:
+        if self.api_key_env:
             self.api_key = env_vars.get(self.api_key_env) or os.environ.get(self.api_key_env)
-        elif self.provider == "xai":
-            self.api_key = env_vars.get("XAI_API_KEY") or os.environ.get("XAI_API_KEY")
-        elif self.provider == "google":
-            self.api_key = env_vars.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        elif self.provider == "anthropic":
-            self.api_key = env_vars.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
         elif self.provider == "bedrock":
             self.api_key = None
-        elif self.provider == "modal":
-            self.api_key = env_vars.get("MODAL_API_KEY") or os.environ.get("MODAL_API_KEY")
-        elif self.provider == "together":
-            self.api_key = env_vars.get("TOGETHER_API_KEY") or os.environ.get("TOGETHER_API_KEY")
-        elif self.provider == "ai_sandbox":
-            self.api_key = env_vars.get("AI_SANDBOX_KEY") or os.environ.get("AI_SANDBOX_KEY")
         else:
-            self.api_key = env_vars.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+            self.api_key = None
 
         if not self.api_key and not self.api_key_required:
             self.api_key = "not-required"
         if not self.api_key and self.provider not in ("bedrock",):
             raise ValueError(f"No API key found for provider {self.provider}")
 
-        if base_url:
-            self.base_url = base_url
-        elif self.provider == "xai":
-            self.base_url = "https://api.x.ai/v1"
-        elif self.provider == "google":
-            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
-        elif self.provider == "modal":
-            self.base_url = os.environ.get("MODAL_BASE_URL")
-        elif self.provider == "together":
-            self.base_url = "https://api.together.xyz/v1"
-        else:
-            self.base_url = None
+        self.base_url = base_url
 
-        self._validate_resume_config()
-
-        # Create client
-        if self.provider == "bedrock":
-            if not ANTHROPIC_AVAILABLE:
-                raise ImportError("anthropic package required for Bedrock")
-            self.client = AnthropicBedrock(
-                aws_access_key=os.environ.get("AWS_ACCESS_KEY_ID"),
-                aws_secret_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-                aws_session_token=os.environ.get("AWS_SESSION_TOKEN"),
-                aws_region=os.environ.get("AWS_REGION", "us-east-2"),
-                timeout=self.timeout_seconds,
-            )
-        elif self.provider == "anthropic":
-            if not ANTHROPIC_AVAILABLE:
-                raise ImportError("anthropic package required")
-            self.client = anthropic.Anthropic(
-                api_key=self.api_key,
-                base_url=self.base_url,
-                timeout=self.timeout_seconds,
-            )
-        elif self.provider == "ai_sandbox":
-            try:
-                from portkey_ai import Portkey
-            except ImportError as e:
-                raise ImportError(
-                    "portkey-ai package required for ai_sandbox provider. "
-                    "Install with: uv add portkey-ai"
-                ) from e
-            self.client = Portkey(api_key=self.api_key)
-        else:
-            import httpx
-            client_kwargs = {"api_key": self.api_key}
-            if self.base_url:
-                client_kwargs["base_url"] = self.base_url
-            client_kwargs["timeout"] = httpx.Timeout(self.timeout_seconds)
-            self.client = OpenAI(**client_kwargs)
+        self.client = create_llm_client(
+            provider=self.provider,
+            api_type=self.api_type,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout_seconds=self.timeout_seconds,
+        )
 
         # Components (initialized in setup)
         self.agent = None
@@ -335,43 +293,6 @@ class BashAgentRunner:
         self._server_proc = None
         self._server_port = None
         self._session_id = None
-
-    def _validate_resume_config(self) -> None:
-        """Prevent a resumed run from silently changing experimental variables."""
-        if not self._existing_run_config:
-            return
-
-        current = {
-            "model": self.model,
-            "provider": self.provider,
-            "base_url": self.base_url,
-            "reasoning_effort": self.reasoning_effort,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "max_output_tokens": self.max_output_tokens,
-            "timeout_seconds": self.timeout_seconds,
-            "input_cost_per_million": self.input_cost_per_million,
-            "output_cost_per_million": self.output_cost_per_million,
-            "api_key_env": self.api_key_env,
-            "api_key_required": self.api_key_required,
-            "seed": self.seed,
-            "scenario": self.scenario,
-            "total_days": self.total_days,
-            "initial_cash": self.initial_cash,
-            "label": self.label,
-        }
-        mismatches = []
-        for field, value in current.items():
-            if field not in self._existing_run_config:
-                continue
-            previous = self._existing_run_config[field]
-            if previous != value:
-                mismatches.append(f"{field}: previous={previous!r}, requested={value!r}")
-        if mismatches:
-            raise ValueError(
-                "resume configuration does not match the original run: "
-                + "; ".join(mismatches)
-            )
 
     # =========================================================================
     # HTTP helpers — all simulation interaction goes through these
@@ -391,51 +312,92 @@ class BashAgentRunner:
             self._server_url(path), data=body,
             headers={'Content-Type': 'application/json'},
         )
-        resp = urllib.request.urlopen(req, timeout=timeout)
-        return json.loads(resp.read())
-
-    def _get_cash(self) -> float:
-        """Get current cash balance via HTTP query."""
         try:
-            result = self._http_post('/query', {'sql': 'SELECT SUM(amount) FROM ledger'})
-            if result.get('success') and result.get('data', {}).get('rows'):
-                return result['data']['rows'][0][0] or 0
-        except Exception:
-            pass
-        return 0
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            # 业务校验错误同样返回 JSON，保留服务端给出的明确失败原因。
+            try:
+                return json.loads(exc.read())
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise
 
     def _get_game_status(self) -> Dict:
-        """Get game status (day, cash, subs, timeout) via HTTP."""
-        try:
-            return self._http_get('/game-status')
-        except Exception:
-            return {"day": 0, "cash": 0, "subscribers": 0, "timed_out": False}
+        """Get and validate the authoritative simulator status."""
+        status = self._http_get('/game-status')
+        day = status.get('day')
+        cash = status.get('cash')
+        subscribers = status.get('subscribers')
+        timed_out = status.get('timed_out')
+        week_advance_failed = status.get('week_advance_failed', False)
+        if (
+            not isinstance(day, int)
+            or isinstance(day, bool)
+            or day < 0
+            or not isinstance(cash, (int, float))
+            or isinstance(cash, bool)
+            or not math.isfinite(cash)
+            or not isinstance(subscribers, int)
+            or isinstance(subscribers, bool)
+            or subscribers < 0
+            or not isinstance(timed_out, bool)
+            or not isinstance(week_advance_failed, bool)
+        ):
+            raise RuntimeError(f"Invalid simulator status: {status!r}")
+        if week_advance_failed:
+            raise RuntimeError(
+                "Simulator week advancement failed; resume from the previous stable checkpoint"
+            )
+        return status
 
     def _get_dashboard(self) -> str:
         """Get current dashboard via HTTP."""
-        try:
-            result = self._http_get('/dashboard')
-            return result.get('dashboard', '')
-        except Exception:
-            return "(Dashboard unavailable)"
+        result = self._http_get('/dashboard')
+        dashboard = result.get('dashboard')
+        if not isinstance(dashboard, str) or not dashboard.strip():
+            raise RuntimeError(f"Invalid simulator dashboard: {result!r}")
+        return dashboard
 
-    def _advance_day_http(self) -> Dict:
-        """Force week advancement via HTTP POST /next-week."""
-        try:
-            return self._http_post('/next-week', timeout=4200)
-        except urllib.error.URLError as e:
-            return {"success": False, "error": str(e)}
+    def _terminal_outcome(self, status: Dict[str, Any]) -> Optional[str]:
+        """Classify one validated simulator status, with failure states first."""
+        # 推进超时时使用上一个稳定断点；负现金在任何日期都表示破产。
+        if status['timed_out']:
+            return 'timeout'
+        if status['cash'] < 0:
+            return 'bankrupt'
+        if status['day'] >= self.total_days:
+            return 'completed'
+        return None
 
     # =========================================================================
     # Logging
     # =========================================================================
 
     def _log_response(self, turn: int, day: int, messages: List[Dict], raw_response: Any):
+        input_tokens = self.agent.last_input_tokens if self.agent else 0
+        output_tokens = self.agent.last_output_tokens if self.agent else 0
+        cached_tokens = self.agent.last_cached_tokens if self.agent else 0
+        reasoning_tokens = self.agent.last_reasoning_tokens if self.agent else 0
+        served_model = self.agent.last_serving_model if self.agent else self.model
+        cost_usd = model_token_cost_usd(
+            served_model,
+            input_tokens,
+            output_tokens,
+            self.pricing,
+        )
+        self.total_decision_agent_cost_usd += cost_usd
         entry = {
             "timestamp": now(),
             "turn": turn,
             "day": day,
             "messages_count": len(messages),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "served_model": served_model,
+            "cost_usd": cost_usd,
+            "total_cost_usd": self.total_decision_agent_cost_usd,
             "raw_response": raw_response,
         }
         with open(self.response_log_file, 'a') as f:
@@ -473,6 +435,77 @@ class BashAgentRunner:
             except Exception:
                 pass
 
+    def _start_timing_poster(self) -> None:
+        """Start the optional dashboard sender inside the managed run lifecycle."""
+        if not self._dashboard_url or self._timing_thread is not None:
+            return
+
+        import queue
+        import threading
+
+        self._timing_queue = queue.Queue(maxsize=500)
+
+        def _post_batch(batch: List[Dict[str, Any]]) -> None:
+            try:
+                data = json.dumps(batch).encode()
+                request = urllib.request.Request(
+                    self._dashboard_url.rstrip('/') + '/ingest',
+                    data=data,
+                    headers={'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                urllib.request.urlopen(request, timeout=10)
+            except Exception:
+                pass  # 仪表盘不可用不得影响主实验。
+
+        def _timing_poster() -> None:
+            while True:
+                batch = []
+                stop_requested = False
+                try:
+                    item = self._timing_queue.get(timeout=5)
+                    if item is None:
+                        stop_requested = True
+                    else:
+                        batch.append(item)
+                    for _ in range(20):
+                        try:
+                            item = self._timing_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        if item is None:
+                            stop_requested = True
+                            break
+                        batch.append(item)
+                except queue.Empty:
+                    pass
+                if batch:
+                    _post_batch(batch)
+                if stop_requested:
+                    return
+
+        self._timing_thread = threading.Thread(
+            target=_timing_poster,
+            name=f"ceobench-timing-{self.run_id}",
+            daemon=True,
+        )
+        self._timing_thread.start()
+
+    def _stop_timing_poster(self) -> None:
+        """Flush queued timing entries and stop the optional sender."""
+        thread = self._timing_thread
+        queue = self._timing_queue
+        if thread is None:
+            return
+        if queue is not None:
+            try:
+                queue.put(None, timeout=1)
+            except Exception:
+                pass
+        thread.join(timeout=15)
+        self._timing_thread = None
+        self._timing_queue = None
+
     # =========================================================================
     # Workspace setup
     # =========================================================================
@@ -502,9 +535,11 @@ __pycache__/
     def _git_init_workspace(self):
         if (self.agent_workspace / ".git").exists():
             return
-        self._git("init", "-q", "-b", "main")
-        self._git("config", "user.email", "bash-agent@bossbench.local")
-        self._git("config", "user.name", "BashAgent")
+        self._git("init", "-q", "-b", "main", check=True)
+        self._git(
+            "config", "user.email", "bash-agent@bossbench.local", check=True
+        )
+        self._git("config", "user.name", "BashAgent", check=True)
         gitignore_path = self.agent_workspace / ".gitignore"
         if not gitignore_path.exists():
             gitignore_path.write_text(self._GITIGNORE_CONTENT)
@@ -517,13 +552,26 @@ __pycache__/
             if existing.returncode == 0 and existing.stdout.strip():
                 return
             message = f"{message} [{once_key}]"
-        self._git("add", "-A")
-        status = self._git("status", "--porcelain")
-        if status.returncode == 0 and not status.stdout.strip():
+        self._git("add", "-A", check=True)
+        status = self._git("status", "--porcelain", check=True)
+        if not status.stdout.strip():
             # Empty commit so the tag still lands on the timeline
-            self._git("commit", "--allow-empty", "-q", "-m", message)
+            self._git("commit", "--allow-empty", "-q", "-m", message, check=True)
         else:
-            self._git("commit", "-q", "-m", message)
+            self._git("commit", "-q", "-m", message, check=True)
+
+    def _capture_workspace_commit(self, day: int) -> str:
+        """Commit any pending Agent files and return the exact checkpoint revision."""
+        if not (self.agent_workspace / ".git").is_dir():
+            raise RuntimeError("Agent workspace is not a Git repository")
+        self._git("add", "-A", check=True)
+        status = self._git("status", "--porcelain", check=True)
+        if status.stdout.strip():
+            self._git("commit", "-q", "-m", f"Checkpoint workspace (day {day})", check=True)
+        head = self._git("rev-parse", "HEAD", check=True).stdout.strip()
+        if not head:
+            raise RuntimeError("Failed to resolve Agent workspace checkpoint commit")
+        return head
 
     def _commit_weeks_up_to(self, sim_day: int):
         # Agent advances time via `./novamind-operation next-week ...`, which can cross
@@ -531,16 +579,16 @@ __pycache__/
         # once_key dedupe makes this safe to call after every sim_day update.
         if sim_day <= 0:
             return
-        if not hasattr(self, '_last_committed_week'):
-            self._last_committed_week = 0
         target_week = sim_day // 7
         while self._last_committed_week < target_week:
-            self._last_committed_week += 1
-            wd = self._last_committed_week * 7
+            next_week = self._last_committed_week + 1
+            week_end_day = next_week * 7
             self._git_commit_workspace(
-                f"Week {self._last_committed_week} (day {wd})",
-                once_key=f"week-{self._last_committed_week}",
+                f"Week {next_week} (day {week_end_day})",
+                once_key=f"week-{next_week}",
             )
+            # 只有 Git 提交成功后才推进周游标，避免静默丢失时间线节点。
+            self._last_committed_week = next_week
 
     def _initialize_from_public_repo(self):
         """Copy the published layout into the agent workspace and create a session.
@@ -565,7 +613,7 @@ __pycache__/
         self._git_init_workspace()
 
         # docs/ is the only directory the agent needs — it holds the tool/table
-        # JSON, cli.md, examples/, and the readable SDK source at
+        # JSON, cli.md, and the readable SDK source at
         # docs/novamind_api/ (used for ``import novamind_api`` at runtime).
         src_docs = public_dir / "docs"
         dst_docs = self.agent_workspace / "docs"
@@ -587,10 +635,6 @@ __pycache__/
             )
         shutil.copy2(src_op, dst_op)
         dst_op.chmod(dst_op.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-
-        # Create the per-session scratch root (daily_scripts/ inside it is
-        # created later by the engine's initialize_workspace()).
-        (self.agent_workspace / "daily_scripts").mkdir(exist_ok=True)
 
         # Run new-session via the HOST-SIDE zipapp (bytecode stays on host).
         env = self._server_environment()
@@ -615,7 +659,6 @@ __pycache__/
         self._session_id = session_info["session_id"]
         print(f"  Session created via CLI: {self._session_id}")
         self._git_commit_workspace("Initial workspace setup (day 0)")
-        return session_info
 
     def _public_dir(self) -> Path:
         """Location of the host-side public/ bundle (contains _engine/).
@@ -712,14 +755,17 @@ __pycache__/
         raise RuntimeError("Server did not respond to /health after 30s")
 
     def _stop_server(self):
-        """Stop the server subprocess."""
-        if self._server_proc:
-            self._server_proc.terminate()
+        """Idempotently stop a fully or partially launched server subprocess."""
+        server_proc = getattr(self, "_server_proc", None)
+        if server_proc:
+            server_proc.terminate()
             try:
-                self._server_proc.wait(timeout=10)
+                server_proc.wait(timeout=210)
             except subprocess.TimeoutExpired:
-                self._server_proc.kill()
+                server_proc.kill()
+                server_proc.wait()
             self._server_proc = None
+        self._server_port = None
         f = getattr(self, "_server_stderr_file", None)
         if f is not None:
             try:
@@ -765,7 +811,13 @@ __pycache__/
             flagged.append(str(suspicious.relative_to(self.agent_workspace)))
         return flagged
 
-    def _save_checkpoint(self, day: int, fetch_daily_scripts: bool = True):
+    def _save_checkpoint(
+        self,
+        day: int,
+        *,
+        resume_conversation: bool = False,
+        pending_observation: Optional[str] = None,
+    ):
         """Save checkpoint for resume capability."""
         # Tamper detection: log + persist any suspicious files in workspace.
         tamper_hits = self._check_tamper(day)
@@ -780,354 +832,991 @@ __pycache__/
                 f.write(json.dumps(entry) + "\n")
             print(f"  ⚠️  TAMPER ALERT day {day}: {len(tamper_hits)} suspicious file(s): {tamper_hits[:5]}")
 
-        # Get daily scripts from server
-        daily_scripts = {}
-        if fetch_daily_scripts:
-            try:
-                resp = self._http_get('/daily-scripts')
-                if resp.get('success'):
-                    # The GET endpoint returns script names/sizes, not content
-                    # For full content we need to query differently
-                    # For now, save empty — the scripts are also in the session dir
-                    pass
-            except Exception:
-                pass
+        # 先让服务器确认内存数据库已持久化，再生成 checkpoint，避免“新日期 + 旧数据库”。
+        persisted = self._http_post(
+            '/persist-checkpoint', {"expected_day": day}, timeout=360
+        )
+        if not persisted.get("success") or persisted.get("persisted_day") != day:
+            raise RuntimeError(
+                f"Database checkpoint persistence failed for day {day}: {persisted}"
+            )
+        checkpoint_cash = persisted.get("checkpoint_cash")
+        if (
+            not isinstance(checkpoint_cash, (int, float))
+            or isinstance(checkpoint_cash, bool)
+            or not math.isfinite(checkpoint_cash)
+        ):
+            raise ValueError(
+                f"Checkpoint persistence returned invalid cash: {checkpoint_cash!r}"
+            )
+        server_log_offsets = self._validate_server_log_offsets(
+            persisted.get("server_log_offsets")
+        )
+        environment_llm_usage = self._validate_environment_llm_usage(
+            persisted.get("environment_llm_usage")
+        )
 
-        checkpoint = {
-            'day': day,
-            'run_id': self.run_id,
-            'model': self.model,
-            'provider': self.provider,
-            'base_url': self.base_url,
-            'reasoning_effort': self.reasoning_effort,
-            'anthropic_fallback_model': self.anthropic_fallback_model,
-            'seed': self.seed,
-            'scenario': self.scenario,
-            'agent_total_turns': self.agent.total_turns if self.agent else 0,
-            'total_input_tokens': self.agent.total_input_tokens if self.agent else 0,
-            'total_output_tokens': self.agent.total_output_tokens if self.agent else 0,
-            'total_cached_tokens': self.agent.total_cached_tokens if self.agent else 0,
-            'total_reasoning_tokens': self.agent.total_reasoning_tokens if self.agent else 0,
-            'total_anthropic_fallbacks': self.agent.total_anthropic_fallbacks if self.agent else 0,
-            'daily_scripts': daily_scripts,
-            'session_id': self._session_id,
-        }
-        checkpoint_file = self.workspace_dir / "checkpoint.json"
-        with open(checkpoint_file, 'w') as f:
-            json.dump(checkpoint, f, indent=2)
-
-        # Copy session nmdb to run directory for analysis / resume
         session_nmdb = self.agent_workspace / "sessions" / self._session_id / "world.nmdb"
-        harness_nmdb = self.workspace_dir / "world.nmdb"
+        if not session_nmdb.is_file():
+            raise FileNotFoundError(f"Persisted session database not found: {session_nmdb}")
+
+        # 数据库使用不可变版本文件，checkpoint.json 最后原子切换到该版本。
+        # 即使进程在两个文件之间崩溃，旧 checkpoint 仍指向旧的完整数据库。
+        checkpoint_db_dir = self.workspace_dir / ".checkpoint_dbs"
+        checkpoint_db_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_id = uuid.uuid4().hex
+        database_name = f"world_day_{day}_{checkpoint_id}.nmdb"
+        checkpoint_db = checkpoint_db_dir / database_name
+        checkpoint_db_tmp = checkpoint_db.with_suffix(".nmdb.tmp")
+        shutil.copy2(session_nmdb, checkpoint_db_tmp)
+        database_sha256 = self._sha256_file(checkpoint_db_tmp)
+        os.replace(checkpoint_db_tmp, checkpoint_db)
+
+        runtime_dir = self.workspace_dir / ".checkpoint_runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        conversation_snapshot = runtime_dir / f"conversation_{checkpoint_id}.json"
+        if self.agent is None:
+            write_json_atomic(conversation_snapshot, {
+                "format_version": BashAgent.CHECKPOINT_SNAPSHOT_FORMAT_VERSION,
+                "resume_conversation": False,
+                "tool_results_applied": True,
+                "conversation": [],
+                "pending_tool_calls": [],
+                "current_day": 0,
+                "turns_today": 0,
+                "total_turns": 0,
+                "saved_at": _time.time(),
+            })
+        else:
+            self.agent.save_checkpoint_snapshot(
+                conversation_snapshot,
+                resume_conversation=resume_conversation,
+                pending_observation=pending_observation,
+            )
+        conversation_sha256 = self._sha256_file(conversation_snapshot)
+        workspace_commit = self._capture_workspace_commit(day)
+        log_offsets = self._capture_log_offsets()
+
+        # 断点只保存恢复所需的状态；模型、Provider 等实验身份由 config.json 唯一管理。
+        checkpoint = {
+            'format_version': self.CHECKPOINT_FORMAT_VERSION,
+            'run_config_sha256': self._sha256_file(
+                self.workspace_dir / "config.json"
+            ),
+            'day': day,
+            'cash': float(checkpoint_cash),
+            'session_id': self._session_id,
+            'database': {
+                'file': str(checkpoint_db.relative_to(self.workspace_dir)),
+                'sha256': database_sha256,
+            },
+            'runtime': {
+                'runner_log_offsets': log_offsets,
+                'server_log_offsets': server_log_offsets,
+                'conversation': {
+                    'file': str(conversation_snapshot.relative_to(self.workspace_dir)),
+                    'sha256': conversation_sha256,
+                    'resume': resume_conversation,
+                },
+                'workspace_commit': workspace_commit,
+                'environment_llm': environment_llm_usage,
+                'agent': {
+                    'total_turns': self.agent.total_turns if self.agent else 0,
+                    'input_tokens': self.agent.total_input_tokens if self.agent else 0,
+                    'output_tokens': self.agent.total_output_tokens if self.agent else 0,
+                    'cached_tokens': self.agent.total_cached_tokens if self.agent else 0,
+                    'reasoning_tokens': self.agent.total_reasoning_tokens if self.agent else 0,
+                    'decision_cost_usd': self.total_decision_agent_cost_usd,
+                },
+            },
+        }
+        # checkpoint.json 是恢复入口，统一使用带刷盘保证的原子写入。
+        write_json_atomic(self.workspace_dir / "checkpoint.json", checkpoint)
+
+        # world.nmdb 仅作为分析用的最新副本；恢复以 checkpoint 指向的版本文件为准。
         try:
-            if session_nmdb.exists():
-                shutil.copy2(session_nmdb, harness_nmdb)
-        except Exception:
-            pass  # Non-critical
+            harness_nmdb = self.workspace_dir / "world.nmdb"
+            harness_tmp = harness_nmdb.with_suffix(harness_nmdb.suffix + ".tmp")
+            shutil.copy2(checkpoint_db, harness_tmp)
+            os.replace(harness_tmp, harness_nmdb)
+        except OSError:
+            pass
+
+        # 清理失败只会留下无引用的旧文件，不影响刚刚提交的可信断点。
+        for stale_db in checkpoint_db_dir.glob("*.nmdb"):
+            if stale_db != checkpoint_db:
+                try:
+                    stale_db.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        for stale_snapshot in runtime_dir.glob("conversation_*.json"):
+            if stale_snapshot != conversation_snapshot:
+                try:
+                    stale_snapshot.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return checkpoint
+
+    def _checkpoint_log_files(self) -> Dict[str, Path]:
+        return {
+            "tool_results": self.logs_dir / f"tool_results_{self.run_id}.jsonl",
+            "raw_responses": self.response_log_file,
+            "timing": self.timing_log_file,
+        }
+
+    def _capture_log_offsets(self) -> Dict[str, int]:
+        return {
+            name: path.stat().st_size if path.exists() else 0
+            for name, path in self._checkpoint_log_files().items()
+        }
+
+    def _validate_runner_log_offsets(self, offsets: Any) -> Dict[str, int]:
+        expected_names = set(self._checkpoint_log_files())
+        if not isinstance(offsets, dict) or set(offsets) != expected_names:
+            raise ValueError(
+                f"Checkpoint log offsets must contain exactly: {sorted(expected_names)}"
+            )
+        for name, offset in offsets.items():
+            if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+                raise ValueError(f"Invalid checkpoint log offset for {name}: {offset!r}")
+        return dict(offsets)
+
+    def _restore_logs_to_offsets(self, offsets: Dict[str, Any]) -> None:
+        validated = self._validate_runner_log_offsets(offsets)
+        for name, path in self._checkpoint_log_files().items():
+            offset = validated[name]
+            current_size = path.stat().st_size if path.exists() else 0
+            if offset > current_size:
+                raise ValueError(
+                    f"Checkpoint log offset for {name} exceeds file size: {offset} > {current_size}"
+                )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a+b") as file:
+                file.truncate(offset)
+
+    @staticmethod
+    def _validate_offsets_within_files(
+        offsets: Dict[str, int], files: Dict[str, Path], label: str
+    ) -> None:
+        for name, path in files.items():
+            current_size = path.stat().st_size if path.exists() else 0
+            if offsets[name] > current_size:
+                raise ValueError(
+                    f"Checkpoint {label} offset for {name} exceeds file size: "
+                    f"{offsets[name]} > {current_size}"
+                )
+
+    def _server_log_files(self) -> Dict[str, Path]:
+        session_dir = self.agent_workspace / "sessions" / self._session_id
+        return {
+            "history": session_dir / "history.jsonl",
+            "event_log": session_dir / "logs" / f"run_{self._session_id}.jsonl",
+        }
+
+    def _validate_server_log_offsets(self, offsets: Any) -> Dict[str, int]:
+        return self._validate_server_log_offsets_for_files(
+            offsets, self._server_log_files()
+        )
+
+    def _restore_server_logs_before_server(self, offsets: Any) -> None:
+        """Restore append-only simulator logs before EventLogger opens them."""
+        validated = self._validate_server_log_offsets(offsets)
+        for name, path in self._server_log_files().items():
+            offset = validated[name]
+            current_size = path.stat().st_size if path.exists() else 0
+            if offset > current_size:
+                raise ValueError(
+                    f"Checkpoint server log offset for {name} exceeds file size: "
+                    f"{offset} > {current_size}"
+                )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a+b") as file:
+                file.truncate(offset)
+        # _meta.json 代表实验终态，恢复断点后它已经失效，不能留下旧结果。
+        event_log = self._server_log_files()["event_log"]
+        event_log.with_name(event_log.stem + "_meta.json").unlink(missing_ok=True)
+
+    def _checkpoint_artifact_path(self, relative_path: str, label: str) -> Path:
+        path = (self.workspace_dir / relative_path).resolve()
+        workspace_root = self.workspace_dir.resolve()
+        if workspace_root not in path.parents:
+            raise ValueError(f"Checkpoint {label} path escapes run directory: {relative_path}")
+        return path
+
+    def _preflight_checkpoint_restore(
+        self, checkpoint: Dict[str, Any]
+    ) -> CheckpointRestorePlan:
+        """Validate every persistent artifact before mutating the current run."""
+        runtime = checkpoint['runtime']
+        database = checkpoint['database']
+        conversation = runtime['conversation']
+
+        database_path = self._checkpoint_artifact_path(database['file'], 'database')
+        if not database_path.is_file():
+            raise FileNotFoundError(f"Checkpoint database not found: {database_path}")
+        if self._sha256_file(database_path) != database['sha256']:
+            raise ValueError("Checkpoint database hash mismatch")
+
+        conversation_path = self._checkpoint_artifact_path(
+            conversation['file'], 'conversation'
+        )
+        if not conversation_path.is_file():
+            raise FileNotFoundError(
+                f"Checkpoint conversation not found: {conversation_path}"
+            )
+        if self._sha256_file(conversation_path) != conversation['sha256']:
+            raise ValueError("Checkpoint conversation hash mismatch")
+        conversation_payload = BashAgent.parse_checkpoint_snapshot(conversation_path)
+        if conversation_payload['resume_conversation'] != conversation['resume']:
+            raise ValueError("Checkpoint conversation resume state mismatch")
+        if conversation_payload['total_turns'] != runtime['agent']['total_turns']:
+            raise ValueError("Checkpoint conversation total_turns mismatch")
+        session_dir = (
+            self.agent_workspace / "sessions" / checkpoint['session_id']
+        )
+        if not session_dir.is_dir():
+            raise FileNotFoundError(f"Checkpoint session directory not found: {session_dir}")
+        session_meta = session_dir / "session.json"
+        if not session_meta.is_file():
+            raise FileNotFoundError(
+                f"Checkpoint session metadata not found: {session_meta}"
+            )
+        try:
+            metadata = json.loads(session_meta.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("Checkpoint session metadata is invalid JSON") from exc
+        if metadata.get('session_id') not in {None, checkpoint['session_id']}:
+            raise ValueError("Checkpoint session metadata belongs to another session")
+
+        commit = runtime['workspace_commit']
+        if self._git("cat-file", "-e", f"{commit}^{{commit}}").returncode != 0:
+            raise ValueError(f"Agent workspace checkpoint commit does not exist: {commit}")
+
+        runner_offsets = self._validate_runner_log_offsets(
+            runtime['runner_log_offsets']
+        )
+        self._validate_offsets_within_files(
+            runner_offsets, self._checkpoint_log_files(), "runner log"
+        )
+        session_id = checkpoint['session_id']
+        server_files = {
+            "history": session_dir / "history.jsonl",
+            "event_log": session_dir / "logs" / f"run_{session_id}.jsonl",
+        }
+        server_offsets = self._validate_server_log_offsets_for_files(
+            runtime['server_log_offsets'], server_files
+        )
+        self._validate_offsets_within_files(
+            server_offsets, server_files, "server log"
+        )
+        return CheckpointRestorePlan(
+            session_id=session_id,
+            conversation_payload=conversation_payload,
+        )
+
+    @staticmethod
+    def _validate_server_log_offsets_for_files(
+        offsets: Any, files: Dict[str, Path]
+    ) -> Dict[str, int]:
+        expected_names = set(files)
+        if not isinstance(offsets, dict) or set(offsets) != expected_names:
+            raise ValueError(
+                f"Checkpoint server log offsets must contain exactly: {sorted(expected_names)}"
+            )
+        for name, offset in offsets.items():
+            if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+                raise ValueError(
+                    f"Invalid checkpoint server log offset for {name}: {offset!r}"
+                )
+        return dict(offsets)
+
+    def _restore_workspace_commit(self, commit: str) -> None:
+        if not isinstance(commit, str) or not commit:
+            raise ValueError("Checkpoint does not contain an Agent workspace commit")
+        exists = self._git("cat-file", "-e", f"{commit}^{{commit}}")
+        if exists.returncode != 0:
+            raise ValueError(f"Agent workspace checkpoint commit does not exist: {commit}")
+        # 仅回退 Agent 自己的隔离工作区；sessions/ 等忽略目录不会被清理。
+        self._git("reset", "--hard", commit, check=True)
+        self._git("clean", "-fd", check=True)
+
+    def _refresh_public_workspace_artifacts(self) -> None:
+        """Refresh static client/docs after restoring Agent-authored workspace files."""
+        public_dir = self._public_dir()
+        src_docs = public_dir / "docs"
+        dst_docs = self.agent_workspace / "docs"
+        if src_docs.exists():
+            if dst_docs.exists():
+                shutil.rmtree(dst_docs, ignore_errors=True)
+            shutil.copytree(
+                src_docs,
+                dst_docs,
+                ignore=shutil.ignore_patterns('__pycache__'),
+            )
+        src_op = public_dir / "novamind-operation"
+        dst_op = self.agent_workspace / "novamind-operation"
+        if src_op.exists():
+            shutil.copy2(src_op, dst_op)
+            import stat as _stat
+            dst_op.chmod(
+                dst_op.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH
+            )
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _load_checkpoint(self) -> Optional[Dict]:
-        """Load checkpoint from disk."""
+        """Load and validate the exact checkpoint schema from disk."""
         checkpoint_file = self.workspace_dir / "checkpoint.json"
-        if checkpoint_file.exists():
-            with open(checkpoint_file) as f:
-                return json.load(f)
-        return None
+        if not checkpoint_file.exists():
+            return None
+        with open(checkpoint_file) as file:
+            checkpoint = json.load(file)
+        checkpoint = self._validate_checkpoint(checkpoint)
+        config_file = self.workspace_dir / "config.json"
+        if not config_file.is_file():
+            raise FileNotFoundError("Checkpoint run config is missing")
+        if self._sha256_file(config_file) != checkpoint['run_config_sha256']:
+            raise ValueError("Checkpoint run config hash mismatch")
+        return checkpoint
 
-    def _restore_from_checkpoint(self, checkpoint: Dict):
-        """Restore state from checkpoint.
+    @staticmethod
+    def _require_finite_number(value: Any, field: str) -> float:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+        ):
+            raise ValueError(f"Invalid checkpoint {field}: {value!r}")
+        return float(value)
 
-        Copies the harness nmdb back to the session directory (so the server
-        loads the correct state), truncates harness log files, and restores
-        agent state.
-        """
+    @classmethod
+    def _require_non_negative_number(cls, value: Any, field: str) -> float:
+        value = cls._require_finite_number(value, field)
+        if value < 0:
+            raise ValueError(f"Invalid checkpoint {field}: {value!r}")
+        return value
+
+    @staticmethod
+    def _require_non_negative_integer(value: Any, field: str) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"Invalid checkpoint {field}: {value!r}")
+        return value
+
+    @classmethod
+    def _validate_environment_llm_usage(cls, usage: Any) -> Dict[str, Any]:
+        if not isinstance(usage, dict) or set(usage) != {
+            'input_tokens', 'output_tokens', 'cost_usd', 'by_purpose'
+        }:
+            raise ValueError("Invalid environment LLM usage summary")
+        cls._require_non_negative_integer(
+            usage['input_tokens'], 'environment_llm.input_tokens'
+        )
+        cls._require_non_negative_integer(
+            usage['output_tokens'], 'environment_llm.output_tokens'
+        )
+        cls._require_non_negative_number(
+            usage['cost_usd'], 'environment_llm.cost_usd'
+        )
+        by_purpose = usage['by_purpose']
+        if not isinstance(by_purpose, dict):
+            raise ValueError("Invalid environment LLM usage by_purpose")
+        for purpose, values in by_purpose.items():
+            if not isinstance(purpose, str) or not purpose:
+                raise ValueError("Invalid environment LLM purpose")
+            if not isinstance(values, dict) or set(values) != {
+                'input_tokens', 'output_tokens', 'cost_usd'
+            }:
+                raise ValueError(f"Invalid environment LLM usage for {purpose!r}")
+            cls._require_non_negative_integer(
+                values['input_tokens'], f'environment_llm.{purpose}.input_tokens'
+            )
+            cls._require_non_negative_integer(
+                values['output_tokens'], f'environment_llm.{purpose}.output_tokens'
+            )
+            cls._require_non_negative_number(
+                values['cost_usd'], f'environment_llm.{purpose}.cost_usd'
+            )
+        if usage['input_tokens'] != sum(v['input_tokens'] for v in by_purpose.values()):
+            raise ValueError("Environment LLM input token total does not match by_purpose")
+        if usage['output_tokens'] != sum(v['output_tokens'] for v in by_purpose.values()):
+            raise ValueError("Environment LLM output token total does not match by_purpose")
+        if not math.isclose(
+            usage['cost_usd'],
+            sum(v['cost_usd'] for v in by_purpose.values()),
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("Environment LLM cost total does not match by_purpose")
+        return usage
+
+    def _validate_checkpoint(self, checkpoint: Any) -> Dict[str, Any]:
+        """Reject partial or legacy checkpoints before any state is modified."""
+        if not isinstance(checkpoint, dict):
+            raise ValueError("Checkpoint root must be an object")
+        if checkpoint.get('format_version') != self.CHECKPOINT_FORMAT_VERSION:
+            raise ValueError(
+                f"Unsupported checkpoint format_version: {checkpoint.get('format_version')!r}"
+            )
+        required_root = {
+            'format_version', 'run_config_sha256', 'day', 'cash', 'session_id',
+            'database', 'runtime',
+        }
+        if set(checkpoint) != required_root:
+            raise ValueError(
+                f"Checkpoint root fields must contain exactly: {sorted(required_root)}"
+            )
+        self._require_non_negative_integer(checkpoint['day'], 'day')
+        self._require_finite_number(checkpoint['cash'], 'cash')
+        config_sha256 = checkpoint['run_config_sha256']
+        if (
+            not isinstance(config_sha256, str)
+            or len(config_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in config_sha256)
+        ):
+            raise ValueError("Invalid checkpoint run_config_sha256")
+        if not isinstance(checkpoint['session_id'], str) or not checkpoint['session_id']:
+            raise ValueError("Checkpoint session_id must be a non-empty string")
+
+        database = checkpoint['database']
+        if not isinstance(database, dict) or set(database) != {'file', 'sha256'}:
+            raise ValueError("Checkpoint database must contain exactly file and sha256")
+        if not all(isinstance(database[key], str) and database[key] for key in database):
+            raise ValueError("Checkpoint database file and sha256 must be non-empty strings")
+
+        runtime = checkpoint['runtime']
+        required_runtime = {
+            'runner_log_offsets', 'server_log_offsets', 'conversation',
+            'workspace_commit', 'environment_llm', 'agent',
+        }
+        if not isinstance(runtime, dict) or set(runtime) != required_runtime:
+            raise ValueError(
+                f"Checkpoint runtime fields must contain exactly: {sorted(required_runtime)}"
+            )
+        self._validate_runner_log_offsets(runtime['runner_log_offsets'])
+        self._validate_server_log_offsets(runtime['server_log_offsets'])
+        if not isinstance(runtime['workspace_commit'], str) or not runtime['workspace_commit']:
+            raise ValueError("Checkpoint workspace_commit must be a non-empty string")
+        self._validate_environment_llm_usage(runtime['environment_llm'])
+
+        conversation = runtime['conversation']
+        if not isinstance(conversation, dict) or set(conversation) != {'file', 'sha256', 'resume'}:
+            raise ValueError("Checkpoint conversation must contain file, sha256, and resume")
+        if not isinstance(conversation['file'], str) or not conversation['file']:
+            raise ValueError("Checkpoint conversation file must be a non-empty string")
+        if not isinstance(conversation['sha256'], str) or not conversation['sha256']:
+            raise ValueError("Checkpoint conversation sha256 must be a non-empty string")
+        if not isinstance(conversation['resume'], bool):
+            raise ValueError("Checkpoint conversation resume must be boolean")
+
+        agent = runtime['agent']
+        required_agent = {
+            'total_turns', 'input_tokens', 'output_tokens', 'cached_tokens',
+            'reasoning_tokens', 'decision_cost_usd',
+        }
+        if not isinstance(agent, dict) or set(agent) != required_agent:
+            raise ValueError(
+                f"Checkpoint agent fields must contain exactly: {sorted(required_agent)}"
+            )
+        for field in required_agent - {'decision_cost_usd'}:
+            self._require_non_negative_integer(agent[field], f'agent.{field}')
+        self._require_non_negative_number(
+            agent['decision_cost_usd'], 'agent.decision_cost_usd'
+        )
+        return checkpoint
+
+    def _restore_checkpoint_database_before_server(self, checkpoint: Dict):
+        """Restore the checkpoint database before the simulator server starts."""
         cp_day = checkpoint['day']
+        self._session_id = checkpoint['session_id']
 
-        # Restore session ID
-        self._session_id = checkpoint.get('session_id', self._session_id)
-
-        # Copy harness nmdb back to session directory
-        harness_nmdb = self.workspace_dir / "world.nmdb"
+        # 服务器启动时会把 world.nmdb 一次性读入内存，因此必须先恢复文件再启动服务器。
+        database_file = checkpoint['database']['file']
+        database_sha256 = checkpoint['database']['sha256']
+        harness_nmdb = self._checkpoint_artifact_path(database_file, 'database')
         session_nmdb = self.agent_workspace / "sessions" / self._session_id / "world.nmdb"
-        if harness_nmdb.exists() and session_nmdb.parent.exists():
-            shutil.copy2(harness_nmdb, session_nmdb)
-            print(f"  Restored DB from checkpoint (day {cp_day})")
+        if self._sha256_file(harness_nmdb) != database_sha256:
+            raise ValueError("Checkpoint database hash mismatch")
+        if not session_nmdb.parent.is_dir():
+            raise FileNotFoundError(f"Checkpoint session directory not found: {session_nmdb.parent}")
+        shutil.copy2(harness_nmdb, session_nmdb)
+        print(f"  Restored DB from checkpoint (day {cp_day})")
 
-        # Update session metadata to reflect checkpoint day
+        # 会话元数据也必须在服务器启动前回退，否则服务器会使用错误的当前日期。
         session_meta = self.agent_workspace / "sessions" / self._session_id / "session.json"
-        if session_meta.exists():
-            meta = json.loads(session_meta.read_text())
-            meta["current_day"] = cp_day
-            meta["status"] = "created"  # Will be set to "running" when server starts
-            session_meta.write_text(json.dumps(meta, indent=2))
+        if not session_meta.is_file():
+            raise FileNotFoundError(f"Checkpoint session metadata not found: {session_meta}")
+        meta = json.loads(session_meta.read_text())
+        meta["current_day"] = cp_day
+        meta["status"] = "created"  # Will be set to "running" when server starts
+        meta.pop("port", None)
+        meta.pop("pid", None)
+        write_json_atomic(session_meta, meta)
 
-        # Truncate JSONL logs to remove entries from days beyond checkpoint
-        for log_file in [
-            self.logs_dir / f"tool_results_{self.run_id}.jsonl",
-            self.logs_dir / f"raw_responses_{self.run_id}.jsonl",
-            self.logs_dir / f"timing_{self.run_id}.jsonl",
-        ]:
-            if log_file.exists():
-                kept_lines = []
-                with open(log_file, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            entry = json.loads(line)
-                            entry_day = entry.get('day', 0)
-                            if entry_day <= cp_day:
-                                kept_lines.append(line)
-                        except json.JSONDecodeError:
-                            kept_lines.append(line)
-                with open(log_file, 'w') as f:
-                    for line in kept_lines:
-                        f.write(line + "\n")
-                print(f"  Trimmed {log_file.name}: kept entries for days <= {cp_day}")
+    def _restore_agent_state_after_launch(
+        self, checkpoint: Dict, restore_plan: CheckpointRestorePlan
+    ):
+        """Restore Agent counters and conversation after its client is created."""
+        runtime = checkpoint.get('runtime')
+        if not isinstance(runtime, dict):
+            raise ValueError("Checkpoint lacks exact runtime state and cannot be safely resumed")
 
+        agent_state = runtime['agent']
         if self.agent:
-            self.agent.total_turns = checkpoint.get('agent_total_turns', 0)
-            self.agent.total_input_tokens = checkpoint.get('total_input_tokens', 0)
-            self.agent.total_output_tokens = checkpoint.get('total_output_tokens', 0)
-            self.agent.total_cached_tokens = checkpoint.get('total_cached_tokens', 0)
-            self.agent.total_reasoning_tokens = checkpoint.get('total_reasoning_tokens', 0)
-            self.agent.total_anthropic_fallbacks = checkpoint.get('total_anthropic_fallbacks', 0)
+            self.agent.total_turns = agent_state['total_turns']
+            self.agent.total_input_tokens = agent_state['input_tokens']
+            self.agent.total_output_tokens = agent_state['output_tokens']
+            self.agent.total_cached_tokens = agent_state['cached_tokens']
+            self.agent.total_reasoning_tokens = agent_state['reasoning_tokens']
+        self.total_decision_agent_cost_usd = agent_state['decision_cost_usd']
+        # Git 周节点不需要单独持久化，由可信断点日期即可唯一恢复。
+        self._last_committed_week = checkpoint['day'] // 7
 
-        # If the crash happened mid-day (last logged tool wasn't a next-week
-        # invocation), suppress the outer loop's force step_day on the resume
-        # iteration so the agent can keep planning instead of being skipped
-        # forward. Cleared after one outer iteration.
-        last_tool = None
-        last_cmd = ""
-        last_result = ""
-        tool_results_file = self.logs_dir / f"tool_results_{self.run_id}.jsonl"
-        if tool_results_file.exists():
-            try:
-                with open(tool_results_file, "rb") as f:
-                    f.seek(0, 2)
-                    size = f.tell()
-                    chunk_size = min(size, 8192)
-                    f.seek(size - chunk_size)
-                    tail = f.read().decode("utf-8", errors="ignore").strip().splitlines()
-                    if tail:
-                        entry = json.loads(tail[-1])
-                        last_tool = entry.get("tool")
-                        last_cmd = (entry.get("arguments", {}) or {}).get("command", "") or ""
-                        last_result = entry.get("result", "") or ""
-            except Exception:
-                pass
-        last_was_next_week = (last_tool == "bash" and "next-week" in last_cmd)
+        conversation_payload = restore_plan.conversation_payload
+        if self.agent:
+            self.agent.restore_checkpoint_snapshot(conversation_payload)
 
-        # If the last logged tool was a ``next-week`` call, decide whether it
-        # actually completed. The server's success response begins with
-        # ``=== Week N Dashboard (Day X) ===`` — a reliable marker. An
-        # interrupted next-week (server timeout, harness crash mid-call) won't
-        # contain that header.
-        last_next_week_finished = (
-            last_was_next_week
-            and isinstance(last_result, str)
-            and "=== Week " in last_result
-        )
-
-        if last_was_next_week and not last_next_week_finished:
-            # next-week was the last action but it didn't complete — recover
-            # by forcing the harness to re-issue /next-week on the resume iter.
-            self._suppress_force_step_day_once = False
-        else:
-            # Either the last next-week finished cleanly (trust the agent to
-            # decide), or the last action wasn't next-week at all (mid-day
-            # crash — the conversation snapshot below will pick up where it
-            # left off).
-            self._suppress_force_step_day_once = True
-
-        print(
-            f"  Last logged tool: {last_tool!r} "
-            f"(next-week={last_was_next_week}, "
-            f"finished={last_next_week_finished if last_was_next_week else 'n/a'}) — "
-            f"force /next-week on resume iter: "
-            f"{'SKIP' if self._suppress_force_step_day_once else 'force'}"
-        )
-
-        # Mid-day resume: if the agent was in the middle of a day (last tool
-        # wasn't next-week), restore its accumulated conversation from the
-        # per-turn snapshot. Day-boundary resume (last_was_next_week=True)
-        # gets a fresh context as usual — _refresh_context() will fire on
-        # the next act() because the conversation is empty.
-        if self.agent and not last_was_next_week:
-            snap = self.agent._snapshot_path
-            if snap and snap.exists():
-                self.agent.load_conversation_snapshot(snap)
-            else:
-                print(f"  [resume] No conversation snapshot at {snap} — "
-                      f"agent will start day {cp_day} with fresh context.")
+    def _launch_server_from_prepared_checkpoint(self):
+        """Restore persistent simulator state, then launch the server."""
+        if self._resume_checkpoint:
+            runtime = self._resume_checkpoint.get('runtime')
+            if not isinstance(runtime, dict):
+                raise ValueError("Checkpoint lacks exact runtime state and cannot be safely resumed")
+            # 预检只读：所有文件、哈希、Git commit 和日志边界都通过后才应用恢复。
+            restore_plan = self._preflight_checkpoint_restore(self._resume_checkpoint)
+            self._checkpoint_restore_plan = restore_plan
+            self._session_id = restore_plan.session_id
+            self._restore_workspace_commit(runtime['workspace_commit'])
+            # Git 回退只负责 Agent 产物；静态客户端必须与当前 host 端 bundle 对齐。
+            self._refresh_public_workspace_artifacts()
+            self._restore_checkpoint_database_before_server(self._resume_checkpoint)
+            self._restore_logs_to_offsets(runtime['runner_log_offsets'])
+            # EventLogger 启动后会以 append 模式打开文件，必须在启动前回退。
+            self._restore_server_logs_before_server(runtime['server_log_offsets'])
+        self._launch_server()
+        if self._resume_checkpoint:
+            expected_day = self._resume_checkpoint['day']
+            status = self._http_get('/game-status')
+            actual_day = status.get('day')
+            if actual_day != expected_day:
+                self._stop_server()
+                raise RuntimeError(
+                    f"Restored server day {actual_day!r} does not match checkpoint day {expected_day}"
+                )
 
     # =========================================================================
     # Setup
     # =========================================================================
 
+    def _create_new_run_directory(self) -> None:
+        """Allocate an empty directory owned exclusively by this new run."""
+        self.workspace_base.mkdir(parents=True, exist_ok=True)
+        self.workspace_dir.mkdir(exist_ok=False)
+        self.logs_dir.mkdir()
+
+    def _discard_failed_new_run(self) -> None:
+        """Remove artifacts that never reached the initial checkpoint."""
+        # 新实验在 Day 0 断点落盘前不是可恢复状态，失败后整体回滚。
+        shutil.rmtree(self.workspace_dir)
+        self._session_id = None
+        self.agent = None
+        self.tool_executor = None
+
     def setup(self):
         """Initialize the simulation environment.
 
         Flow:
-        1. Copy public/ into workspace and create session via host-side CLI
-        2. Launch host-side 'novamind-server start-server' as subprocess
-        3. Create agent and tool executor (communicate via HTTP)
+        1. Create a new session, or validate and restore an exact checkpoint
+        2. Launch the simulator server subprocess
+        3. Create the Agent and HTTP tool executor
 
         The simulator bytecode (_engine/) and server launcher NEVER enter the
         workspace — they stay in public/ on the host side.
         """
-        from .agent import BashAgent
-        from .tools import get_bash_agent_tool_descriptions, BashAgentToolExecutor, NextDayTimeoutError
-        self._NextDayTimeoutError = NextDayTimeoutError
+        from .tools import get_bash_agent_tool_descriptions, BashAgentToolExecutor, NextWeekTimeoutError
+        self._NextWeekTimeoutError = NextWeekTimeoutError
 
-        # Belt-and-suspenders: if a pre-patch run left legacy files in the
-        # workspace, purge them so the agent always sees the latest layout.
-        # Never let simulator bytecode leak into the workspace.
-        if self.agent_workspace.exists():
-            stale_names = [
-                "_engine",          # pre-L1: bundled engine bytecode
-                "novamind-server",  # pre-zipapp: separate server launcher
-                "novamind_api",     # pre-zipapp: top-level SDK (now docs/novamind_api)
-                "examples",         # pre-zipapp: top-level examples (removed 2026-05-10)
-                "install.sh",       # pre-zipapp: PyInstaller bootstrap
-            ]
-            for stale_name in stale_names:
-                stale_path = self.agent_workspace / stale_name
-                if stale_path.is_dir():
-                    shutil.rmtree(stale_path, ignore_errors=True)
-                elif stale_path.is_file() or stale_path.is_symlink():
-                    try:
-                        stale_path.unlink()
-                    except OSError:
-                        pass
+        new_run_directory_created = False
+        try:
+            # 模拟器 bundle 也是实验条件，恢复前必须与原实验完全一致。
+            self._verify_public_bundle()
 
-            # Refresh docs/ and novamind-operation from the published build so
-            # resumed sessions pick up the new zipapp + relocated SDK source.
-            # Safe to overwrite: the agent never writes into docs/, and the
-            # old novamind-operation script is incompatible with the new
-            # NOVAMIND_SERVER_MODE dispatch.
-            if self.continue_from:
-                public_dir = self._public_dir()
-                src_docs = public_dir / "docs"
-                dst_docs = self.agent_workspace / "docs"
-                if src_docs.exists():
-                    if dst_docs.exists():
-                        shutil.rmtree(dst_docs, ignore_errors=True)
-                    shutil.copytree(
-                        src_docs, dst_docs,
-                        ignore=shutil.ignore_patterns('__pycache__'),
+            # ── Step 1: Create a new session, or validate an exact checkpoint ──
+            if not self.continue_from:
+                self._create_new_run_directory()
+                new_run_directory_created = True
+                self._initialize_from_public_repo()
+                # 会话创建成功后才提交实验身份，避免留下虚假的可恢复目录。
+                self._write_new_run_config()
+            else:
+                # 恢复只能使用 checkpoint 明确记录的会话，禁止按目录修改时间猜测。
+                checkpoint = self._load_checkpoint()
+                if checkpoint is None:
+                    raise FileNotFoundError(
+                        f"Resume checkpoint not found: {self.workspace_dir / 'checkpoint.json'}"
                     )
-                src_op = public_dir / "novamind-operation"
-                dst_op = self.agent_workspace / "novamind-operation"
-                if src_op.exists():
-                    if dst_op.exists():
-                        try:
-                            dst_op.unlink()
-                        except OSError:
-                            pass
-                    shutil.copy2(src_op, dst_op)
-                    import stat as _stat
-                    dst_op.chmod(dst_op.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+                self._resume_checkpoint = checkpoint
+                self._session_id = checkpoint['session_id']
 
-        # ── Step 1: Copy public/ and create session via CLI ──
-        if not self.continue_from:
-            session_info = self._initialize_from_public_repo()
-        else:
-            # Resuming — session already exists, find it
-            checkpoint = self._load_checkpoint()
-            if checkpoint:
-                self._session_id = checkpoint.get('session_id')
             if not self._session_id:
-                # Fallback: find session in workspace
-                sessions_dir = self.agent_workspace / "sessions"
-                if sessions_dir.exists():
-                    dirs = sorted(sessions_dir.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True)
-                    if dirs:
-                        self._session_id = dirs[0].name
+                raise RuntimeError("No session ID found. Cannot proceed.")
 
-        if not self._session_id:
-            raise RuntimeError("No session ID found. Cannot proceed.")
+            # ── Step 2: Launch server subprocess ──
+            self._launch_server_from_prepared_checkpoint()
 
-        # ── Step 2: Launch server subprocess ──
-        self._launch_server()
+            # ── Step 3: Create tool executor + agent ──
+            # Pass NOVAMIND_API_PORT so the CLI (./novamind-operation) connects to
+            # the already-running server instead of trying to start a new one.
+            self.tool_executor = BashAgentToolExecutor(
+                workspace_path=self.agent_workspace,
+                env={"NOVAMIND_API_PORT": str(self._server_port)},
+            )
 
-        # ── Step 3: Create tool executor + agent ──
-        # Pass NOVAMIND_API_PORT so the CLI (./novamind-operation) connects to
-        # the already-running server instead of trying to start a new one.
-        self.tool_executor = BashAgentToolExecutor(
-            workspace_path=self.agent_workspace,
-            env={"NOVAMIND_API_PORT": str(self._server_port)},
-        )
+            tool_descriptions = get_bash_agent_tool_descriptions()
 
-        tool_descriptions = get_bash_agent_tool_descriptions()
+            self.agent = BashAgent(
+                tool_descriptions=tool_descriptions,
+                client=self.client,
+                model=self.model,
+                api_type=self.api_type,
+                max_invalid_responses_per_turn=self.max_invalid_responses_per_turn,
+                response_callback=self._log_response,
+                reasoning_effort=self.reasoning_effort,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                max_output_tokens=self.max_output_tokens,
+                timeout_seconds=self.timeout_seconds,
+                request_options=self.request_options,
+                tool_result_callback=self._log_tool_result,
+                workspace_path=self.agent_workspace,
+                total_days=self.total_days,
+            )
 
-        self.agent = BashAgent(
-            tool_descriptions=tool_descriptions,
-            client=self.client,
-            model=self.model,
-            max_turns_per_day=0,  # No limit
-            response_callback=self._log_response,
-            reasoning_effort=self.reasoning_effort,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            max_output_tokens=self.max_output_tokens,
-            timeout_seconds=self.timeout_seconds,
-            tool_result_callback=self._log_tool_result,
-            workspace_path=self.agent_workspace,
-            total_days=self.total_days,
-            anthropic_fallback_model=self.anthropic_fallback_model,
-        )
+            # 可读快照用于诊断；恢复仍只读取 checkpoint 指向的不可变对话版本。
+            self.agent._snapshot_path = (
+                self.agent_workspace / "sessions" / self._session_id / "conversation.json"
+            )
 
-        # Wire the per-session conversation snapshot path. The agent writes
-        # this after every LLM call; on resume, _restore_from_checkpoint can
-        # load it to recover the exact accumulated context (see agent.py).
-        self.agent._snapshot_path = (
-            self.agent_workspace / "sessions" / self._session_id / "conversation.json"
-        )
+            if self._resume_checkpoint:
+                # Agent 创建后再恢复对话、Token、成本和日志计数。
+                restore_plan = getattr(self, '_checkpoint_restore_plan', None)
+                if restore_plan is None:
+                    raise RuntimeError("Checkpoint was not preflighted before Agent creation")
+                self._restore_agent_state_after_launch(
+                    self._resume_checkpoint, restore_plan
+                )
+            else:
+                # Day 0 断点是新实验的事务提交点，此后目录才具备完整恢复条件。
+                self._save_checkpoint(0)
+        except Exception:
+            self._stop_server()
+            if new_run_directory_created:
+                self._discard_failed_new_run()
+            raise
 
-        # Save run config
-        config = {
+    def _run_config_payload(self) -> Dict[str, Any]:
+        """Return the immutable experiment identity stored for future resumes."""
+        self._ensure_harness_identity()
+        return {
+            'format_version': RUN_CONFIG_FORMAT_VERSION,
             'run_id': self.run_id,
+            'agent_type': 'bash_agent',
             'model': self.model,
             'provider': self.provider,
+            'api_type': self.api_type,
             'base_url': self.base_url,
             'reasoning_effort': self.reasoning_effort,
             'temperature': self.temperature,
             'top_p': self.top_p,
             'max_output_tokens': self.max_output_tokens,
             'timeout_seconds': self.timeout_seconds,
-            'input_cost_per_million': self.input_cost_per_million,
-            'output_cost_per_million': self.output_cost_per_million,
+            'request_options': self.request_options,
+            'pricing': self.pricing,
             'api_key_env': self.api_key_env,
             'api_key_required': self.api_key_required,
-            'anthropic_fallback_model': self.anthropic_fallback_model,
             'seed': self.seed,
             'scenario': self.scenario,
             'total_days': self.total_days,
             'initial_cash': self.initial_cash,
-            'agent_type': 'bash_agent',
-            'api_server_port': self._server_port,
-            'session_id': self._session_id,
+            'max_decision_turns_per_batch': self.max_decision_turns_per_batch,
+            'max_invalid_responses_per_turn': self.max_invalid_responses_per_turn,
             'label': self.label,
-            'config_source': str(self.config_source) if self.config_source else None,
             'simulator_llm': self.simulator_llm_config,
-            'public_dir_override': os.environ.get('NOVAMIND_PUBLIC_DIR') or None,
+            'public_bundle_sha256': self._current_public_bundle_sha256(),
+            'harness_git_commit': self.harness_git_commit,
+            'harness_git_dirty': self.harness_git_dirty,
+            'harness_source_sha256': self.harness_source_sha256,
         }
-        with open(self.workspace_dir / "config.json", 'w') as f:
-            json.dump(config, f, indent=2)
+
+    def _write_new_run_config(self) -> None:
+        config_file = self.workspace_dir / "config.json"
+        if config_file.exists():
+            raise FileExistsError(f"New run config already exists: {config_file}")
+        # 配置是实验身份，只在新实验启动时提交一次；恢复过程禁止覆盖。
+        payload = self._run_config_payload()
+        write_json_atomic(config_file, payload)
+        self.public_bundle_sha256 = payload['public_bundle_sha256']
+
+    def _current_public_bundle_sha256(self) -> str:
+        public_dir = self._public_dir()
+        bundle = public_dir / "novamind-operation"
+        docs = public_dir / "docs"
+        if not bundle.is_file() or not docs.is_dir():
+            raise FileNotFoundError(
+                f"Public bundle must contain novamind-operation and docs/: {public_dir}"
+            )
+
+        # 可执行文件和 Agent 可见文档共同决定一次实验的输入。
+        digest = hashlib.sha256()
+        for path in [bundle, *sorted(path for path in docs.rglob('*') if path.is_file())]:
+            relative_path = path.relative_to(public_dir).as_posix().encode()
+            digest.update(len(relative_path).to_bytes(4, 'big'))
+            digest.update(relative_path)
+            with open(path, 'rb') as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                    digest.update(chunk)
+        return digest.hexdigest()
+
+    def _current_harness_source_sha256(self) -> str:
+        """Hash the source that controls the main Agent experiment."""
+        source_root = package_root / "saas_bench"
+        files = [
+            source_root / "agents" / "base.py",
+            source_root / "environment.py",
+            source_root / "experiment_config.py",
+            source_root / "json_io.py",
+            source_root / "llm_provider.py",
+            *sorted((source_root / "agents" / "bash_agent").rglob("*.py")),
+        ]
+        digest = hashlib.sha256()
+        # 路径和内容共同决定 Harness 身份，文件改名也会产生新哈希。
+        for path in sorted(set(files)):
+            if not path.is_file():
+                raise FileNotFoundError(f"Harness source file is missing: {path}")
+            relative_path = path.relative_to(package_root.parent).as_posix().encode()
+            digest.update(len(relative_path).to_bytes(4, "big"))
+            digest.update(relative_path)
+            with open(path, "rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        return digest.hexdigest()
+
+    def _ensure_harness_identity(self) -> None:
+        if getattr(self, "harness_git_commit", None) is None:
+            repo_root = package_root.parent
+            self.harness_git_commit = subprocess.run(
+                ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            status = subprocess.run(
+                ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.harness_git_dirty = bool(status.strip())
+            self.harness_source_sha256 = self._current_harness_source_sha256()
+        self._validate_harness_identity({
+            "harness_git_commit": self.harness_git_commit,
+            "harness_git_dirty": self.harness_git_dirty,
+            "harness_source_sha256": self.harness_source_sha256,
+        })
+
+    @staticmethod
+    def _validate_harness_identity(identity: Dict[str, Any]) -> None:
+        commit = identity.get("harness_git_commit")
+        dirty = identity.get("harness_git_dirty")
+        digest = identity.get("harness_source_sha256")
+        if not isinstance(commit, str) or not commit:
+            raise ValueError("harness_git_commit must be a non-empty string")
+        if not isinstance(dirty, bool):
+            raise ValueError("harness_git_dirty must be a boolean")
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+        ):
+            raise ValueError("harness_source_sha256 must be a lowercase SHA-256 digest")
+
+    def _harness_result_fields(self) -> Dict[str, Any]:
+        self._ensure_harness_identity()
+        return {
+            "harness_git_commit": self.harness_git_commit,
+            "harness_git_dirty": self.harness_git_dirty,
+            "harness_source_sha256": self.harness_source_sha256,
+        }
+
+    def _verify_public_bundle(self) -> None:
+        if self.continue_from and self.public_bundle_sha256 is None:
+            raise ValueError("Resumed run does not contain a public bundle hash")
+        current = self._current_public_bundle_sha256()
+        if self.public_bundle_sha256 is not None and current != self.public_bundle_sha256:
+            raise ValueError(
+                "Public simulator bundle hash does not match the original experiment"
+            )
 
     def _execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         """Execute a bash_agent tool.
 
-        Raises NextDayTimeoutError if ./novamind-operation next-week times out,
+        Raises NextWeekTimeoutError if ./novamind-operation next-week times out,
         which triggers run checkpoint + kill in the run loop.
         """
-        result = self.tool_executor.execute(tool_name, arguments)
+        return self.tool_executor.execute(tool_name, arguments)
 
-        # Check if bash output contains a day advancement
-        if tool_name == 'bash':
-            self.agent.check_day_advanced(result)
+    def _write_result(self, result: Dict[str, Any]) -> None:
+        """Atomically publish one machine-readable outcome for this invocation."""
+        write_json_atomic(self.workspace_dir / "result.json", result)
 
+    def _result_from_checkpoint(
+        self, checkpoint: Dict[str, Any], outcome: str
+    ) -> Dict[str, Any]:
+        agent_state = checkpoint['runtime']['agent']
+        environment_state = checkpoint['runtime']['environment_llm']
+        return {
+            'run_id': self.run_id,
+            'seed': self.seed,
+            'scenario': self.scenario,
+            'final_cash': checkpoint['cash'],
+            'days_run': checkpoint['day'],
+            'outcome': outcome,
+            'total_turns': agent_state['total_turns'],
+            'decision_agent_input_tokens': agent_state['input_tokens'],
+            'decision_agent_output_tokens': agent_state['output_tokens'],
+            'decision_agent_cached_tokens': agent_state['cached_tokens'],
+            'decision_agent_reasoning_tokens': agent_state['reasoning_tokens'],
+            'decision_agent_cost_usd': agent_state['decision_cost_usd'],
+            'environment_llm_input_tokens': environment_state['input_tokens'],
+            'environment_llm_output_tokens': environment_state['output_tokens'],
+            'environment_llm_cost_usd': environment_state['cost_usd'],
+            'environment_llm_usage_by_purpose': environment_state['by_purpose'],
+            'resumable': outcome in {'timeout', 'incomplete'},
+            'workspace_dir': str(self.workspace_dir),
+            **self._harness_result_fields(),
+        }
+
+    def _load_or_rebuild_terminal_result(self) -> Optional[Dict[str, Any]]:
+        """Return a completed result before starting any managed resources."""
+        if not self.continue_from:
+            return None
+
+        result_file = self.workspace_dir / "result.json"
+        existing_result = None
+        if result_file.exists():
+            existing_result = json.loads(result_file.read_text())
+            if existing_result.get('outcome') not in {'completed', 'bankrupt'}:
+                # timeout/incomplete 只描述上一次调用，保留作为诊断记录即可。
+                existing_result = None
+
+        checkpoint = self._load_checkpoint()
+        if checkpoint is None:
+            if existing_result is not None:
+                raise RuntimeError("Terminal result exists without a checkpoint")
+            return None
+        session_id = checkpoint['session_id']
+        session_dir = self.agent_workspace / "sessions" / session_id
+        session_meta_file = session_dir / "session.json"
+        event_meta_file = session_dir / "logs" / f"run_{session_id}_meta.json"
+        if not session_meta_file.is_file():
+            if existing_result is not None:
+                raise RuntimeError("Terminal result exists without session metadata")
+            return None
+
+        session_meta = json.loads(session_meta_file.read_text())
+        session_outcome = session_meta.get('status')
+        event_meta = (
+            json.loads(event_meta_file.read_text())
+            if event_meta_file.is_file()
+            else None
+        )
+        event_outcome = event_meta.get('outcome') if event_meta else None
+        terminal_outcomes = {'completed', 'bankrupt'}
+        if session_outcome not in terminal_outcomes and event_outcome not in terminal_outcomes:
+            if existing_result is not None:
+                raise RuntimeError("Terminal result has no matching terminal metadata")
+            return None
+        if (
+            session_outcome in terminal_outcomes
+            and event_outcome in terminal_outcomes
+            and session_outcome != event_outcome
+        ):
+            raise RuntimeError(
+                "Terminal run artifacts disagree; refusing to resume"
+            )
+        if session_outcome not in terminal_outcomes or event_outcome not in terminal_outcomes:
+            if existing_result is not None:
+                raise RuntimeError("Terminal result conflicts with incomplete finalization")
+            # 终态提交在多文件之间中断：返回断点后重做 finalize，不把半成品当成损坏。
+            return None
+
+        outcome = session_outcome
+        day = checkpoint['day']
+        cash = checkpoint['cash']
+        if session_meta.get('current_day') != day:
+            raise RuntimeError("Terminal session day does not match checkpoint")
+        if session_meta.get('final_cash') != cash:
+            raise RuntimeError("Terminal session cash does not match checkpoint")
+        if event_meta.get('days_run') != day:
+            raise RuntimeError("Terminal event day does not match checkpoint")
+        if event_meta.get('final_cash') != cash:
+            raise RuntimeError("Terminal event cash does not match checkpoint")
+        if outcome == 'completed' and day < self.total_days:
+            raise RuntimeError("Completed terminal result is before the target day")
+        if outcome == 'completed' and cash < 0:
+            raise RuntimeError("Completed terminal result has negative cash")
+        if outcome == 'bankrupt' and cash >= 0:
+            raise RuntimeError("Bankrupt terminal result has non-negative cash")
+
+        # 事件 meta 与 JSONL 尾部必须同时存在 run_end，防止只剩一份覆盖写文件。
+        event_log_file = session_dir / "logs" / f"run_{session_id}.jsonl"
+        if not event_log_file.is_file():
+            raise RuntimeError("Terminal event log is missing")
+        last_event = None
+        with open(event_log_file) as event_log:
+            for line in event_log:
+                if line.strip():
+                    last_event = json.loads(line)
+        if (
+            not isinstance(last_event, dict)
+            or last_event.get('category') != 'run_end'
+            or last_event.get('day') != day
+            or last_event.get('details', {}).get('outcome') != outcome
+            or last_event.get('details', {}).get('final_cash') != cash
+        ):
+            raise RuntimeError("Terminal event log does not match terminal metadata")
+
+        canonical_result = self._result_from_checkpoint(checkpoint, outcome)
+        if existing_result is not None:
+            # result.json 只是可重建索引，不能覆盖 checkpoint 与服务端终态证据。
+            if existing_result != canonical_result:
+                raise RuntimeError("Terminal result does not match authoritative artifacts")
+            return existing_result
+        self._write_result(canonical_result)
+        return canonical_result
+
+    def _repair_terminal_checkpoint_after_setup(self) -> Optional[Dict[str, Any]]:
+        """Finish a terminal checkpoint whose prior finalization was interrupted."""
+        checkpoint = self._resume_checkpoint
+        if checkpoint is None:
+            return None
+        if checkpoint['cash'] < 0:
+            outcome = 'bankrupt'
+        elif checkpoint['day'] >= self.total_days:
+            outcome = 'completed'
+        else:
+            return None
+
+        finalized = self._http_post('/finalize-run', {'outcome': outcome}, timeout=30)
+        if not finalized.get('success'):
+            raise RuntimeError(f"Run finalization repair failed: {finalized}")
+        result = self._result_from_checkpoint(checkpoint, outcome)
+        self._write_result(result)
         return result
 
     # =========================================================================
@@ -1135,44 +1824,39 @@ __pycache__/
     # =========================================================================
 
     def run(self, verbose: bool = True) -> Dict[str, Any]:
-        """Run the full simulation."""
+        """Run the experiment while owning all subprocess and thread resources."""
+        terminal_result = self._load_or_rebuild_terminal_result()
+        if terminal_result is not None:
+            return terminal_result
+        self._start_timing_poster()
+        try:
+            return self._run_experiment(verbose)
+        finally:
+            # 主循环任何位置失败，都必须先关模拟器，再停止日志转发线程。
+            self._stop_server()
+            self._stop_timing_poster()
+
+    def _run_experiment(self, verbose: bool = True) -> Dict[str, Any]:
+        """Execute the experiment; resource ownership stays in run()."""
 
         # 准备实验环境
         self.setup()
 
-        # 处理断点恢复
-        start_day = 1
-        if self.continue_from:
-            checkpoint = self._load_checkpoint()
-            if checkpoint:
-                start_day = checkpoint['day'] + 1
-                self._restore_from_checkpoint(checkpoint)
+        repaired_terminal = self._repair_terminal_checkpoint_after_setup()
+        if repaired_terminal is not None:
+            return repaired_terminal
 
-                # Check for bankruptcy before resuming
-                cash = self._get_cash()
-                if cash < 0:
-                    print(f"\n{'='*60}")
-                    print(f"CANNOT RESUME — COMPANY IS BANKRUPT")
-                    print(f"Run ID: {self.run_id}")
-                    print(f"Checkpoint: Day {checkpoint['day']}")
-                    print(f"Cash balance: ${cash:,.2f}")
-                    print(f"{'='*60}\n")
-                    raise SystemExit(f"Run {self.run_id} is bankrupt (cash=${cash:,.2f}). Cannot resume.")
-
-                if verbose:
-                    print(f"\n{'='*60}")
-                    print(f"RESUMING Bash Agent Run from Day {start_day}")
-                    print(f"Run ID: {self.run_id}")
-                    print(f"Model: {self.model}")
-                    print(f"Checkpoint: Day {checkpoint['day']}")
-                    print(f"Cash balance: ${cash:,.2f}")
-                    print(f"Workspace: {self.workspace_dir}")
-                    print(f"{'='*60}\n")
-            else:
-                print(f"WARNING: No checkpoint found, starting from Day 1")
-
-        # 初始化新实验的状态
-        if start_day == 1 and verbose:
+        if self.continue_from and verbose:
+            checkpoint = self._resume_checkpoint
+            cash = self._get_game_status()['cash']
+            print(f"\n{'='*60}")
+            print(f"RESUMING Bash Agent Run at Sim Day {checkpoint['day']}")
+            print(f"Run ID: {self.run_id}")
+            print(f"Model: {self.model}")
+            print(f"Cash balance: ${cash:,.2f}")
+            print(f"Workspace: {self.workspace_dir}")
+            print(f"{'='*60}\n")
+        elif verbose:
             print(f"\n{'='*60}")
             print(f"Starting Bash Agent Run")
             print(f"Run ID: {self.run_id}")
@@ -1184,28 +1868,26 @@ __pycache__/
             print(f"Workspace: {self.workspace_dir}")
             print(f"{'='*60}\n")
 
-        current_day = start_day - 1
-        game_ended = False
-        game_outcome = None
-        sim_day = current_day
-        _cash = 0
-        last_status: Dict[str, Any] = {}
+        status = self._get_game_status()
+        last_status: Dict[str, Any] = status
+        sim_day = status['day']
+        game_outcome = self._terminal_outcome(status)
 
-        # 处理每周的 Agent 决策
-        for day in range(start_day, self.total_days + 1):
+        # 外层表示决策批次，不代表自然日。模拟日期始终以服务端状态为准。
+        decision_batch = 0
+        while game_outcome is None:
+            decision_batch += 1
 
-            # 记录本轮开始时间
-            _day_start = _time.monotonic()
-            current_day = day
+            batch_started_at = _time.monotonic()
 
             # 查询模拟器真实状态
             status = self._get_game_status()
             last_status = status
-            sim_day = status.get('day', day)
+            sim_day = status['day']
 
             if verbose:
                 print(f"\n{'='*40}")
-                print(f"DAY {day} (sim day {sim_day})")
+                print(f"DECISION BATCH {decision_batch} (sim day {sim_day})")
                 print(f"{'='*40}")
 
             # 构建 DashBoard
@@ -1217,29 +1899,43 @@ __pycache__/
 
             # Agent Loop：只要本周的决策尚未结束，就持续执行
             observation = dashboard
-            info = {'day': sim_day, 'cash': status.get('cash', self._get_cash())}
-            turns_today = 0
-            day_ended = False
-            _day_llm_total = 0.0
-            _day_tool_total = 0.0
-            _day_input_tokens = 0
-            _day_output_tokens = 0
-            _day_cached_tokens = 0
-            _day_reasoning_tokens = 0
+            info = {'day': sim_day, 'cash': status['cash']}
+            turns_in_batch = 0
+            week_advanced = False
+            batch_llm_s = 0.0
+            batch_tool_s = 0.0
+            environment_advance_s = 0.0
+            batch_input_tokens = 0
+            batch_output_tokens = 0
+            batch_cached_tokens = 0
+            batch_reasoning_tokens = 0
 
-            # 每一小轮最多允许调用 100 次工具，如果超过 100 次，说明 Agent 可能陷入了无限循环。
-            while not day_ended and turns_today < 100:
-                turns_today += 1
+            while (
+                not week_advanced
+                and turns_in_batch < self.max_decision_turns_per_batch
+            ):
+                turns_in_batch += 1
 
                 # 将 observation（可能是 DashBoard，也可能是 Tool Use） 传给 LLM，获取下一步的 action
+                _before_total_turns = self.agent.total_turns
+                _before_input_tokens = self.agent.total_input_tokens
+                _before_output_tokens = self.agent.total_output_tokens
+                _before_cached_tokens = self.agent.total_cached_tokens
+                _before_reasoning_tokens = self.agent.total_reasoning_tokens
+                _before_cost_usd = self.total_decision_agent_cost_usd
                 _t0 = _time.monotonic()
                 action = self.agent.act(observation, 0, False, info)
                 _llm_elapsed = _time.monotonic() - _t0
-                _day_llm_total += _llm_elapsed
-                _day_input_tokens += self.agent.last_input_tokens
-                _day_output_tokens += self.agent.last_output_tokens
-                _day_cached_tokens += self.agent.last_cached_tokens
-                _day_reasoning_tokens += self.agent.last_reasoning_tokens
+                _call_count = self.agent.total_turns - _before_total_turns
+                _turn_input_tokens = self.agent.total_input_tokens - _before_input_tokens
+                _turn_output_tokens = self.agent.total_output_tokens - _before_output_tokens
+                _turn_cached_tokens = self.agent.total_cached_tokens - _before_cached_tokens
+                _turn_reasoning_tokens = self.agent.total_reasoning_tokens - _before_reasoning_tokens
+                batch_llm_s += _llm_elapsed
+                batch_input_tokens += _turn_input_tokens
+                batch_output_tokens += _turn_output_tokens
+                batch_cached_tokens += _turn_cached_tokens
+                batch_reasoning_tokens += _turn_reasoning_tokens
 
                 # 若 action 为 None，说明 LLM 返回有误，此时直接报错
                 if action is None:
@@ -1261,43 +1957,43 @@ __pycache__/
                     tool_args_preview = json.dumps(action.arguments or {})[:120]
 
                 # 将本次 LLM 的调用信息(llm_call)记录到日志文件（耗时、使用工具、Token 使用情况、请求的模型等）
-                self._log_timing("llm_call", sim_day, turn=turns_today,
+                call_cost_usd = self.total_decision_agent_cost_usd - _before_cost_usd
+                self._log_timing("llm_call", sim_day, turn=turns_in_batch,
                                  elapsed_s=round(_llm_elapsed, 2),
                                  tool=tool_name, tool_preview=tool_args_preview,
-                                 input_tokens=self.agent.last_input_tokens,
-                                 output_tokens=self.agent.last_output_tokens,
-                                 cached_tokens=self.agent.last_cached_tokens,
-                                 reasoning_tokens=self.agent.last_reasoning_tokens,
+                                 api_calls=_call_count,
+                                 input_tokens=_turn_input_tokens,
+                                 output_tokens=_turn_output_tokens,
+                                 cached_tokens=_turn_cached_tokens,
+                                 reasoning_tokens=_turn_reasoning_tokens,
+                                 cost_usd=round(call_cost_usd, 8),
+                                 total_cost_usd=round(self.total_decision_agent_cost_usd, 8),
                                  requested_model=self.model,
-                                 served_model=self.agent.last_serving_model,
-                                 anthropic_fallback_used=self.agent.last_anthropic_fallback_used,
-                                 anthropic_fallbacks=self.agent.last_anthropic_fallbacks,
-                                 total_anthropic_fallbacks=self.agent.total_anthropic_fallbacks)
+                                 served_model=self.agent.last_serving_model)
 
                 if verbose:
                     if tool_name == 'bash':
-                        print(f"    [Turn {turns_today}] bash: {tool_args_preview[:100]}")
+                        print(f"    [Turn {turns_in_batch}] bash: {tool_args_preview[:100]}")
                     else:
-                        print(f"    [Turn {turns_today}] {tool_name}({tool_args_preview[:100]})")
+                        print(f"    [Turn {turns_in_batch}] {tool_name}({tool_args_preview[:100]})")
 
                 # 执行工具调用
+                day_before_tool = sim_day
                 _t0 = _time.monotonic()
                 try:
                     result = self._execute_tool(action.tool, action.arguments or {})
-                except self._NextDayTimeoutError as e:
+                except self._NextWeekTimeoutError as e:
                     _tool_elapsed = _time.monotonic() - _t0
                     print(f"\n⚠️  next_week timed out on sim day {sim_day} ({e})")
-                    print(f"Auto-quitting. Saving checkpoint...")
-                    self._save_checkpoint(sim_day)
-                    game_ended = True
+                    print("Auto-quitting. Keeping the previous completed checkpoint.")
                     game_outcome = 'timeout'
                     break
                 _tool_elapsed = _time.monotonic() - _t0
-                _day_tool_total += _tool_elapsed
+                batch_tool_s += _tool_elapsed
                 observation = result if isinstance(result, str) else json.dumps(result)
 
                 # 将工具调用耗时信息(tool_exec)记录到日志文件
-                self._log_timing("tool_exec", sim_day, turn=turns_today,
+                self._log_timing("tool_exec", sim_day, turn=turns_in_batch,
                                  elapsed_s=round(_tool_elapsed, 3),
                                  tool=tool_name, tool_preview=tool_args_preview)
 
@@ -1312,173 +2008,134 @@ __pycache__/
                     print(f"      → {observation[:200]}")
                     print(f"      ⏱ llm={_llm_elapsed:.1f}s tool={_tool_elapsed:.1f}s")
 
-                # 当 Agent 调用 next-week，说明本周决策结束，标记 day_ended 为 True
-                if self.agent.day_advanced:
-                    day_ended = True
-                    self.agent.clear_day_advanced()
-
-                # 向模拟器查询最新状态
+                # 以服务端日期为唯一依据，不再解析可能变化的 Dashboard 文本格式。
                 status = self._get_game_status()
                 last_status = status
-                sim_day = status.get('day', sim_day)    # 更新 sim_day
+                sim_day = status['day']
+                if sim_day < day_before_tool:
+                    raise RuntimeError(
+                        f"Simulator day moved backwards: {day_before_tool} -> {sim_day}"
+                    )
+                week_advanced = sim_day > day_before_tool
+                if week_advanced:
+                    # next-week 被封装在工具调用内，日期变化才是环境真正推进的信号。
+                    environment_advance_s += _tool_elapsed
                 self._commit_weeks_up_to(sim_day)       # next-week 后，将 Agent 工具目录的改动提交到 Git
 
-                # 如果模拟天数已经达到设定天数，结束游戏
-                if sim_day >= self.total_days:
-                    game_ended = True
-                    game_outcome = 'completed'
-                    if verbose:
-                        print(f"\n✅ Simulation reached {sim_day} days (target: {self.total_days})")
-                    break
-
-                # 如果模拟器返回超时，结束游戏
-                if status.get('timed_out'):
-                    print(f"\n⚠️  step_day timed out on sim day {sim_day}")
-                    print(f"Auto-quitting. Saving checkpoint...")
-                    self._save_checkpoint(sim_day)
-                    game_ended = True
-                    game_outcome = 'timeout'
-                    break
-
-                # 检查是否破产，如果是则结束游戏
-                _cash_inner = status.get('cash', 0)
+                _cash_inner = status['cash']
                 info = {'day': sim_day, 'cash': _cash_inner}
-                if _cash_inner < 0:
-                    game_ended = True
-                    game_outcome = 'bankrupt'
+                game_outcome = self._terminal_outcome(status)
+                if game_outcome is not None:
                     if verbose:
-                        print(f"\n💀 BANKRUPT at sim day {sim_day} (cash=${_cash_inner:,.0f})!")
+                        print(
+                            f"\nSimulation ended: outcome={game_outcome}, "
+                            f"day={sim_day}, cash=${_cash_inner:,.0f}"
+                        )
                     break
 
-            if game_ended:
+            if game_outcome is not None:
                 break
 
-            # If the agent did not call next-week within this harness chunk, do
-            # not fabricate a /next-week call. The API requires the same
-            # rationale/prediction payload that the agent-facing CLI collects.
-            # Continuing at the same sim day preserves benchmark semantics and
-            # avoids noisy HTTP 400s from an empty forced advance.
-            # Exception: on the very first outer iteration after a mid-day
-            # resume (agent's last logged tool was NOT next-week), suppress
-            # the warning once so the agent can keep planning. Flag is cleared
-            # after one iteration so subsequent days behave normally.
-            _step_elapsed = 0
+            # 达到配置上限仍未推进时保留同一模拟日，不伪造缺少理由和预测参数的 next-week。
+            # 当前上下文会随 checkpoint 一起保存，下一轮可以继续决策。
+            if not week_advanced:
+                print(
+                    f"\n⚠️  Turn cap reached on sim day {sim_day} without next-week; "
+                    "saving a resumable checkpoint and ending this invocation."
+                )
+                self._log_timing(
+                    "turn_cap_no_advance", sim_day, turns=turns_in_batch
+                )
 
-            # 若内层经过 100 次工具调用仍未结束本周决策，会打印异常警告、写入一条 turn_cap_no_advance 日志、保存 checkpoint 后继续。
-            if not day_ended:
-                if self._suppress_force_step_day_once:
-                    print(f"  [resume] Skipping force step_day on resume iter (last tool was not next-week)")
-                    self._suppress_force_step_day_once = False
-                else:
-                    print(
-                        f"\n⚠️  Turn cap reached on sim day {sim_day} without next-week; "
-                        f"continuing at the same sim day."
-                    )
-                    self._log_timing("turn_cap_no_advance", sim_day, turns=turns_today)
+            # 内层每次工具执行后已经校验服务端状态，这里直接复用。
+            subscribers = status['subscribers']
+            cash = status['cash']
 
-            # Log step_day timing（过时逻辑）
-            self._log_timing("step_day", sim_day, elapsed_s=round(_step_elapsed, 2))
-
-            # Log slow step_day as warning（过时逻辑）
-            if _step_elapsed > 300:
-                print(f"\n⚠️  step_day took {_step_elapsed:.1f}s on sim day {sim_day} (>300s) — continuing")
-
-            # 重新获取一次模拟器状态，若 Agent 执行了 next-week，则 sim_day 会增加 7 天
-            status = self._get_game_status()
-            last_status = status
-            sim_day = status.get('day', sim_day)
-            self._commit_weeks_up_to(sim_day)  # Commit any sim-week boundary crossed by step_day
-            _subs = status.get('subscribers', 0)
-            _cash = status.get('cash', 0)
-
-            # 过时逻辑
-            if sim_day >= self.total_days:
-                game_ended = True
-                game_outcome = 'completed'
-                if verbose:
-                    print(f"\n✅ Simulation reached {sim_day} days (target: {self.total_days})")
-                break
-
-            # 汇总本轮运行信息(day_summary)，写入 timing_*.jsonl 日志文件，同时打印到终端。
-            _day_elapsed = _time.monotonic() - _day_start
-            _day_other = _day_elapsed - _day_llm_total - _day_tool_total - _step_elapsed - _dashboard_elapsed
-            self._log_timing("day_summary", sim_day,
-                             elapsed_s=round(_day_elapsed, 1),
-                             llm_total_s=round(_day_llm_total, 1),
-                             tool_total_s=round(_day_tool_total, 1),
-                             step_day_s=round(_step_elapsed, 1),
+            # 决策批次可能停留在同一模拟日，日志必须按 batch 而不是 day 命名。
+            batch_elapsed_s = _time.monotonic() - batch_started_at
+            agent_tool_s = max(batch_tool_s - environment_advance_s, 0.0)
+            batch_other_s = (
+                batch_elapsed_s - batch_llm_s - batch_tool_s - _dashboard_elapsed
+            )
+            self._log_timing("decision_batch_summary", sim_day,
+                             decision_batch=decision_batch,
+                             elapsed_s=round(batch_elapsed_s, 1),
+                             llm_total_s=round(batch_llm_s, 1),
+                             agent_tool_s=round(agent_tool_s, 1),
+                             environment_advance_s=round(environment_advance_s, 1),
                              dashboard_s=round(_dashboard_elapsed, 2),
-                             other_s=round(max(_day_other, 0), 1),
-                             turns=turns_today,
-                             subs=_subs,
-                             cash=_cash,
-                             day_input_tokens=_day_input_tokens,
-                             day_output_tokens=_day_output_tokens,
-                             day_cached_tokens=_day_cached_tokens,
-                             day_reasoning_tokens=_day_reasoning_tokens,
+                             other_s=round(max(batch_other_s, 0), 1),
+                             turns=turns_in_batch,
+                             subs=subscribers,
+                             cash=cash,
+                             batch_input_tokens=batch_input_tokens,
+                             batch_output_tokens=batch_output_tokens,
+                             batch_cached_tokens=batch_cached_tokens,
+                             batch_reasoning_tokens=batch_reasoning_tokens,
                              total_input_tokens=self.agent.total_input_tokens,
                              total_output_tokens=self.agent.total_output_tokens,
                              total_cached_tokens=self.agent.total_cached_tokens,
                              total_reasoning_tokens=self.agent.total_reasoning_tokens)
 
-            # Print per-day timing summary to stderr (visible in logs)
-            _pct_llm = (_day_llm_total / _day_elapsed * 100) if _day_elapsed > 0 else 0
-            _pct_step = (_step_elapsed / _day_elapsed * 100) if _day_elapsed > 0 else 0
-            _pct_tool = (_day_tool_total / _day_elapsed * 100) if _day_elapsed > 0 else 0
-            _cache_pct = (_day_cached_tokens / _day_input_tokens * 100) if _day_input_tokens > 0 else 0
-            print(f"\n⏱ DAY {sim_day} TIMING: total={_day_elapsed:.0f}s | "
-                  f"llm={_day_llm_total:.0f}s ({_pct_llm:.0f}%) | "
-                  f"step_day={_step_elapsed:.0f}s ({_pct_step:.0f}%) | "
-                  f"tools={_day_tool_total:.0f}s ({_pct_tool:.0f}%) | "
+            pct_llm = (batch_llm_s / batch_elapsed_s * 100) if batch_elapsed_s > 0 else 0
+            pct_environment = (environment_advance_s / batch_elapsed_s * 100) if batch_elapsed_s > 0 else 0
+            pct_tool = (agent_tool_s / batch_elapsed_s * 100) if batch_elapsed_s > 0 else 0
+            cache_pct = (batch_cached_tokens / batch_input_tokens * 100) if batch_input_tokens > 0 else 0
+            print(f"\n⏱ BATCH {decision_batch} (DAY {sim_day}): total={batch_elapsed_s:.0f}s | "
+                  f"llm={batch_llm_s:.0f}s ({pct_llm:.0f}%) | "
+                  f"environment={environment_advance_s:.0f}s ({pct_environment:.0f}%) | "
+                  f"tools={agent_tool_s:.0f}s ({pct_tool:.0f}%) | "
                   f"dashboard={_dashboard_elapsed:.1f}s | "
-                  f"turns={turns_today} | "
-                  f"tokens={_day_input_tokens:,}in/{_day_output_tokens:,}out "
-                  f"cached={_day_cached_tokens:,}({_cache_pct:.0f}%) "
-                  f"reasoning={_day_reasoning_tokens:,} "
+                  f"turns={turns_in_batch} | "
+                  f"tokens={batch_input_tokens:,}in/{batch_output_tokens:,}out "
+                  f"cached={batch_cached_tokens:,}({cache_pct:.0f}%) "
+                  f"reasoning={batch_reasoning_tokens:,} "
                   f"(cumul: {self.agent.total_input_tokens:,}in/{self.agent.total_output_tokens:,}out)",
                   file=sys.stderr, flush=True)
 
             if verbose:
-                print(f"  📊 End of day: Cash=${_cash:,.0f}, Subs={_subs}")
-
-            # Weekly git commit of agent workspace (before checkpoint so resume re-tries)
-            # Idempotent via once_key — _commit_weeks_up_to may have already committed this week.
-            self._commit_weeks_up_to(sim_day)
+                print(f"  📊 End of batch: Cash=${cash:,.0f}, Subs={subscribers}")
 
             # 保存当前 sim_day 的 checkpoint
-            self._save_checkpoint(sim_day)
+            stable_checkpoint = self._save_checkpoint(
+                sim_day,
+                resume_conversation=not week_advanced,
+                pending_observation=observation if not week_advanced else None,
+            )
 
-            # Check bankruptcy
-            if _cash < 0:
-                game_ended = True
-                game_outcome = 'bankrupt'
-                if verbose:
-                    print(f"\n💀 BANKRUPT at sim day {sim_day}!")
+            if not week_advanced:
+                game_outcome = 'incomplete'
                 break
 
-        if not game_outcome:
-            game_outcome = 'completed' if sim_day >= self.total_days else 'incomplete'
+        if game_outcome is None:
+            raise RuntimeError("Experiment loop exited without a terminal outcome")
 
-        # Read final state before shutdown; after _stop_server() the HTTP cash
-        # helper intentionally cannot query the in-memory simulator anymore.
-        final_status = dict(last_status)
-        if self._server_port:
-            try:
-                queried_status = self._http_get('/game-status')
-                if queried_status:
-                    final_status = queried_status
-                    sim_day = queried_status.get('day', sim_day)
-            except Exception:
-                pass
+        # 所有结果字段都从同一个稳定断点读取，避免现金、日期和 Token 用量错位。
+        if game_outcome == 'timeout':
+            # 超时后的后台 step_week 仍可能改变内存数据库，结果必须对齐上一个可恢复断点。
+            stable_checkpoint = self._load_checkpoint()
+            if not stable_checkpoint:
+                raise RuntimeError("Timeout occurred without a stable checkpoint")
+        else:
+            sim_day = last_status['day']
+            # incomplete 已保存带完整对话的断点；终态需要补存最终环境状态。
+            if game_outcome in {'completed', 'bankrupt'}:
+                self._save_checkpoint(sim_day)
+                stable_checkpoint = self._load_checkpoint()
+            if not stable_checkpoint:
+                raise RuntimeError("Experiment ended without a stable checkpoint")
 
-        final_cash = final_status.get('cash')
-        if final_cash is None:
-            final_cash = self._get_cash() if self._server_port else _cash
+        if game_outcome in {'completed', 'bankrupt'}:
+            finalized = self._http_post(
+                '/finalize-run', {'outcome': game_outcome}, timeout=30
+            )
+            if not finalized.get('success'):
+                raise RuntimeError(f"Run finalization failed: {finalized}")
 
-        # Stop server, then checkpoint so world.nmdb is copied after shutdown
-        # has drained async saves and written the fresh session DB.
-        self._stop_server()
-        self._save_checkpoint(sim_day, fetch_daily_scripts=False)
+        result = self._result_from_checkpoint(stable_checkpoint, game_outcome)
+        result_agent_state = stable_checkpoint['runtime']['agent']
+        sim_day = stable_checkpoint['day']
+        final_cash = stable_checkpoint['cash']
 
         if verbose:
             print(f"\n{'='*60}")
@@ -1487,128 +2144,170 @@ __pycache__/
             print(f"Final Cash: ${final_cash:,.0f}")
             print(f"Sim Days Run: {sim_day}")
             print(f"Outcome: {game_outcome}")
-            print(f"Total Turns: {self.agent.total_turns}")
-            _total_cache_pct = (self.agent.total_cached_tokens / self.agent.total_input_tokens * 100) if self.agent.total_input_tokens > 0 else 0
-            print(f"Total Tokens: {self.agent.total_input_tokens:,} input / {self.agent.total_output_tokens:,} output")
-            print(f"Cached Tokens: {self.agent.total_cached_tokens:,} ({_total_cache_pct:.0f}% of input)")
-            print(f"Reasoning Tokens: {self.agent.total_reasoning_tokens:,}")
-            if self.anthropic_fallback_model or self.agent.total_anthropic_fallbacks:
-                print(f"Anthropic Fallbacks: {self.agent.total_anthropic_fallbacks:,}")
+            print(f"Total Turns: {result_agent_state['total_turns']}")
+            total_input_tokens = result_agent_state['input_tokens']
+            cache_pct = (
+                result_agent_state['cached_tokens'] / total_input_tokens * 100
+                if total_input_tokens > 0 else 0
+            )
+            print(
+                f"Total Tokens: {total_input_tokens:,} input / "
+                f"{result_agent_state['output_tokens']:,} output"
+            )
+            print(
+                f"Cached Tokens: {result_agent_state['cached_tokens']:,} "
+                f"({cache_pct:.0f}% of input)"
+            )
+            print(f"Reasoning Tokens: {result_agent_state['reasoning_tokens']:,}")
+            print(f"Decision Agent Cost: ${result_agent_state['decision_cost_usd']:,.4f}")
             print(f"{'='*60}\n")
 
-        return {
-            'run_id': self.run_id,
-            'seed': self.seed,
-            'scenario': self.scenario,
-            'final_cash': final_cash,
-            'days_run': sim_day,
-            'outcome': game_outcome,
-            'total_turns': self.agent.total_turns,
-            'total_anthropic_fallbacks': self.agent.total_anthropic_fallbacks,
-            'workspace_dir': str(self.workspace_dir),
-        }
+        self._write_result(result)
+        return result
 
 
-def main():
+def _new_experiment_runner(config_path: Path) -> BashAgentRunner:
+    file_config = load_experiment_config(config_path)
+    experiment = file_config.experiment
+    decision = file_config.decision_agent
+    return BashAgentRunner(
+        model=decision.model,
+        provider=decision.provider,
+        api_type=decision.api_type,
+        base_url=decision.base_url,
+        api_key_env=decision.api_key_env,
+        api_key_required=decision.api_key_required,
+        seed=experiment.seed,
+        scenario=experiment.scenario,
+        total_days=experiment.days,
+        initial_cash=experiment.initial_cash,
+        max_decision_turns_per_batch=experiment.max_decision_turns_per_batch,
+        max_invalid_responses_per_turn=experiment.max_invalid_responses_per_turn,
+        workspace_base=Path(experiment.workspace),
+        reasoning_effort=decision.reasoning_effort,
+        temperature=decision.temperature,
+        top_p=decision.top_p,
+        max_output_tokens=decision.max_output_tokens,
+        timeout_seconds=decision.timeout_seconds,
+        request_options=decision.request_options,
+        pricing=decision.pricing,
+        simulator_llm_config=file_config.simulator_overrides(),
+        label=experiment.label,
+    )
+
+
+def _resolve_resume_dir(value: str) -> Path:
+    direct = Path(value).expanduser()
+    if direct.is_dir():
+        return direct.resolve()
+
+    run_name = value if value.startswith("run_") else f"run_{value}"
+    candidates = []
+    for root, dirs, files in os.walk(Path.cwd()):
+        dirs[:] = [name for name in dirs if name not in {".git", ".venv", "__pycache__", "tmp"}]
+        path = Path(root)
+        if path.name == run_name and "config.json" in files:
+            candidates.append(path.resolve())
+            dirs[:] = []
+    if not candidates:
+        raise FileNotFoundError(f"No run directory found for resume id {value!r}")
+    if len(candidates) > 1:
+        joined = ", ".join(str(path) for path in candidates)
+        raise ValueError(f"Resume id {value!r} is ambiguous; pass one directory: {joined}")
+    return candidates[0]
+
+
+def _load_saved_run_config(run_dir: Path) -> Dict[str, Any]:
+    config_path = Path(run_dir) / "config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Run config not found: {config_path}")
+    try:
+        saved = json.loads(config_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Run config is invalid JSON: {config_path}") from exc
+    if not isinstance(saved, dict) or set(saved) != RUN_CONFIG_FIELDS:
+        missing = sorted(RUN_CONFIG_FIELDS - set(saved)) if isinstance(saved, dict) else []
+        extra = sorted(set(saved) - RUN_CONFIG_FIELDS) if isinstance(saved, dict) else []
+        raise ValueError(
+            f"Run config fields do not match format {RUN_CONFIG_FORMAT_VERSION}; "
+            f"missing={missing}, extra={extra}"
+        )
+    if saved["format_version"] != RUN_CONFIG_FORMAT_VERSION:
+        raise ValueError(
+            f"Unsupported run config format_version: {saved['format_version']!r}"
+        )
+    if saved["agent_type"] != "bash_agent":
+        raise ValueError(f"Run config is not for bash_agent: {saved['agent_type']!r}")
+    if not isinstance(saved["run_id"], str) or not saved["run_id"]:
+        raise ValueError("Run config run_id must be a non-empty string")
+    bundle_sha256 = saved["public_bundle_sha256"]
+    if (
+        not isinstance(bundle_sha256, str)
+        or len(bundle_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in bundle_sha256)
+    ):
+        raise ValueError("Run config public_bundle_sha256 is invalid")
+    harness_digest = saved["harness_source_sha256"]
+    if (
+        not isinstance(saved["harness_git_commit"], str)
+        or not saved["harness_git_commit"]
+        or not isinstance(saved["harness_git_dirty"], bool)
+        or not isinstance(harness_digest, str)
+        or len(harness_digest) != 64
+        or any(char not in "0123456789abcdef" for char in harness_digest)
+    ):
+        raise ValueError("Run config harness identity is invalid")
+    return saved
+
+
+def _resume_runner(value: str) -> BashAgentRunner:
+    run_dir = _resolve_resume_dir(value)
+    saved = _load_saved_run_config(run_dir)
+    return BashAgentRunner(
+        model=saved["model"],
+        provider=saved["provider"],
+        api_type=saved["api_type"],
+        base_url=saved["base_url"],
+        api_key_env=saved["api_key_env"],
+        api_key_required=saved["api_key_required"],
+        seed=saved["seed"],
+        scenario=saved["scenario"],
+        total_days=saved["total_days"],
+        initial_cash=saved["initial_cash"],
+        max_decision_turns_per_batch=saved["max_decision_turns_per_batch"],
+        max_invalid_responses_per_turn=saved["max_invalid_responses_per_turn"],
+        reasoning_effort=saved["reasoning_effort"],
+        temperature=saved["temperature"],
+        top_p=saved["top_p"],
+        max_output_tokens=saved["max_output_tokens"],
+        timeout_seconds=saved["timeout_seconds"],
+        request_options=saved["request_options"],
+        pricing=saved["pricing"],
+        simulator_llm_config=saved["simulator_llm"],
+        public_bundle_sha256=saved["public_bundle_sha256"],
+        harness_git_commit=saved["harness_git_commit"],
+        harness_git_dirty=saved["harness_git_dirty"],
+        harness_source_sha256=saved["harness_source_sha256"],
+        continue_from=run_dir,
+        label=saved.get("label"),
+    )
+
+
+def main(argv: Optional[List[str]] = None):
     import argparse
 
     parser = argparse.ArgumentParser(description="Run bash agent for SaaS Bench")
-    parser.add_argument("--config", type=Path, required=True,
-                        help="TOML file containing explicit experiment and model configuration")
-    parser.add_argument("--model", default=None,
-                        help="Override the decision-agent model from TOML")
-    parser.add_argument("--provider", default=None,
-                        choices=["openai", "xai", "google", "anthropic", "bedrock", "modal", "together", "ai_sandbox"],
-                        help="Override the decision-agent provider from TOML")
-    parser.add_argument("--base-url", help="Custom API base URL")
-    parser.add_argument("--seed", type=int, help="Random seed")
-    parser.add_argument("--scenario", help="Scenario name")
-    parser.add_argument("--days", type=int, help="Total simulation days")
-    parser.add_argument("--initial-cash", type=float, help="Initial cash")
-    parser.add_argument("--workspace", type=Path, help="Workspace base directory")
-    parser.add_argument("--quiet", action="store_true", help="Suppress verbose output")
-    parser.add_argument("--reasoning-effort",
-                        choices=["none", "low", "medium", "high", "xhigh", "max"],
-                        help="Reasoning effort for reasoning models (default: omitted)")
-    parser.add_argument("--temperature", type=float,
-                        help="Sampling temperature forwarded to the model (default: omitted)")
-    parser.add_argument("--top-p", type=float,
-                        help="Nucleus sampling probability forwarded to the model (default: omitted)")
-    parser.add_argument("--max-output-tokens", type=int,
-                        help="Maximum output tokens for each decision-agent call")
-    parser.add_argument("--timeout-seconds", type=float,
-                        help="Timeout for each decision-agent API call")
-    parser.add_argument("--continue-from", type=Path,
-                        help="Path to previous run directory to resume from")
-    parser.add_argument("--api-key", help="API key (overrides .env and environment)")
-    parser.add_argument("--api-key-env",
-                        help="Environment variable containing the decision-agent API key")
-    parser.add_argument("--label",
-                        help="Variant tag stored in config.json and shown on the dashboard "
-                             "(e.g. 'leads_x1.25'). Lets multiple config variants be "
-                             "distinguished without forking the run_id scheme.")
-    args = parser.parse_args()
-
-    file_config = load_experiment_config(args.config)
-    experiment = file_config.experiment
-    decision = file_config.decision_agent
-    resolved_provider = args.provider or decision.provider
-    provider_was_overridden = args.provider is not None and args.provider != decision.provider
-    resolved_base_url = args.base_url
-    if resolved_base_url is None:
-        resolved_base_url = (
-            default_base_url(resolved_provider)
-            if provider_was_overridden
-            else decision.base_url
-        )
-    resolved_api_key_env = args.api_key_env
-    if resolved_api_key_env is None:
-        resolved_api_key_env = (
-            default_api_key_env(resolved_provider)
-            if provider_was_overridden
-            else decision.api_key_env
-        )
-
-    runner = BashAgentRunner(
-        model=args.model or decision.model,
-        provider=resolved_provider,
-        base_url=resolved_base_url,
-        api_key=args.api_key,
-        api_key_env=resolved_api_key_env,
-        api_key_required=decision.api_key_required,
-        seed=args.seed if args.seed is not None else experiment.seed,
-        scenario=args.scenario or experiment.scenario,
-        total_days=args.days if args.days is not None else experiment.days,
-        initial_cash=(
-            args.initial_cash if args.initial_cash is not None else experiment.initial_cash
-        ),
-        workspace_base=args.workspace or Path(experiment.workspace),
-        reasoning_effort=(
-            args.reasoning_effort
-            if args.reasoning_effort is not None
-            else decision.reasoning_effort
-        ),
-        temperature=args.temperature if args.temperature is not None else decision.temperature,
-        top_p=args.top_p if args.top_p is not None else decision.top_p,
-        max_output_tokens=(
-            args.max_output_tokens
-            if args.max_output_tokens is not None
-            else decision.max_output_tokens
-        ),
-        timeout_seconds=(
-            args.timeout_seconds
-            if args.timeout_seconds is not None
-            else decision.timeout_seconds
-        ),
-        input_cost_per_million=decision.input_cost_per_million,
-        output_cost_per_million=decision.output_cost_per_million,
-        simulator_llm_config=file_config.simulator_overrides(),
-        config_source=args.config,
-        continue_from=args.continue_from,
-        label=args.label if args.label is not None else experiment.label,
+    parser.add_argument(
+        "--resume",
+        help="Resume a run by run id or run directory using its saved configuration",
     )
-
-    result = runner.run(verbose=not args.quiet)
+    args = parser.parse_args(argv)
+    runner = (
+        _resume_runner(args.resume)
+        if args.resume
+        else _new_experiment_runner(DEFAULT_EXPERIMENT_CONFIG)
+    )
+    result = runner.run(verbose=True)
     print(f"\nResult: {result['outcome']}")
     print(f"Final Cash: ${result['final_cash']:,.0f}")
     print(f"Workspace: {result['workspace_dir']}")

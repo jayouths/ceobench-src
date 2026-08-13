@@ -21,6 +21,7 @@ import sys
 import time
 import urllib.request
 import urllib.error
+import argparse
 from pathlib import Path
 
 
@@ -438,9 +439,8 @@ def cmd_stop(args):
         print(json.dumps({"success": True, "message": "Server was not running"}))
 
 
-def main():
-    import argparse
-
+def _build_parser():
+    """构建 Agent 实际使用的 CLI 解析器，运行和文档生成共用同一份参数定义。"""
     parser = argparse.ArgumentParser(
         prog="novamind-operation",
         description="CEOBench Simulation CLI",
@@ -520,6 +520,34 @@ Examples:
 
     p = subparsers.add_parser("stop", help="Stop the simulation server")
     p.add_argument("--session", type=str, default=None, help="Session ID (default: latest)")
+
+    return parser, dict(subparsers.choices)
+
+
+def get_cli_docs() -> str:
+    """Render CLI documentation directly from the public parser."""
+    parser, commands = _build_parser()
+    sections = [
+        "# CEOBench CLI Reference",
+        "",
+        "```text",
+        parser.format_help().strip(),
+        "```",
+    ]
+    for name, command_parser in commands.items():
+        sections.extend([
+            "",
+            f"## `./novamind-operation {name}`",
+            "",
+            "```text",
+            command_parser.format_help().strip(),
+            "```",
+        ])
+    return "\n".join(sections) + "\n"
+
+
+def main():
+    parser, _ = _build_parser()
 
     args = parser.parse_args()
 

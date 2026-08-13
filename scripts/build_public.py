@@ -19,7 +19,7 @@ compiled ``_engine`` sits inside the zipapp at the archive root so that
 engine itself); agent-spawned child processes never see it.
 
 Usage:
-    uv run python scripts/build_public.py
+    uv run --frozen python scripts/build_public.py
 """
 
 import os
@@ -52,9 +52,9 @@ _ENGINE_MODULES = [
     "enterprise",
     "environment",
     "event_logger",
-    "llm",
+    "json_io",
+    "llm_provider",
     "llm_replay",
-    "novamind_cli",
     "personas",
     "server_entry",
     "shocks",
@@ -62,8 +62,7 @@ _ENGINE_MODULES = [
     "tools",
 ]
 
-# novamind_api subpackage used by the engine internally (docs_generator →
-# novamind_cli → novamind_api._client). Bundled as bytecode for engine use;
+# novamind_api subpackage used by the engine internally. Bundled as bytecode;
 # the *agent-readable* copy lives in docs/novamind_api/ as plain .py source.
 _ENGINE_API_MODULES = [
     "__init__",
@@ -157,6 +156,7 @@ def build():
     # ── Step 3: Build the novamind-operation zipapp ──
     step("3. Building novamind-operation zipapp")
     _build_zipapp()
+    _verify_zipapp_startup()
     print("✅ Wrote public/novamind-operation (zipapp)")
 
     # ── Step 4: Purge legacy artifacts left by the pre-zipapp layout ──
@@ -288,6 +288,21 @@ def _compile_pyc(src_file: Path, dst_file: Path, archive_name: str):
         dfile=archive_name,
         doraise=True,
         invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
+    )
+
+
+def _verify_zipapp_startup():
+    """Verify the packaged server entry and its top-level imports."""
+    # 源码测试无法发现打包清单遗漏，构建后必须直接校验真实 zipapp。
+    env = os.environ.copy()
+    env["NOVAMIND_SERVER_MODE"] = "1"
+    subprocess.run(
+        [str(PUBLIC_DIR / "novamind-operation"), "--help"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 

@@ -39,14 +39,16 @@ observable, noisy, and evolving market with delayed and coupled consequences.
 
 ### 🔑 Setup: Environment variables
 
-CEO-Bench has three LLM roles:
+CEO-Bench has two LLM roles in the current main experiment:
 
 - the benchmarked agent model
-- the social/macro post simulator model, Haiku 4.5 by default
-- the enterprise customer simulator model, Sonnet 4.5 by default
+- the social/macro post simulator model
 
-Pick one provider family and use provider-specific model identifiers in
-`src/saas_bench/config.py`.
+Enterprise negotiations use the benchmark's structured rules and do not call
+an enterprise customer LLM.
+
+Main experiments load all experiment and LLM settings from
+`experiments/experiment.toml`. There are no model defaults in `config.py`.
 
 **Option A: Amazon Bedrock for all models**
 
@@ -56,16 +58,14 @@ export AWS_SECRET_ACCESS_KEY="..."
 export AWS_REGION="us-east-2"
 ```
 
-```python
-agent_llm_provider: str = "bedrock"
-agent_llm_model: str = "anthropic.claude-fable-5"  # Claude Fable 5
-# or another Bedrock model id, e.g. "us.anthropic.claude-sonnet-4-6"
+```toml
+[models.decision_agent]
+provider = "bedrock"
+api_type = "anthropic_messages"
 
-social_post_llm_provider: str = "bedrock"
-social_post_llm_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-
-enterprise_llm_provider: str = "bedrock"
-enterprise_llm_model: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+[models.social_llm]
+provider = "bedrock"
+api_type = "anthropic_messages"
 ```
 
 **Option B: Anthropic direct API for all models**
@@ -74,33 +74,18 @@ enterprise_llm_model: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-```python
-agent_llm_provider: str = "anthropic"
-agent_llm_model: str = "claude-fable-5"  # Claude Fable 5
+```toml
+[models.decision_agent]
+provider = "anthropic"
+api_type = "anthropic_messages"
 
-social_post_llm_provider: str = "anthropic"
-social_post_llm_model: str = "claude-haiku-4-5"
-
-enterprise_llm_provider: str = "anthropic"
-enterprise_llm_model: str = "claude-sonnet-4-5"
+[models.social_llm]
+provider = "anthropic"
+api_type = "anthropic_messages"
 ```
 
-The LLM config fields are:
-
-- `agent_llm_provider`, `agent_llm_model`, `agent_llm_reasoning_effort`
-- `social_post_llm_provider`, `social_post_llm_model`
-- `enterprise_llm_provider`, `enterprise_llm_model`
-
-The bash-agent CLI `--provider`, `--model`, and `--reasoning-effort` flags only
-override the benchmarked agent for ad hoc runs. Simulator social/macro and
-enterprise LLMs use the simulator config and do not reuse the agent-only
-`--api-key`. If you change a simulator provider, also set the corresponding
-model to the identifier expected by that provider; model names are not
-translated automatically.
-
-For Claude Fable 5 agent runs, use `--provider anthropic --model claude-fable-5`
-for the direct Anthropic API, or `--provider bedrock --model anthropic.claude-fable-5`
-for Amazon Bedrock.
+See `experiments/README.md` for the supported provider/API combinations,
+model pricing tables, task-level overrides, and request extensions.
 
 
 ### 🎯 Option A: Evaluate any coding agent easily
@@ -124,11 +109,13 @@ customer groups, ad-channel productivity, R&D speed, competitor difficulty, etc.
 After editing, rebuild the public bundle. 
 
 ```bash
-uv sync                                  # one-time install
-uv run python scripts/build_public.py    # rebuild public/ artifact
+uv sync --frozen                                      # one-time install
+uv run --frozen python scripts/build_public.py        # rebuild public/ artifact
 ```
 
-Then generated `public/` directory would play the same role as the same way as **[zlab-princeton/run-ceobench](https://github.com/zlab-princeton/run-ceobench)** in Option A
+The generated `public/` directory is the local equivalent of
+**[zlab-princeton/run-ceobench](https://github.com/zlab-princeton/run-ceobench)**
+from Option A.
 
 **Tuning difficulty** You can modify configuration in `config.py` to adjust difficulty.
 
@@ -156,23 +143,26 @@ AWS_SECRET_ACCESS_KEY="..."
 AWS_REGION="us-east-2"
 ```
 
-Other providers read `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`,
-`XAI_API_KEY`, `TOGETHER_API_KEY`, or `MODAL_TOKEN_*`. No `NMDB_KEY` is needed:
-the SQLCipher key is embedded in the engine.
+Each TOML model section names its credential environment variable with
+`api_key_env`. No `NMDB_KEY` is needed: the SQLCipher key is embedded in the
+engine.
 
-If you configure simulator LLMs to use direct `anthropic` or `openai`, export
-`ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the shell before running. The
-simulator does not receive the agent-only `--api-key`.
+Local unauthenticated endpoints must set `api_key_required = false`.
 
 **3. Run.** `public/` ships prebuilt, so there is no build step:
 
 ```bash
-uv run --frozen python -m saas_bench.agents.bash_agent.run_test \
-    --config experiments/full.toml
+uv run --frozen python -m saas_bench.agents.bash_agent.run_test
 ```
 
-**4. Output.** Each run lands at `bash_agent_runs/run_<id>/`: `world.nmdb`
-(encrypted ledger), `config.json`, `checkpoint.json`, `agent_workspace/` (the
+The runner reads `experiments/experiment.toml`. CLI flags do not override
+experiment or model settings. To resume an existing run, pass only
+`--resume <run_id-or-directory>`; the runner then reads that run's saved
+`config.json` and ignores the current TOML.
+
+**4. Output.** Each run lands at `bash_agent_runs/run_<id>/`: `result.json`
+(machine-readable outcome), `world.nmdb` (encrypted ledger), `config.json`,
+`checkpoint.json`, `agent_workspace/` (the
 agent's sandbox, a fresh git repo with weekly commits), and `logs/` containing
 per-turn `raw_responses_<id>.jsonl` (model thinking + tool calls),
 `tool_results_<id>.jsonl` (tool calls + their outputs), and
@@ -180,7 +170,7 @@ per-turn `raw_responses_<id>.jsonl` (model thinking + tool calls),
 [docs/analyze_trajectory.md](docs/analyze_trajectory.md).
 
 If you edit `src/saas_bench/config.py`, rebuild the bundle the agent sees with
-`uv run python scripts/build_public.py` before launching.
+`uv run --frozen python scripts/build_public.py` before launching.
 
 
 
@@ -214,20 +204,18 @@ ceobench-src/
 ├── docs/
 │   └── analyze_trajectory.md          ← decrypt, schema + analysis guide
 ├── public_sources/                    ← human-written inputs to the public build
-│   ├── README.md, requirements.txt
-│   └── examples/{autoplay_loop,basic_strategy}.py
+│   └── README.md, requirements.txt
 ├── scripts/
 │   ├── build_public.py                ← canonical public-repo builder
-│   ├── start_fresh_sonnet_bash.sh     ← bash-agent launcher (Bedrock Sonnet)
-│   ├── start_fresh_gpt_bash.sh        ← bash-agent launcher (OpenAI GPT)
-│   └── resume_run.sh                  ← resume bash agent from checkpoint
+│   ├── generate_public_docs.py        ← public documentation generator
+│   └── decode_db.py                   ← decrypt run database for analysis
 └── src/saas_bench/                    ← simulator + bash agent
     ├── simulation.py, environment.py, shocks.py, event_logger.py
     ├── config.py                      ← all tunable constants
     ├── customer_llm.py, personas.py, enterprise.py
     ├── database.py, db_protection.py
     ├── api_server.py, server_entry.py, tools.py
-    ├── novamind_api/, novamind_cli.py, _public_cli.py
+    ├── novamind_api/, _public_cli.py
     └── agents/bash_agent/             ← canonical baseline harness
 ```
 
