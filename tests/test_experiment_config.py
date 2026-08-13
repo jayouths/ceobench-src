@@ -122,6 +122,31 @@ def test_smoke_config_is_limited_to_one_week():
     assert config.experiment.label == "smoke-qwen-coder"
 
 
+def test_deepseek_smoke_config_uses_current_models_and_prices():
+    config = load_experiment_config(
+        PROJECT_ROOT / "experiments/smoke-deepseek.toml"
+    )
+
+    assert config.experiment.days == 7
+    assert config.decision_agent.model == "deepseek-v4-pro"
+    assert config.decision_agent.reasoning_effort == "low"
+    assert config.decision_agent.api_key_env == "DEEPSEEK_API_KEY"
+    assert config.decision_agent.pricing["deepseek-v4-pro"] == {
+        "currency": "CNY",
+        "uncached_input_cost_per_million": 3.0,
+        "cached_input_cost_per_million": 0.025,
+        "output_cost_per_million": 6.0,
+    }
+    assert config.social_llm.model == "deepseek-v4-flash"
+    assert config.social_llm.reasoning_effort == "none"
+    assert config.social_llm.pricing["deepseek-v4-flash"] == {
+        "currency": "CNY",
+        "uncached_input_cost_per_million": 1.0,
+        "cached_input_cost_per_million": 0.02,
+        "output_cost_per_million": 2.0,
+    }
+
+
 def test_full_config_uses_benchmark_horizon():
     config = load_experiment_config(PROJECT_ROOT / "experiments/full.toml")
 
