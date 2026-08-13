@@ -55,9 +55,19 @@ API Key 不写入 TOML。`api_key_env` 保存环境变量名，实际密钥保�
 
 `pricing` 按服务端实际返回的模型名记录每百万 Token 价格。本地模型填写 `0.0`；可能发生模型 fallback 时，必须把所有可能返回的模型都写入价格表。服务端返回未知模型时实验直接失败。
 
+项目产物采用统一的内部用量口径：`input_tokens` 表示本次计费涉及的总输入量，`cached_tokens` 是其中命中缓存的部分，`output_tokens` 表示按输出单价计费的总输出量。推理 Token 通常已包含在 `output_tokens` 中，只单独记录用于分析，不重复计费。
+
+这不是所有供应商的原始 API 口径。OpenAI 和 DeepSeek 的返回基本可以直接映射；Anthropic 原始 `input_tokens` 不包含缓存读取量，兼容层会将缓存读取量合并进项目的 `input_tokens`，并同时记为 `cached_tokens`。未来接入 Gemini 原生 API 或其他 Provider 时，必须依据该供应商当时的官方计费说明单独适配，不能仅按字段名推断包含关系。
+
+TODO：当前价格模型尚未支持 Anthropic 独立的缓存写入价格及缓存期限档位。检测到 `cache_creation_input_tokens > 0` 时程序会直接报错，不会将其误算为普通输入成本；正式使用 Anthropic Prompt Caching 前必须先扩展价格配置和计费公式。
+
+计费时，未命中量 `input_tokens - cached_tokens` 使用 `uncached_input_cost_per_million`，命中量使用 `cached_input_cost_per_million`；输出按 `output_cost_per_million` 计算。所有金额只记录供应商实际结算币种，不在实验过程中换算汇率。
+
 ```toml
 [models.decision_agent.pricing."qwen3-coder:30b"]
-input_cost_per_million = 0.0
+currency = "CNY"
+uncached_input_cost_per_million = 0.0
+cached_input_cost_per_million = 0.0
 output_cost_per_million = 0.0
 ```
 

@@ -25,7 +25,8 @@ class EventLogEntry:
     event_type: str  # simulator, agent_action, llm_call, state_change, shock, outage, customer, etc.
     category: str    # More specific category within event_type
     details: Dict[str, Any]
-    cost_usd: Optional[float] = None  # LLM cost if applicable
+    cost_amount: Optional[float] = None
+    currency: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -44,7 +45,7 @@ class RunMetadata:
     end_time: Optional[str] = None
     final_cash: Optional[float] = None
     days_run: Optional[int] = None
-    total_llm_cost: Optional[float] = None
+    total_llm_cost_by_currency: Dict[str, float] = field(default_factory=dict)
     outcome: Optional[str] = None  # 'completed', 'bankrupt', 'budget_exceeded'
 
 
@@ -66,9 +67,10 @@ class EventLogger:
         seed: int,
         scenario: str,
         config: Dict[str, Any],
-        starting_llm_cost_usd: float = 0.0,
+        starting_llm_cost_by_currency: Optional[Dict[str, float]] = None,
         start_time: Optional[str] = None,
     ):
+        self._file = None
         self.run_id = run_id
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -84,10 +86,13 @@ class EventLogger:
             config=config
         )
 
-        if starting_llm_cost_usd < 0:
-            raise ValueError("starting_llm_cost_usd must be non-negative")
+        starting_costs = dict(starting_llm_cost_by_currency or {})
+        if any(amount < 0 for amount in starting_costs.values()):
+            raise ValueError("starting_llm_cost_by_currency must be non-negative")
         # 日期必须由事件发生处显式传入，避免并发和断点恢复后读到过期状态。
-        self._accumulated_llm_cost_usd = float(starting_llm_cost_usd)
+        self._accumulated_llm_cost_by_currency = {
+            str(currency): float(amount) for currency, amount in starting_costs.items()
+        }
         self._event_count = 0
 
         # Open JSONL file for streaming writes
@@ -301,10 +306,15 @@ class EventLogger:
     # LLM Calls (Simulation-side)
     # =========================================================================
 
-    def log_llm_call(self, day: int, purpose: str, model: str, input_tokens: int,
-                    output_tokens: int, cost_usd: float, details: Optional[Dict] = None):
+    def log_llm_call(
+        self, day: int, purpose: str, model: str, input_tokens: int,
+        cached_tokens: int, output_tokens: int, cost_amount: float, currency: str,
+        details: Optional[Dict] = None,
+    ):
         """Log a simulation-side LLM call (customer simulation, negotiations, etc.)."""
-        self._accumulated_llm_cost_usd += cost_usd
+        self._accumulated_llm_cost_by_currency[currency] = (
+            self._accumulated_llm_cost_by_currency.get(currency, 0.0) + cost_amount
+        )
 
         self._write_event(EventLogEntry(
             timestamp=self._now(),
@@ -314,10 +324,12 @@ class EventLogger:
             details={
                 "model": model,
                 "input_tokens": input_tokens,
+                "cached_tokens": cached_tokens,
                 "output_tokens": output_tokens,
                 **(details or {})
             },
-            cost_usd=cost_usd
+            cost_amount=cost_amount,
+            currency=currency,
         ))
 
     # =========================================================================
@@ -385,7 +397,9 @@ class EventLogger:
         self.metadata.end_time = self._now()
         self.metadata.final_cash = final_cash
         self.metadata.days_run = days_run
-        self.metadata.total_llm_cost = self._accumulated_llm_cost_usd
+        self.metadata.total_llm_cost_by_currency = dict(
+            self._accumulated_llm_cost_by_currency
+        )
         self.metadata.outcome = outcome
 
         self._write_event(EventLogEntry(
@@ -397,7 +411,7 @@ class EventLogger:
                 "final_cash": final_cash,
                 "days_run": days_run,
                 "outcome": outcome,
-                "total_llm_cost": self._accumulated_llm_cost_usd
+                "total_llm_cost_by_currency": self._accumulated_llm_cost_by_currency
             }
         ))
 
@@ -416,7 +430,7 @@ class EventLogger:
 
     def close(self):
         """Close the JSONL file handle."""
-        if self._file and not self._file.closed:
+        if self._file is not None and not self._file.closed:
             self._file.flush()
             self._file.close()
 
@@ -451,7 +465,9 @@ class EventLogger:
             seed=metadata['seed'],
             scenario=metadata['scenario'],
             config=metadata['config'],
-            starting_llm_cost_usd=metadata.get('total_llm_cost') or 0.0,
+            starting_llm_cost_by_currency=(
+                metadata.get('total_llm_cost_by_currency') or {}
+            ),
         )
         logger.metadata = RunMetadata(**metadata)
         return logger

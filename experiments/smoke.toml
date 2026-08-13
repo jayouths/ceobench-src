@@ -25,9 +25,11 @@ top_p = 0.8                              # 核采样阈值
 max_output_tokens = 16384                # 单次响应最大输出 Token
 timeout_seconds = 600                    # 单次请求超时，单位：秒
 
-# Token 单价表。表名必须使用服务端实际返回的模型名；单位为美元/百万 Token。
+# Token 单价表。表名必须使用服务端实际返回的模型名；金额使用供应商结算币种。
 [models.decision_agent.pricing."qwen3-coder:30b"]
-input_cost_per_million = 0.0             # 输入单价；本地模型填 0
+currency = "CNY"                        # 三位大写币种代码；本地模型仅用于统一记录
+uncached_input_cost_per_million = 0.0    # 未命中缓存的输入单价；本地模型填 0
+cached_input_cost_per_million = 0.0      # 命中缓存的输入单价；本地模型填 0
 output_cost_per_million = 0.0            # 输出单价；本地模型填 0
 
 # 社交环境 LLM：生成客户帖子、宏观帖子、竞品帖子，并评估 Agent 帖子。
@@ -43,7 +45,9 @@ max_output_tokens = 1000                 # 任务未覆盖时的默认输出上�
 timeout_seconds = 600                    # 单次请求超时，单位：秒
 
 [models.social_llm.pricing."qwen3-coder:30b"]
-input_cost_per_million = 0.0             # 输入单价；本地模型填 0
+currency = "CNY"                        # 三位大写币种代码；本地模型仅用于统一记录
+uncached_input_cost_per_million = 0.0    # 未命中缓存的输入单价；本地模型填 0
+cached_input_cost_per_million = 0.0      # 命中缓存的输入单价；本地模型填 0
 output_cost_per_million = 0.0            # 输出单价；本地模型填 0
 
 [models.social_llm.tasks.customer_post]  # 普通客户社交媒体帖子

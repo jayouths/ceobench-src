@@ -17,11 +17,11 @@ from .llm_provider import (
     TextLLMResult,
     call_text_model,
     create_llm_client,
-    model_token_cost_usd,
+    model_token_cost,
 )
 from .database import (
     get_customer_persona, get_group_characteristics, get_world_context,
-    add_social_media_post, add_notification
+    add_api_cost, add_social_media_post, add_notification
 )
 
 
@@ -126,6 +126,7 @@ class CustomerLLMResponse:
     sentiment: Optional[str] = None  # 'positive', 'neutral', 'negative' for posts
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_tokens: int = 0
     model: Optional[str] = None
 
 
@@ -225,21 +226,26 @@ class CustomerSimulator:
         self,
         input_tokens: int,
         output_tokens: int,
+        cached_tokens: int,
         model: str = None,
         purpose: Optional[str] = None,
-    ) -> float:
+    ):
         """Calculate cost based on model used."""
         if not model:
             raise ValueError("model is required for simulator LLM cost accounting")
         used_model = model
-        return model_token_cost_usd(
+        return model_token_cost(
             used_model,
             input_tokens,
             output_tokens,
+            cached_tokens,
             self.config.social_post_llm_pricing,
         )
 
-    def _log_cost(self, day: int, purpose: str, input_tokens: int, output_tokens: int, model: str = None):
+    def _log_cost(
+        self, day: int, purpose: str, input_tokens: int, output_tokens: int,
+        cached_tokens: int = 0, model: str = None,
+    ):
         """Log API cost to database and event logger."""
         if not model:
             raise ValueError("model is required for simulator LLM cost logging")
@@ -247,13 +253,21 @@ class CustomerSimulator:
         cost = self._calculate_cost(
             input_tokens,
             output_tokens,
+            cached_tokens,
             model=used_model,
             purpose=purpose,
         )
-        self.conn.execute("""
-            INSERT INTO api_costs (day, model, purpose, input_tokens, output_tokens, cost_usd)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (day, used_model, purpose, input_tokens, output_tokens, cost))
+        add_api_cost(
+            self.conn,
+            day,
+            used_model,
+            purpose,
+            input_tokens,
+            cached_tokens,
+            output_tokens,
+            cost.amount,
+            cost.currency,
+        )
         self.conn.commit()
 
         # Log to event logger if available
@@ -263,8 +277,10 @@ class CustomerSimulator:
                 purpose=purpose,
                 model=used_model,
                 input_tokens=input_tokens,
+                cached_tokens=cached_tokens,
                 output_tokens=output_tokens,
-                cost_usd=cost
+                cost_amount=cost.amount,
+                currency=cost.currency,
             )
 
     # =========================================================================
@@ -535,20 +551,25 @@ Output ONLY the post text, nothing else."""
         post_text = response.text
         input_tokens = response.input_tokens
         output_tokens = response.output_tokens
+        cached_tokens = response.cached_tokens
 
         # Debug: Log if empty response
         if not post_text:
             print(f"[DEBUG] Empty post for customer {customer_id}, group {group_id}, sentiment {sentiment}")
 
         if not _skip_log_cost:
-            self._log_cost(day, 'customer_social_post', input_tokens, output_tokens, model=response.model)
+            self._log_cost(
+                day, 'customer_social_post', input_tokens, output_tokens,
+                cached_tokens=cached_tokens, model=response.model,
+            )
 
         return CustomerLLMResponse(
             text=post_text,
             model=response.model,
             sentiment=sentiment,
             input_tokens=input_tokens,
-            output_tokens=output_tokens
+            output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
         )
 
 # V2.1: Churn reason message generation
@@ -659,7 +680,7 @@ def judge_agent_social_post(
         reply_to_content: If replying, the original customer post content
 
     Returns:
-        (effect: float, reasoning: str, input_tokens: int, output_tokens: int)
+        (effect, reasoning, input_tokens, output_tokens, cached_tokens, served_model)
     """
     import re
 
@@ -670,8 +691,8 @@ def judge_agent_social_post(
         cached = _llm_replay.get_cache().get_judge_by_content(post_content, group_id)
         if cached is not None:
             effect, reasoning = cached
-            return effect, reasoning, 0, 0, config.social_post_llm_model
-        return 0.0, "", 0, 0, config.social_post_llm_model
+            return effect, reasoning, 0, 0, 0, config.social_post_llm_model
+        return 0.0, "", 0, 0, 0, config.social_post_llm_model
 
     # Build recent posts context (up to 10, with original post for replies)
     history_str = ""
@@ -749,7 +770,7 @@ REASON: <one sentence why>"""
             effect = float(fallback.group(1))
     effect = max(-1.0, min(1.0, effect))
 
-    return effect, text, input_tokens, output_tokens, response.model
+    return effect, text, input_tokens, output_tokens, response.cached_tokens, response.model
 
 
 def generate_customer_reply_to_agent(
@@ -777,7 +798,7 @@ def generate_customer_reply_to_agent(
         reply_to_content: If the agent was replying to a customer post, that post's content
 
     Returns:
-        (reply_text, input_tokens, output_tokens, served_model)
+        (reply_text, input_tokens, output_tokens, cached_tokens, served_model)
     """
     # LLM-replay cache: return the source's recorded reply text if available.
     from . import llm_replay as _llm_replay
@@ -785,7 +806,7 @@ def generate_customer_reply_to_agent(
         cached = _llm_replay.get_cache().get_reply_by_content(
             agent_post_content, group_id
         )
-        return (cached or ""), 0, 0, config.social_post_llm_model
+        return (cached or ""), 0, 0, 0, config.social_post_llm_model
 
     sentiment_desc = "strongly positive" if effect_score > 0 else "strongly negative"
 
@@ -813,4 +834,7 @@ Your reaction is {sentiment_desc} (score: {effect_score:.2f}). Write ONLY the re
     # Clean up any quotes/formatting artifacts
     text = text.strip('"').strip("'").strip()
 
-    return text, response.input_tokens, response.output_tokens, response.model
+    return (
+        text, response.input_tokens, response.output_tokens,
+        response.cached_tokens, response.model,
+    )

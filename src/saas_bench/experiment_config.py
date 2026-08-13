@@ -53,7 +53,7 @@ class ModelSettings:
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     timeout_seconds: float = 600.0
-    pricing: dict[str, dict[str, float]] = field(default_factory=dict)
+    pricing: dict[str, dict[str, Any]] = field(default_factory=dict)
     request_options: dict[str, Any] = field(default_factory=dict)
     tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -308,23 +308,43 @@ def _load_request_options(
 
 def _load_pricing(
     value: Any, section: str, configured_model: str
-) -> dict[str, dict[str, float]]:
+) -> dict[str, dict[str, Any]]:
     raw = _required_table(value, f"{section}.pricing")
-    result: dict[str, dict[str, float]] = {}
+    result: dict[str, dict[str, Any]] = {}
     for model, raw_price in raw.items():
         price_section = f"{section}.pricing.{model}"
         price = dict(_table(raw_price, price_section))
-        keys = {"input_cost_per_million", "output_cost_per_million"}
+        keys = {
+            "currency",
+            "uncached_input_cost_per_million",
+            "cached_input_cost_per_million",
+            "output_cost_per_million",
+        }
         _reject_unknown(price, keys, price_section)
         missing = sorted(keys - set(price))
         if missing:
             raise ValueError(
                 f"{price_section} must explicitly configure: {', '.join(missing)}"
             )
-        for key in keys:
+        currency = price["currency"]
+        if (
+            not isinstance(currency, str)
+            or len(currency) != 3
+            or not currency.isascii()
+            or not currency.isalpha()
+            or currency != currency.upper()
+        ):
+            raise ValueError(
+                f"{price_section}.currency must be an uppercase three-letter code"
+            )
+        numeric_keys = keys - {"currency"}
+        for key in numeric_keys:
             if not isinstance(price[key], (int, float)) or price[key] < 0:
                 raise ValueError(f"{price_section}.{key} must be non-negative")
-        result[str(model)] = {key: float(price[key]) for key in keys}
+        result[str(model)] = {
+            "currency": currency,
+            **{key: float(price[key]) for key in numeric_keys},
+        }
     if configured_model not in result:
         raise ValueError(
             f"{section}.pricing must include configured model {configured_model!r}"

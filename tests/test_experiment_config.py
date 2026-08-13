@@ -29,8 +29,9 @@ from saas_bench.server_entry import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EMPTY_ENVIRONMENT_LLM_USAGE = {
     "input_tokens": 0,
+    "cached_tokens": 0,
     "output_tokens": 0,
-    "cost_usd": 0.0,
+    "cost_by_currency": {},
     "by_purpose": {},
 }
 
@@ -63,7 +64,12 @@ def test_experiment_config_loads_all_experiment_and_model_fields():
     assert config.decision_agent.model == "qwen3-coder:30b"
     assert config.decision_agent.reasoning_effort is None
     assert config.decision_agent.temperature == pytest.approx(0.7)
-    assert config.decision_agent.pricing["qwen3-coder:30b"]["input_cost_per_million"] == 0.0
+    assert config.decision_agent.pricing["qwen3-coder:30b"] == {
+        "currency": "CNY",
+        "uncached_input_cost_per_million": 0.0,
+        "cached_input_cost_per_million": 0.0,
+        "output_cost_per_million": 0.0,
+    }
     assert config.social_llm.model == "qwen3-coder:30b"
     assert config.social_llm.base_url == "http://localhost:11434/v1"
     assert config.social_llm.max_output_tokens == 1000
@@ -132,7 +138,7 @@ def test_full_config_uses_benchmark_horizon():
         ),
         (
             "[experiment]\nmax_decision_turns_per_batch = 100\nmax_invalid_responses_per_turn = 3\n"
-            "[models.decision_agent]\nprovider = 'openai'\napi_type = 'openai_responses'\nmodel = 'decision'\nmax_output_tokens = 100\napi_key_required = false\n[models.decision_agent.pricing.decision]\ninput_cost_per_million = 0\noutput_cost_per_million = 0\n",
+            "[models.decision_agent]\nprovider = 'openai'\napi_type = 'openai_responses'\nmodel = 'decision'\nmax_output_tokens = 100\napi_key_required = false\n[models.decision_agent.pricing.decision]\ncurrency = 'USD'\nuncached_input_cost_per_million = 0\ncached_input_cost_per_million = 0\noutput_cost_per_million = 0\n",
             "models.social_llm must be explicitly configured",
         ),
     ],
@@ -310,7 +316,7 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_pat
     run_dir = tmp_path / "run_existing"
     run_dir.mkdir()
     (run_dir / "config.json").write_text(json.dumps({
-        "format_version": 3,
+        "format_version": 4,
         "run_id": "existing",
         "agent_type": "bash_agent",
         "model": "original-model",
@@ -323,7 +329,9 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_pat
         "max_output_tokens": 100,
         "timeout_seconds": 30.0,
         "pricing": {"original-model": {
-            "input_cost_per_million": 1.0,
+            "currency": "USD",
+            "uncached_input_cost_per_million": 1.0,
+            "cached_input_cost_per_million": 0.1,
             "output_cost_per_million": 2.0,
         }},
         "request_options": {},
@@ -348,7 +356,7 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_pat
     assert runner.model == "original-model"
     assert runner.api_type == "openai_responses"
     assert runner.temperature == pytest.approx(0.7)
-    assert runner.pricing["original-model"]["input_cost_per_million"] == pytest.approx(1.0)
+    assert runner.pricing["original-model"]["uncached_input_cost_per_million"] == pytest.approx(1.0)
     assert runner.workspace_dir == run_dir.resolve()
 
 
@@ -555,7 +563,7 @@ def _checkpoint_runner(tmp_path):
     runner.seed = 42
     runner.scenario = "default"
     runner.agent = None
-    runner.total_decision_agent_cost_usd = 0.0
+    runner.total_decision_agent_cost_by_currency = {}
     return runner
 
 
@@ -604,28 +612,33 @@ def test_environment_llm_usage_is_summarized_by_purpose():
             model TEXT NOT NULL,
             purpose TEXT NOT NULL,
             input_tokens INTEGER NOT NULL,
+            cached_tokens INTEGER NOT NULL,
             output_tokens INTEGER NOT NULL,
-            cost_usd REAL NOT NULL
+            cost_amount REAL NOT NULL,
+            currency TEXT NOT NULL
         )
     """)
-    add_api_cost(conn, 7, "social", "customer_social_post", 11, 7, 0.01)
-    add_api_cost(conn, 14, "social", "customer_social_post", 13, 5, 0.02)
-    add_api_cost(conn, 14, "social", "macro_social_post", 17, 3, 0.03)
+    add_api_cost(conn, 7, "social", "customer_social_post", 11, 4, 7, 0.01, "CNY")
+    add_api_cost(conn, 14, "social", "customer_social_post", 13, 5, 5, 0.02, "CNY")
+    add_api_cost(conn, 14, "social", "macro_social_post", 17, 6, 3, 0.03, "CNY")
 
     assert get_api_usage_summary(conn) == {
         "input_tokens": 41,
+        "cached_tokens": 15,
         "output_tokens": 15,
-        "cost_usd": pytest.approx(0.06),
+        "cost_by_currency": {"CNY": pytest.approx(0.06)},
         "by_purpose": {
             "customer_social_post": {
                 "input_tokens": 24,
+                "cached_tokens": 9,
                 "output_tokens": 12,
-                "cost_usd": pytest.approx(0.03),
+                "cost_by_currency": {"CNY": pytest.approx(0.03)},
             },
             "macro_social_post": {
                 "input_tokens": 17,
+                "cached_tokens": 6,
                 "output_tokens": 3,
-                "cost_usd": pytest.approx(0.03),
+                "cost_by_currency": {"CNY": pytest.approx(0.03)},
             },
         },
     }
@@ -634,13 +647,15 @@ def test_environment_llm_usage_is_summarized_by_purpose():
 def test_environment_llm_usage_rejects_inconsistent_totals():
     usage = {
         "input_tokens": 2,
+        "cached_tokens": 0,
         "output_tokens": 1,
-        "cost_usd": 0.01,
+        "cost_by_currency": {"CNY": 0.01},
         "by_purpose": {
             "customer_social_post": {
                 "input_tokens": 1,
+                "cached_tokens": 0,
                 "output_tokens": 1,
-                "cost_usd": 0.01,
+                "cost_by_currency": {"CNY": 0.01},
             }
         },
     }
@@ -658,18 +673,21 @@ def test_result_includes_environment_llm_usage_from_checkpoint(tmp_path):
     runner._harness_result_fields = lambda: {}
     environment_usage = {
         "input_tokens": 41,
+        "cached_tokens": 15,
         "output_tokens": 15,
-        "cost_usd": 0.06,
+        "cost_by_currency": {"CNY": 0.06},
         "by_purpose": {
             "customer_social_post": {
                 "input_tokens": 24,
+                "cached_tokens": 9,
                 "output_tokens": 12,
-                "cost_usd": 0.03,
+                "cost_by_currency": {"CNY": 0.03},
             },
             "macro_social_post": {
                 "input_tokens": 17,
+                "cached_tokens": 6,
                 "output_tokens": 3,
-                "cost_usd": 0.03,
+                "cost_by_currency": {"CNY": 0.03},
             },
         },
     }
@@ -683,7 +701,7 @@ def test_result_includes_environment_llm_usage_from_checkpoint(tmp_path):
                 "output_tokens": 20,
                 "cached_tokens": 10,
                 "reasoning_tokens": 5,
-                "decision_cost_usd": 0.1,
+                "decision_cost_by_currency": {"CNY": 0.1},
             },
             "environment_llm": environment_usage,
         },
@@ -693,7 +711,8 @@ def test_result_includes_environment_llm_usage_from_checkpoint(tmp_path):
 
     assert result["environment_llm_input_tokens"] == 41
     assert result["environment_llm_output_tokens"] == 15
-    assert result["environment_llm_cost_usd"] == pytest.approx(0.06)
+    assert result["environment_llm_cached_tokens"] == 15
+    assert result["environment_llm_cost_by_currency"] == {"CNY": pytest.approx(0.06)}
     assert result["environment_llm_usage_by_purpose"] == environment_usage["by_purpose"]
 
 
@@ -1119,7 +1138,9 @@ def test_simulator_settings_survive_environment_and_session_round_trip(monkeypat
         "social_post_llm_max_tokens": 123,
         "social_post_llm_timeout_seconds": 45.0,
         "social_post_llm_pricing": {"social-test": {
-            "input_cost_per_million": 0.0,
+            "currency": "USD",
+            "uncached_input_cost_per_million": 0.0,
+            "cached_input_cost_per_million": 0.0,
             "output_cost_per_million": 0.0,
         }},
     }
@@ -1238,7 +1259,9 @@ def test_customer_social_post_preserves_served_model_and_logs_cost(
         social_post_llm_max_tokens=100,
         social_post_llm_pricing={
             "social-test": {
-                "input_cost_per_million": 1.0,
+                "currency": "CNY",
+                "uncached_input_cost_per_million": 1.0,
+                "cached_input_cost_per_million": 0.1,
                 "output_cost_per_million": 2.0,
             }
         },
@@ -1275,7 +1298,8 @@ def test_customer_social_post_preserves_served_model_and_logs_cost(
     ).fetchone()
     cost = conn.execute(
         """
-        SELECT model, purpose, input_tokens, output_tokens, cost_usd
+        SELECT model, purpose, input_tokens, cached_tokens, output_tokens,
+               cost_amount, currency
         FROM api_costs ORDER BY id DESC LIMIT 1
         """
     ).fetchone()
@@ -1284,8 +1308,10 @@ def test_customer_social_post_preserves_served_model_and_logs_cost(
         "model": "social-test",
         "purpose": "customer_social_post",
         "input_tokens": 11,
+        "cached_tokens": 0,
         "output_tokens": 7,
-        "cost_usd": pytest.approx(0.000025),
+        "cost_amount": pytest.approx(0.000025),
+        "currency": "CNY",
     }
 
 
@@ -1309,19 +1335,25 @@ def test_successful_zero_token_social_call_is_still_logged(make_initialized_sim)
             "text": "macro post",
             "success": True,
             "input_tokens": 0,
+            "cached_tokens": 0,
             "output_tokens": 0,
             "model": "local-model",
         }],
         {},
     )
 
-    assert calls == [((7, "macro_social_post", 0, 0), {"model": "local-model"})]
+    assert calls == [((7, "macro_social_post", 0, 0), {
+        "cached_tokens": 0,
+        "model": "local-model",
+    })]
 
 
 def test_local_model_cost_is_zero_when_explicitly_configured():
     config = BenchmarkConfig(
         social_post_llm_pricing={"qwen3-coder:30b": {
-            "input_cost_per_million": 0.0,
+            "currency": "CNY",
+            "uncached_input_cost_per_million": 0.0,
+            "cached_input_cost_per_million": 0.0,
             "output_cost_per_million": 0.0,
         }},
     )
@@ -1330,9 +1362,12 @@ def test_local_model_cost_is_zero_when_explicitly_configured():
         config=config,
     )
 
-    assert simulator._calculate_cost(
-        1_000_000, 1_000_000, model="qwen3-coder:30b", purpose="customer_social_post"
-    ) == 0.0
+    cost = simulator._calculate_cost(
+        1_000_000, 1_000_000, 0,
+        model="qwen3-coder:30b", purpose="customer_social_post"
+    )
+    assert cost.amount == 0.0
+    assert cost.currency == "CNY"
 
 
 def test_unknown_model_cost_requires_explicit_pricing():
@@ -1343,7 +1378,7 @@ def test_unknown_model_cost_requires_explicit_pricing():
 
     with pytest.raises(ValueError, match="No token pricing configured"):
         simulator._calculate_cost(
-            1, 1, model="unknown-model", purpose="customer_social_post"
+            1, 1, 0, model="unknown-model", purpose="customer_social_post"
         )
 
 
@@ -1352,15 +1387,19 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
     runner.model = "requested"
     runner.pricing = {
         "requested": {
-            "input_cost_per_million": 1.0,
+            "currency": "USD",
+            "uncached_input_cost_per_million": 1.0,
+            "cached_input_cost_per_million": 0.1,
             "output_cost_per_million": 2.0,
         },
         "served": {
-            "input_cost_per_million": 3.0,
+            "currency": "CNY",
+            "uncached_input_cost_per_million": 3.0,
+            "cached_input_cost_per_million": 0.25,
             "output_cost_per_million": 4.0,
         },
     }
-    runner.total_decision_agent_cost_usd = 0.0
+    runner.total_decision_agent_cost_by_currency = {}
     runner.response_log_file = tmp_path / "responses.jsonl"
     runner.agent = SimpleNamespace(
         last_input_tokens=1_000_000,
@@ -1376,8 +1415,11 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
     assert entry["served_model"] == "served"
     assert entry["cached_tokens"] == 250_000
     assert entry["reasoning_tokens"] == 125_000
-    assert entry["cost_usd"] == pytest.approx(7.0)
-    assert runner.total_decision_agent_cost_usd == pytest.approx(7.0)
+    assert entry["cost_amount"] == pytest.approx(6.3125)
+    assert entry["currency"] == "CNY"
+    assert runner.total_decision_agent_cost_by_currency == {
+        "CNY": pytest.approx(6.3125)
+    }
 
 
 def test_decision_agent_request_builder_uses_config_without_hidden_defaults():
@@ -1760,8 +1802,10 @@ def test_event_logger_records_each_explicit_event_day(tmp_path):
         purpose="customer_social_post",
         model="test-model",
         input_tokens=10,
+        cached_tokens=4,
         output_tokens=5,
-        cost_usd=0.25,
+        cost_amount=0.25,
+        currency="CNY",
     )
     logger.save_incremental()
 
@@ -1792,21 +1836,23 @@ def test_event_logger_continues_llm_cost_from_restored_database_total(tmp_path):
         42,
         "default",
         {},
-        starting_llm_cost_usd=1.25,
+        starting_llm_cost_by_currency={"CNY": 1.25},
     )
     logger.log_llm_call(
         day=8,
         purpose="customer_negotiation",
         model="test-model",
         input_tokens=10,
+        cached_tokens=4,
         output_tokens=5,
-        cost_usd=0.75,
+        cost_amount=0.75,
+        currency="CNY",
     )
     logger.log_run_end(day=8, final_cash=100.0, days_run=8, outcome="completed")
     logger.save()
 
     metadata = json.loads(logger.meta_file.read_text())
-    assert metadata["total_llm_cost"] == pytest.approx(2.0)
+    assert metadata["total_llm_cost_by_currency"] == {"CNY": pytest.approx(2.0)}
 
 
 def test_event_logger_accepts_structured_agent_action_result(tmp_path):
@@ -2394,7 +2440,7 @@ def test_workspace_restore_removes_changes_after_checkpoint(tmp_path):
 def test_resume_rebuilds_week_commit_cursor_from_checkpoint_day():
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.agent = None
-    runner.total_decision_agent_cost_usd = 0.0
+    runner.total_decision_agent_cost_by_currency = {}
     runner._last_committed_week = 0
     checkpoint = {
         "day": 35,
@@ -2405,7 +2451,7 @@ def test_resume_rebuilds_week_commit_cursor_from_checkpoint_day():
                 "output_tokens": 0,
                 "cached_tokens": 0,
                 "reasoning_tokens": 0,
-                "decision_cost_usd": 0.0,
+                "decision_cost_by_currency": {},
             }
         },
     }
@@ -2529,7 +2575,7 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
     runner.continue_from = None
     runner.total_days = 7
     runner.max_decision_turns_per_batch = 1
-    runner.total_decision_agent_cost_usd = 0.0
+    runner.total_decision_agent_cost_by_currency = {}
     runner.run_id = "turn-limit"
     runner.seed = 42
     runner.scenario = "default"
@@ -2573,7 +2619,7 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
                     "output_tokens": 0,
                     "cached_tokens": 0,
                     "reasoning_tokens": 0,
-                    "decision_cost_usd": 0.0,
+                    "decision_cost_by_currency": {},
                 },
                 "environment_llm": EMPTY_ENVIRONMENT_LLM_USAGE,
             },
@@ -2608,7 +2654,7 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
     assert result["decision_agent_reasoning_tokens"] == 0
     assert result["environment_llm_input_tokens"] == 0
     assert result["environment_llm_output_tokens"] == 0
-    assert result["environment_llm_cost_usd"] == 0.0
+    assert result["environment_llm_cost_by_currency"] == {}
     assert result["environment_llm_usage_by_purpose"] == {}
     assert checkpoint_calls == [
         (0, {

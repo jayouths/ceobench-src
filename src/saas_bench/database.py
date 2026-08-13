@@ -663,8 +663,10 @@ def init_database(db_path: Path) -> sqlite3.Connection:
             model TEXT NOT NULL,
             purpose TEXT NOT NULL,  -- 'env_llm' or 'agent'
             input_tokens INTEGER NOT NULL,
+            cached_tokens INTEGER NOT NULL,
             output_tokens INTEGER NOT NULL,
-            cost_usd REAL NOT NULL
+            cost_amount REAL NOT NULL,
+            currency TEXT NOT NULL
         );
 
         -- Social media posts (public customer feedback)
@@ -1052,6 +1054,30 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_predictions_metric ON predictions(metric, horizon_days);
     """)
 
+    # 成本表只保存实验元数据。旧表把所有金额误标为 USD，不能与新原币口径混用。
+    api_cost_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(api_costs)").fetchall()
+    }
+    expected_api_cost_columns = {
+        "id", "day", "model", "purpose", "input_tokens", "cached_tokens",
+        "output_tokens", "cost_amount", "currency",
+    }
+    if api_cost_columns != expected_api_cost_columns:
+        conn.execute("DROP TABLE api_costs")
+        conn.execute("""
+            CREATE TABLE api_costs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                day INTEGER NOT NULL,
+                model TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                cached_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                cost_amount REAL NOT NULL,
+                currency TEXT NOT NULL
+            )
+        """)
+
     # Migration: add 95% CI bound columns to existing predictions tables.
     for col in ('predicted_lower', 'predicted_upper'):
         try:
@@ -1216,19 +1242,44 @@ def set_global_state(conn: sqlite3.Connection, key: str, value: float):
     )
 
 
-def add_api_cost(conn: sqlite3.Connection, day: int, model: str, purpose: str,
-                 input_tokens: int, output_tokens: int, cost_usd: float):
+def add_api_cost(
+    conn: sqlite3.Connection,
+    day: int,
+    model: str,
+    purpose: str,
+    input_tokens: int,
+    cached_tokens: int,
+    output_tokens: int,
+    cost_amount: float,
+    currency: str,
+):
     """Track API cost for budget monitoring."""
+    if cached_tokens < 0 or cached_tokens > input_tokens:
+        raise ValueError("cached_tokens must be between zero and input_tokens")
+    if input_tokens < 0 or output_tokens < 0:
+        raise ValueError("token counts must be non-negative")
+    if cost_amount < 0:
+        raise ValueError("cost_amount must be non-negative")
+    if not currency:
+        raise ValueError("currency must be non-empty")
     conn.execute("""
-        INSERT INTO api_costs (day, model, purpose, input_tokens, output_tokens, cost_usd)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (day, model, purpose, input_tokens, output_tokens, cost_usd))
+        INSERT INTO api_costs (
+            day, model, purpose, input_tokens, cached_tokens, output_tokens,
+            cost_amount, currency
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        day, model, purpose, input_tokens, cached_tokens, output_tokens,
+        cost_amount, currency,
+    ))
 
 
-def get_total_api_cost(conn: sqlite3.Connection) -> float:
-    """Get total API cost across all days."""
-    result = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM api_costs").fetchone()
-    return float(result[0])
+def get_total_api_costs(conn: sqlite3.Connection) -> dict[str, float]:
+    """Get simulator-side API costs grouped by settlement currency."""
+    rows = conn.execute("""
+        SELECT currency, COALESCE(SUM(cost_amount), 0) AS cost_amount
+        FROM api_costs GROUP BY currency ORDER BY currency
+    """).fetchall()
+    return {str(row["currency"]): float(row["cost_amount"]) for row in rows}
 
 
 def get_api_usage_summary(conn: sqlite3.Connection) -> dict:
@@ -1236,24 +1287,37 @@ def get_api_usage_summary(conn: sqlite3.Connection) -> dict:
     rows = conn.execute("""
         SELECT purpose,
                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+               COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-               COALESCE(SUM(cost_usd), 0) AS cost_usd
+               currency,
+               COALESCE(SUM(cost_amount), 0) AS cost_amount
         FROM api_costs
-        GROUP BY purpose
-        ORDER BY purpose
+        GROUP BY purpose, currency
+        ORDER BY purpose, currency
     """).fetchall()
-    by_purpose = {
-        row["purpose"]: {
-            "input_tokens": int(row["input_tokens"]),
-            "output_tokens": int(row["output_tokens"]),
-            "cost_usd": float(row["cost_usd"]),
-        }
-        for row in rows
-    }
+    by_purpose: dict[str, dict] = {}
+    for row in rows:
+        purpose = str(row["purpose"])
+        item = by_purpose.setdefault(purpose, {
+            "input_tokens": 0,
+            "cached_tokens": 0,
+            "output_tokens": 0,
+            "cost_by_currency": {},
+        })
+        item["input_tokens"] += int(row["input_tokens"])
+        item["cached_tokens"] += int(row["cached_tokens"])
+        item["output_tokens"] += int(row["output_tokens"])
+        item["cost_by_currency"][str(row["currency"])] = float(row["cost_amount"])
+
+    cost_by_currency: dict[str, float] = {}
+    for item in by_purpose.values():
+        for currency, amount in item["cost_by_currency"].items():
+            cost_by_currency[currency] = cost_by_currency.get(currency, 0.0) + amount
     return {
         "input_tokens": sum(item["input_tokens"] for item in by_purpose.values()),
+        "cached_tokens": sum(item["cached_tokens"] for item in by_purpose.values()),
         "output_tokens": sum(item["output_tokens"] for item in by_purpose.values()),
-        "cost_usd": sum(item["cost_usd"] for item in by_purpose.values()),
+        "cost_by_currency": cost_by_currency,
         "by_purpose": by_purpose,
     }
 

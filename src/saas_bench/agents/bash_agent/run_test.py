@@ -34,7 +34,7 @@ if str(package_root) not in sys.path:
     sys.path.insert(0, str(package_root))
 
 DEFAULT_EXPERIMENT_CONFIG = package_root.parent / "experiments" / "experiment.toml"
-RUN_CONFIG_FORMAT_VERSION = 3
+RUN_CONFIG_FORMAT_VERSION = 4
 RUN_CONFIG_FIELDS = {
     "format_version", "run_id", "agent_type", "model", "provider", "api_type",
     "base_url", "reasoning_effort", "temperature", "top_p", "max_output_tokens",
@@ -48,7 +48,7 @@ RUN_CONFIG_FIELDS = {
 from saas_bench.experiment_config import load_experiment_config
 from saas_bench.llm_provider import (
     create_llm_client,
-    model_token_cost_usd,
+    model_token_cost,
     validate_provider_api_type,
     validate_reasoning_effort,
 )
@@ -90,7 +90,7 @@ class BashAgentRunner:
     checkpoint management. All simulation state is queried via HTTP.
     """
 
-    CHECKPOINT_FORMAT_VERSION = 3
+    CHECKPOINT_FORMAT_VERSION = 4
 
     def __init__(
         self,
@@ -111,7 +111,7 @@ class BashAgentRunner:
         max_output_tokens: Optional[int] = None,
         timeout_seconds: float = 600.0,
         request_options: Optional[Dict[str, Any]] = None,
-        pricing: Optional[Dict[str, Dict[str, float]]] = None,
+        pricing: Optional[Dict[str, Dict[str, Any]]] = None,
         api_key_env: Optional[str] = None,
         api_key_required: bool = True,
         simulator_llm_config: Optional[Dict[str, Any]] = None,
@@ -179,7 +179,7 @@ class BashAgentRunner:
             raise ValueError(
                 f"decision-agent pricing must include configured model {self.model!r}"
             )
-        self.total_decision_agent_cost_usd = 0.0
+        self.total_decision_agent_cost_by_currency: Dict[str, float] = {}
         self.api_key_env = api_key_env
         self.api_key_required = api_key_required
         self.simulator_llm_config = dict(simulator_llm_config or {})
@@ -379,13 +379,17 @@ class BashAgentRunner:
         cached_tokens = self.agent.last_cached_tokens if self.agent else 0
         reasoning_tokens = self.agent.last_reasoning_tokens if self.agent else 0
         served_model = self.agent.last_serving_model if self.agent else self.model
-        cost_usd = model_token_cost_usd(
+        cost = model_token_cost(
             served_model,
             input_tokens,
             output_tokens,
+            cached_tokens,
             self.pricing,
         )
-        self.total_decision_agent_cost_usd += cost_usd
+        self.total_decision_agent_cost_by_currency[cost.currency] = (
+            self.total_decision_agent_cost_by_currency.get(cost.currency, 0.0)
+            + cost.amount
+        )
         entry = {
             "timestamp": now(),
             "turn": turn,
@@ -396,8 +400,9 @@ class BashAgentRunner:
             "cached_tokens": cached_tokens,
             "reasoning_tokens": reasoning_tokens,
             "served_model": served_model,
-            "cost_usd": cost_usd,
-            "total_cost_usd": self.total_decision_agent_cost_usd,
+            "cost_amount": cost.amount,
+            "currency": cost.currency,
+            "total_cost_by_currency": self.total_decision_agent_cost_by_currency,
             "raw_response": raw_response,
         }
         with open(self.response_log_file, 'a') as f:
@@ -926,7 +931,7 @@ __pycache__/
                     'output_tokens': self.agent.total_output_tokens if self.agent else 0,
                     'cached_tokens': self.agent.total_cached_tokens if self.agent else 0,
                     'reasoning_tokens': self.agent.total_reasoning_tokens if self.agent else 0,
-                    'decision_cost_usd': self.total_decision_agent_cost_usd,
+                    'decision_cost_by_currency': self.total_decision_agent_cost_by_currency,
                 },
             },
         }
@@ -1211,17 +1216,23 @@ __pycache__/
     @classmethod
     def _validate_environment_llm_usage(cls, usage: Any) -> Dict[str, Any]:
         if not isinstance(usage, dict) or set(usage) != {
-            'input_tokens', 'output_tokens', 'cost_usd', 'by_purpose'
+            'input_tokens', 'cached_tokens', 'output_tokens',
+            'cost_by_currency', 'by_purpose'
         }:
             raise ValueError("Invalid environment LLM usage summary")
         cls._require_non_negative_integer(
             usage['input_tokens'], 'environment_llm.input_tokens'
         )
         cls._require_non_negative_integer(
+            usage['cached_tokens'], 'environment_llm.cached_tokens'
+        )
+        if usage['cached_tokens'] > usage['input_tokens']:
+            raise ValueError("Environment LLM cached tokens exceed input tokens")
+        cls._require_non_negative_integer(
             usage['output_tokens'], 'environment_llm.output_tokens'
         )
-        cls._require_non_negative_number(
-            usage['cost_usd'], 'environment_llm.cost_usd'
+        cls._validate_cost_by_currency(
+            usage['cost_by_currency'], 'environment_llm.cost_by_currency'
         )
         by_purpose = usage['by_purpose']
         if not isinstance(by_purpose, dict):
@@ -1230,30 +1241,55 @@ __pycache__/
             if not isinstance(purpose, str) or not purpose:
                 raise ValueError("Invalid environment LLM purpose")
             if not isinstance(values, dict) or set(values) != {
-                'input_tokens', 'output_tokens', 'cost_usd'
+                'input_tokens', 'cached_tokens', 'output_tokens', 'cost_by_currency'
             }:
                 raise ValueError(f"Invalid environment LLM usage for {purpose!r}")
             cls._require_non_negative_integer(
                 values['input_tokens'], f'environment_llm.{purpose}.input_tokens'
             )
             cls._require_non_negative_integer(
+                values['cached_tokens'], f'environment_llm.{purpose}.cached_tokens'
+            )
+            if values['cached_tokens'] > values['input_tokens']:
+                raise ValueError(
+                    f"Environment LLM cached tokens exceed input tokens for {purpose!r}"
+                )
+            cls._require_non_negative_integer(
                 values['output_tokens'], f'environment_llm.{purpose}.output_tokens'
             )
-            cls._require_non_negative_number(
-                values['cost_usd'], f'environment_llm.{purpose}.cost_usd'
+            cls._validate_cost_by_currency(
+                values['cost_by_currency'],
+                f'environment_llm.{purpose}.cost_by_currency',
             )
         if usage['input_tokens'] != sum(v['input_tokens'] for v in by_purpose.values()):
             raise ValueError("Environment LLM input token total does not match by_purpose")
+        if usage['cached_tokens'] != sum(v['cached_tokens'] for v in by_purpose.values()):
+            raise ValueError("Environment LLM cached token total does not match by_purpose")
         if usage['output_tokens'] != sum(v['output_tokens'] for v in by_purpose.values()):
             raise ValueError("Environment LLM output token total does not match by_purpose")
-        if not math.isclose(
-            usage['cost_usd'],
-            sum(v['cost_usd'] for v in by_purpose.values()),
-            rel_tol=1e-9,
-            abs_tol=1e-12,
+        expected_costs: Dict[str, float] = {}
+        for values in by_purpose.values():
+            for currency, amount in values['cost_by_currency'].items():
+                expected_costs[currency] = expected_costs.get(currency, 0.0) + amount
+        if set(usage['cost_by_currency']) != set(expected_costs) or any(
+            not math.isclose(
+                usage['cost_by_currency'][currency], amount,
+                rel_tol=1e-9, abs_tol=1e-12,
+            )
+            for currency, amount in expected_costs.items()
         ):
             raise ValueError("Environment LLM cost total does not match by_purpose")
         return usage
+
+    @classmethod
+    def _validate_cost_by_currency(cls, value: Any, field: str) -> Dict[str, float]:
+        if not isinstance(value, dict):
+            raise ValueError(f"Invalid checkpoint {field}: {value!r}")
+        for currency, amount in value.items():
+            if not isinstance(currency, str) or not currency:
+                raise ValueError(f"Invalid checkpoint {field} currency: {currency!r}")
+            cls._require_non_negative_number(amount, f"{field}.{currency}")
+        return value
 
     def _validate_checkpoint(self, checkpoint: Any) -> Dict[str, Any]:
         """Reject partial or legacy checkpoints before any state is modified."""
@@ -1317,16 +1353,18 @@ __pycache__/
         agent = runtime['agent']
         required_agent = {
             'total_turns', 'input_tokens', 'output_tokens', 'cached_tokens',
-            'reasoning_tokens', 'decision_cost_usd',
+            'reasoning_tokens', 'decision_cost_by_currency',
         }
         if not isinstance(agent, dict) or set(agent) != required_agent:
             raise ValueError(
                 f"Checkpoint agent fields must contain exactly: {sorted(required_agent)}"
             )
-        for field in required_agent - {'decision_cost_usd'}:
+        for field in required_agent - {'decision_cost_by_currency'}:
             self._require_non_negative_integer(agent[field], f'agent.{field}')
-        self._require_non_negative_number(
-            agent['decision_cost_usd'], 'agent.decision_cost_usd'
+        if agent['cached_tokens'] > agent['input_tokens']:
+            raise ValueError("Agent cached tokens exceed input tokens")
+        self._validate_cost_by_currency(
+            agent['decision_cost_by_currency'], 'agent.decision_cost_by_currency'
         )
         return checkpoint
 
@@ -1373,7 +1411,9 @@ __pycache__/
             self.agent.total_output_tokens = agent_state['output_tokens']
             self.agent.total_cached_tokens = agent_state['cached_tokens']
             self.agent.total_reasoning_tokens = agent_state['reasoning_tokens']
-        self.total_decision_agent_cost_usd = agent_state['decision_cost_usd']
+        self.total_decision_agent_cost_by_currency = dict(
+            agent_state['decision_cost_by_currency']
+        )
         # Git 周节点不需要单独持久化，由可信断点日期即可唯一恢复。
         self._last_committed_week = checkpoint['day'] // 7
 
@@ -1691,10 +1731,11 @@ __pycache__/
             'decision_agent_output_tokens': agent_state['output_tokens'],
             'decision_agent_cached_tokens': agent_state['cached_tokens'],
             'decision_agent_reasoning_tokens': agent_state['reasoning_tokens'],
-            'decision_agent_cost_usd': agent_state['decision_cost_usd'],
+            'decision_agent_cost_by_currency': agent_state['decision_cost_by_currency'],
             'environment_llm_input_tokens': environment_state['input_tokens'],
             'environment_llm_output_tokens': environment_state['output_tokens'],
-            'environment_llm_cost_usd': environment_state['cost_usd'],
+            'environment_llm_cached_tokens': environment_state['cached_tokens'],
+            'environment_llm_cost_by_currency': environment_state['cost_by_currency'],
             'environment_llm_usage_by_purpose': environment_state['by_purpose'],
             'resumable': outcome in {'timeout', 'incomplete'},
             'workspace_dir': str(self.workspace_dir),
@@ -1922,7 +1963,7 @@ __pycache__/
                 _before_output_tokens = self.agent.total_output_tokens
                 _before_cached_tokens = self.agent.total_cached_tokens
                 _before_reasoning_tokens = self.agent.total_reasoning_tokens
-                _before_cost_usd = self.total_decision_agent_cost_usd
+                _before_cost = dict(self.total_decision_agent_cost_by_currency)
                 _t0 = _time.monotonic()
                 action = self.agent.act(observation, 0, False, info)
                 _llm_elapsed = _time.monotonic() - _t0
@@ -1957,7 +1998,11 @@ __pycache__/
                     tool_args_preview = json.dumps(action.arguments or {})[:120]
 
                 # 将本次 LLM 的调用信息(llm_call)记录到日志文件（耗时、使用工具、Token 使用情况、请求的模型等）
-                call_cost_usd = self.total_decision_agent_cost_usd - _before_cost_usd
+                call_cost_by_currency = {
+                    currency: amount - _before_cost.get(currency, 0.0)
+                    for currency, amount in self.total_decision_agent_cost_by_currency.items()
+                    if not math.isclose(amount, _before_cost.get(currency, 0.0))
+                }
                 self._log_timing("llm_call", sim_day, turn=turns_in_batch,
                                  elapsed_s=round(_llm_elapsed, 2),
                                  tool=tool_name, tool_preview=tool_args_preview,
@@ -1966,8 +2011,8 @@ __pycache__/
                                  output_tokens=_turn_output_tokens,
                                  cached_tokens=_turn_cached_tokens,
                                  reasoning_tokens=_turn_reasoning_tokens,
-                                 cost_usd=round(call_cost_usd, 8),
-                                 total_cost_usd=round(self.total_decision_agent_cost_usd, 8),
+                                 cost_by_currency=call_cost_by_currency,
+                                 total_cost_by_currency=self.total_decision_agent_cost_by_currency,
                                  requested_model=self.model,
                                  served_model=self.agent.last_serving_model)
 
@@ -2159,7 +2204,10 @@ __pycache__/
                 f"({cache_pct:.0f}% of input)"
             )
             print(f"Reasoning Tokens: {result_agent_state['reasoning_tokens']:,}")
-            print(f"Decision Agent Cost: ${result_agent_state['decision_cost_usd']:,.4f}")
+            print(
+                "Decision Agent Cost: "
+                f"{result_agent_state['decision_cost_by_currency']}"
+            )
             print(f"{'='*60}\n")
 
         self._write_result(result)

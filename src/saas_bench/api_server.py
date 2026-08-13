@@ -895,8 +895,9 @@ class NovaMindAPIServer:
                     if self.conn is not None
                     else {
                         "input_tokens": 0,
+                        "cached_tokens": 0,
                         "output_tokens": 0,
-                        "cost_usd": 0.0,
+                        "cost_by_currency": {},
                         "by_purpose": {},
                     }
                 ),

@@ -23,7 +23,7 @@ def test_runner_preserves_reasoning_configuration():
         max_output_tokens=100,
         max_decision_turns_per_batch=100,
         max_invalid_responses_per_turn=3,
-        pricing={"test-model": {"input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
+        pricing={"test-model": {"currency": "USD", "uncached_input_cost_per_million": 0.0, "cached_input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
     )
     disabled = BashAgentRunner(
         model="test-model",
@@ -34,7 +34,7 @@ def test_runner_preserves_reasoning_configuration():
         max_output_tokens=100,
         max_decision_turns_per_batch=100,
         max_invalid_responses_per_turn=3,
-        pricing={"test-model": {"input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
+        pricing={"test-model": {"currency": "USD", "uncached_input_cost_per_million": 0.0, "cached_input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
         reasoning_effort="none",
     )
 
@@ -54,7 +54,7 @@ def test_runner_preserves_sampling_configuration():
         max_output_tokens=100,
         max_decision_turns_per_batch=100,
         max_invalid_responses_per_turn=3,
-        pricing={"test-model": {"input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
+        pricing={"test-model": {"currency": "USD", "uncached_input_cost_per_million": 0.0, "cached_input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
         temperature=0.6,
         top_p=0.95,
     )

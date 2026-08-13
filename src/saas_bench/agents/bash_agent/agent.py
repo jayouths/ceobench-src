@@ -1026,10 +1026,24 @@ class BashAgent(BaseAgent):
                 # Capture token usage (Anthropic format)
                 usage = getattr(response, 'usage', None)
                 if usage:
-                    self.last_input_tokens = getattr(usage, 'input_tokens', 0) or 0
+                    uncached_input_tokens = getattr(usage, 'input_tokens', 0) or 0
                     self.last_output_tokens = getattr(usage, 'output_tokens', 0) or 0
-                    # Anthropic 的 input_tokens 不含缓存读写；这里单独记录缓存命中量。
+                    # Anthropic 的 input_tokens 不含缓存读写，统一归一为总输入量。
                     self.last_cached_tokens = getattr(usage, 'cache_read_input_tokens', 0) or 0
+                    cache_creation_tokens = (
+                        getattr(usage, 'cache_creation_input_tokens', 0) or 0
+                    )
+                    # TODO: Anthropic 缓存写入需要独立价格。计价模型支持前直接
+                    # 中止，避免将其误算成普通输入并污染实验成本。
+                    if cache_creation_tokens:
+                        raise NotImplementedError(
+                            "Anthropic cache creation pricing is not configured; "
+                            "disable prompt-cache writes or extend the pricing model"
+                        )
+                    self.last_input_tokens = (
+                        uncached_input_tokens
+                        + self.last_cached_tokens
+                    )
                     output_details = getattr(usage, 'output_tokens_details', None)
                     self.last_reasoning_tokens = (
                         getattr(output_details, 'thinking_tokens', 0) or 0

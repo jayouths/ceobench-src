@@ -4121,7 +4121,9 @@ class Simulator:
                     _skip_log_cost=True,
                 )
                 return {'type': 'regular', **inp, 'text': response.text, 'success': True,
-                        'input_tokens': response.input_tokens, 'output_tokens': response.output_tokens,
+                        'input_tokens': response.input_tokens,
+                        'cached_tokens': response.cached_tokens,
+                        'output_tokens': response.output_tokens,
                         'model': response.model}
 
             unified_calls.append(_make_regular_call)
@@ -4142,6 +4144,7 @@ class Simulator:
 
                 return {'type': 'macro', **item, 'text': text, 'success': True,
                         'input_tokens': llm_response.input_tokens,
+                        'cached_tokens': llm_response.cached_tokens,
                         'output_tokens': llm_response.output_tokens,
                         'model': llm_response.model}
 
@@ -4256,6 +4259,7 @@ class Simulator:
                 self.customer_simulator._log_cost(
                     self.current_day, purpose,
                     result['input_tokens'], result['output_tokens'],
+                    cached_tokens=result['cached_tokens'],
                     model=result['model']
                 )
 
@@ -4487,12 +4491,13 @@ class Simulator:
                 # Python 3.7+) — not `as_completed`, which yields in completion
                 # order and would make DB write ordering non-deterministic.
                 for future, gid in judge_futures.items():
-                    effect, reasoning, in_tok, out_tok, served_model = future.result()
+                    effect, reasoning, in_tok, out_tok, cached_tok, served_model = future.result()
                     effect_by_group[gid] = effect
                     reasoning_by_group[gid] = reasoning
                     self.customer_simulator._log_cost(
                         self.current_day, 'agent_social_judge',
-                        in_tok, out_tok, model=served_model
+                        in_tok, out_tok, cached_tokens=cached_tok,
+                        model=served_model
                     )
 
             # Compute views per group from effect scores
@@ -4576,7 +4581,7 @@ class Simulator:
                     # — not `as_completed`, which yields completion order and would
                     # make DB write ordering non-deterministic.
                     for future, gid in reply_futures.items():
-                        reply_text, in_tok, out_tok, served_model = future.result()
+                        reply_text, in_tok, out_tok, cached_tok, served_model = future.result()
                         eff = effect_by_group[gid]
 
                         # Add as a regular social media post (visible to agent)
@@ -4621,7 +4626,8 @@ class Simulator:
 
                         self.customer_simulator._log_cost(
                             self.current_day, 'agent_social_reply',
-                            in_tok, out_tok, model=served_model
+                            in_tok, out_tok, cached_tokens=cached_tok,
+                            model=served_model
                         )
 
             # Store comment post IDs on the agent post
@@ -5607,6 +5613,7 @@ Guidelines:
         self.customer_simulator._log_cost(
             self.current_day, 'competitor_event_post',
             response.input_tokens, response.output_tokens,
+            cached_tokens=response.cached_tokens,
             model=response.model
         )
 

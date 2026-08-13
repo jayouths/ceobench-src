@@ -26,7 +26,7 @@ from typing import Optional
 from numpy.random import Generator, PCG64
 
 from saas_bench.config import BenchmarkConfig, SCENARIO_PACKS, ScenarioPack
-from saas_bench.database import get_total_api_cost, init_database
+from saas_bench.database import get_total_api_costs, init_database
 from saas_bench.simulation import Simulator
 from saas_bench.customer_llm import CustomerSimulator
 from saas_bench.tools import AgentTools
@@ -376,7 +376,7 @@ def cmd_start_server(args, base: Path):
         scenario=scenario_name,
         config={"seed": seed, "total_days": total_days},
         # api_costs 随数据库断点恢复，logger 的累计值必须以它为准。
-        starting_llm_cost_usd=get_total_api_cost(conn),
+        starting_llm_cost_by_currency=get_total_api_costs(conn),
         # 服务端可能多次重启，实验起始时间必须来自会话创建时刻。
         start_time=datetime.fromtimestamp(
             meta["created_at"], tz=timezone.utc
