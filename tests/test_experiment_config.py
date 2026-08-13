@@ -1593,6 +1593,32 @@ def test_soft_sandbox_blocks_simulator_import(tmp_path, monkeypatch):
     assert "[exit code: 1]" in output
 
 
+def test_bwrap_mounts_uv_python_alias_target(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    venv_bin = tmp_path / ".venv" / "bin"
+    runtime = tmp_path / "uv" / "python" / "cpython-3.13-linux-aarch64-gnu"
+    runtime_bin = runtime / "bin"
+    workspace.mkdir()
+    venv_bin.mkdir(parents=True)
+    runtime_bin.mkdir(parents=True)
+    (runtime_bin / "python3.13").touch()
+    (venv_bin / "python").symlink_to(runtime_bin / "python3.13")
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/bwrap")
+
+    executor = BashAgentToolExecutor(workspace)
+    command = executor._build_bwrap_cmd(
+        "python --version",
+        str(workspace),
+        {"PATH": f"{venv_bin}:/usr/bin:/bin"},
+    )
+
+    mount_pair = ["--ro-bind", str(runtime), str(runtime)]
+    assert any(
+        command[index:index + len(mount_pair)] == mount_pair
+        for index in range(len(command) - len(mount_pair) + 1)
+    )
+
+
 def test_file_tools_reject_sibling_path_with_workspace_prefix(tmp_path):
     workspace = tmp_path / "workspace"
     sibling = tmp_path / "workspace_private"

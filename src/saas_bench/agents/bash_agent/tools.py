@@ -303,6 +303,18 @@ class BashAgentToolExecutor:
             if os.path.isdir(venv_root):
                 cmd.extend(['--ro-bind', venv_root, venv_root])
 
+            # uv 创建的 .venv/bin/python 可能指向 ~/.local/share/uv/python
+            # 下的版本别名目录。只挂载 sys.base_prefix 会让这条软链接
+            # 在沙箱内断开，因此还需只读挂载软链接直接指向的运行时。
+            venv_python = os.path.join(venv_bin, 'python')
+            if os.path.islink(venv_python):
+                python_target = os.readlink(venv_python)
+                if not os.path.isabs(python_target):
+                    python_target = os.path.join(venv_bin, python_target)
+                linked_runtime = os.path.dirname(os.path.dirname(python_target))
+                if os.path.isdir(linked_runtime):
+                    cmd.extend(['--ro-bind', linked_runtime, linked_runtime])
+
         # Read-only Python site-packages (for imports like novamind_api)
         import sysconfig
         site_packages = sysconfig.get_paths()['purelib']
