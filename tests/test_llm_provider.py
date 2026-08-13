@@ -9,6 +9,7 @@ from saas_bench.llm_provider import (
     MissingModelPricingError,
     call_text_model,
     model_token_cost,
+    openai_chat_cached_tokens,
     token_cost,
 )
 
@@ -96,6 +97,46 @@ def test_openai_chat_request_and_normalized_result():
     assert recorder.calls[0]["reasoning_effort"] == "high"
     assert recorder.calls[0]["max_completion_tokens"] == 50
     assert recorder.calls[0]["top_p"] == pytest.approx(0.8)
+
+
+def test_deepseek_chat_cache_hit_tokens_are_normalized():
+    usage = SimpleNamespace(
+        prompt_tokens=12,
+        completion_tokens=4,
+        prompt_cache_hit_tokens=9,
+        prompt_cache_miss_tokens=3,
+    )
+    recorder = Recorder(SimpleNamespace(
+        model="deepseek-v4-pro",
+        usage=usage,
+        choices=[SimpleNamespace(message=SimpleNamespace(content="text"))],
+    ))
+
+    result = call_text_model(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=recorder)),
+        api_type=API_OPENAI_CHAT,
+        model="deepseek-v4-pro",
+        system_prompt="system",
+        user_prompt="user",
+        max_output_tokens=50,
+        temperature=None,
+        top_p=None,
+        reasoning_effort="high",
+    )
+
+    assert result.input_tokens == 12
+    assert result.output_tokens == 4
+    assert result.cached_tokens == 9
+
+
+def test_chat_cache_fields_must_not_disagree():
+    usage = SimpleNamespace(
+        prompt_tokens_details=SimpleNamespace(cached_tokens=2),
+        prompt_cache_hit_tokens=3,
+    )
+
+    with pytest.raises(ValueError, match="Conflicting cached-token counts"):
+        openai_chat_cached_tokens(usage)
 
 
 def test_anthropic_messages_request_and_normalized_result():

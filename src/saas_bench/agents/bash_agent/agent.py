@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, asdict
 
 from ..base import BaseAgent
 from ...environment import Action
+from ...llm_provider import openai_chat_cached_tokens
 
 
 @dataclass
@@ -573,8 +574,8 @@ class BashAgent(BaseAgent):
                     self.last_input_tokens = getattr(usage, 'prompt_tokens', 0) or 0
                     self.last_output_tokens = getattr(usage, 'completion_tokens', 0) or 0
                     # Cache and reasoning details
-                    ptd = getattr(usage, 'prompt_tokens_details', None)
-                    self.last_cached_tokens = getattr(ptd, 'cached_tokens', 0) or 0 if ptd else 0
+                    # OpenAI 与 DeepSeek 的 Chat Completions 缓存字段位置不同。
+                    self.last_cached_tokens = openai_chat_cached_tokens(usage)
                     ctd = getattr(usage, 'completion_tokens_details', None)
                     self.last_reasoning_tokens = getattr(ctd, 'reasoning_tokens', 0) or 0 if ctd else 0
                 else:
@@ -951,9 +952,9 @@ class BashAgent(BaseAgent):
                     continue
                 messages.append({'role': msg.role, 'content': copy.deepcopy(msg.content)})
 
-            # Strip any leftover cache_control from previous messages, then add
-            # a single breakpoint on the last message. Combined with the system
-            # prompt and tools breakpoints this stays within the 4-breakpoint limit.
+            # 价格模型尚未表达 Anthropic 缓存写入及其 TTL 价格，
+            # 因此默认路径不主动创建缓存断点。恢复的历史中若存在
+            # cache_control，也必须移除，避免断点续跑时意外产生未计价写入。
             def _strip_cache_control(content):
                 if isinstance(content, list):
                     for block in content:
@@ -963,33 +964,11 @@ class BashAgent(BaseAgent):
             for msg in messages:
                 _strip_cache_control(msg.get('content'))
 
-            # Add cache_control to the last message so the entire conversation
-            # prefix is cached between consecutive turns.
-            if messages:
-                last_msg = messages[-1]
-                content = last_msg.get('content', '')
-                if isinstance(content, str) and content:
-                    last_msg['content'] = [
-                        {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
-                    ]
-                elif isinstance(content, list) and content:
-                    last_block = content[-1]
-                    if isinstance(last_block, dict):
-                        last_block['cache_control'] = {"type": "ephemeral"}
-
             system_text = self._get_system_prompt_with_memory()
-            system_content = [
-                {
-                    "type": "text",
-                    "text": system_text,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ]
+            system_content = system_text
 
             from .tools import get_bash_agent_anthropic_tools
             tools = get_bash_agent_anthropic_tools()
-            if tools:
-                tools[-1]['cache_control'] = {"type": "ephemeral"}
 
             api_kwargs = {
                 'model': self.model,

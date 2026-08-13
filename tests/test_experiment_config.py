@@ -1652,6 +1652,60 @@ def test_anthropic_agent_does_not_retry_local_errors():
         agent._call_anthropic()
 
 
+def test_anthropic_agent_does_not_create_unpriced_prompt_cache():
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            model="served-anthropic",
+            usage=SimpleNamespace(
+                input_tokens=11,
+                output_tokens=7,
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+            ),
+            content=[
+                SimpleNamespace(
+                    type="tool_use",
+                    id="tool-1",
+                    name="bash",
+                    input={"command": "pwd"},
+                )
+            ],
+        )
+
+    agent = BashAgent(
+        tool_descriptions=[],
+        client=SimpleNamespace(messages=SimpleNamespace(create=create)),
+        model="test-model",
+        api_type="anthropic_messages",
+        max_invalid_responses_per_turn=2,
+        max_output_tokens=100,
+    )
+    # 模拟旧 checkpoint 遗留的缓存断点，新请求不应继续携带它。
+    agent.conversation = [
+        Message(
+            role="user",
+            content=[
+                {
+                    "type": "text",
+                    "text": "dashboard",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        )
+    ]
+
+    action = agent._call_anthropic()
+
+    assert action == run_test.Action(tool="bash", arguments={"command": "pwd"})
+    assert len(calls) == 1
+    assert "cache_control" not in json.dumps(calls[0])
+    assert agent.last_input_tokens == 11
+    assert agent.last_output_tokens == 7
+
+
 def test_anthropic_agent_does_not_retry_bad_requests():
     import anthropic
     import httpx

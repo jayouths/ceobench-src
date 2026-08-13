@@ -241,9 +241,7 @@ def call_text_model(
             model=str(getattr(response, "model", None) or model),
             input_tokens=_int_attr(usage, "prompt_tokens"),
             output_tokens=_int_attr(usage, "completion_tokens"),
-            cached_tokens=_nested_int_attr(
-                usage, "prompt_tokens_details", "cached_tokens"
-            ),
+            cached_tokens=openai_chat_cached_tokens(usage),
             raw_response=response,
         )
 
@@ -308,3 +306,22 @@ def _int_attr(value: Any, name: str) -> int:
 
 def _nested_int_attr(value: Any, parent: str, name: str) -> int:
     return _int_attr(getattr(value, parent, None), name) if value is not None else 0
+
+
+def openai_chat_cached_tokens(usage: Any) -> int:
+    """Normalize cache hits from OpenAI and DeepSeek Chat Completions.
+
+    OpenAI puts the value in ``prompt_tokens_details.cached_tokens`` while
+    DeepSeek returns ``prompt_cache_hit_tokens`` at the top level. If a
+    provider returns both fields, disagreement is a protocol error rather than
+    something the experiment should silently price.
+    """
+    nested = _nested_int_attr(usage, "prompt_tokens_details", "cached_tokens")
+    deepseek = _int_attr(usage, "prompt_cache_hit_tokens")
+    if nested and deepseek and nested != deepseek:
+        raise ValueError(
+            "Conflicting cached-token counts in Chat Completions usage: "
+            f"prompt_tokens_details.cached_tokens={nested}, "
+            f"prompt_cache_hit_tokens={deepseek}"
+        )
+    return deepseek or nested
