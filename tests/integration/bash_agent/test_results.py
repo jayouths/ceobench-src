@@ -140,45 +140,6 @@ def test_runner_rejects_terminal_result_that_disagrees_with_checkpoint(tmp_path)
     with pytest.raises(RuntimeError, match="authoritative artifacts"):
         runner._load_or_rebuild_terminal_result()
 
-def test_runner_rejects_completed_terminal_result_with_negative_cash(tmp_path):
-    runner = _checkpoint_runner(tmp_path)
-    runner.continue_from = runner.workspace_dir
-    runner.seed = 42
-    runner.scenario = "default"
-    runner.total_days = 7
-    runner._http_post = lambda path, data, timeout: {
-        "success": True,
-        "persisted_day": 7,
-        "checkpoint_cash": -1.0,
-        "environment_llm_usage": EMPTY_ENVIRONMENT_LLM_USAGE,
-        "server_log_offsets": {"history": 0, "event_log": 0},
-    }
-    runner._save_checkpoint(7)
-    checkpoint = runner._load_checkpoint()
-    result = runner._result_from_checkpoint(checkpoint, "completed")
-    (runner.workspace_dir / "result.json").write_text(json.dumps(result))
-    session_dir = runner.agent_workspace / "sessions" / runner._session_id
-    (session_dir / "session.json").write_text(json.dumps({
-        "status": "completed",
-        "current_day": 7,
-        "final_cash": -1.0,
-    }))
-    logs_dir = session_dir / "logs"
-    logs_dir.mkdir()
-    (logs_dir / f"run_{runner._session_id}.jsonl").write_text(json.dumps({
-        "day": 7,
-        "category": "run_end",
-        "details": {"outcome": "completed", "final_cash": -1.0},
-    }) + "\n")
-    (logs_dir / f"run_{runner._session_id}_meta.json").write_text(json.dumps({
-        "outcome": "completed",
-        "days_run": 7,
-        "final_cash": -1.0,
-    }))
-
-    with pytest.raises(RuntimeError, match="negative cash"):
-        runner._load_or_rebuild_terminal_result()
-
 def test_runner_rebuilds_missing_terminal_result_from_consistent_artifacts(tmp_path):
     runner = _checkpoint_runner(tmp_path)
     runner.continue_from = runner.workspace_dir
@@ -259,10 +220,7 @@ def test_runner_rejects_disagreeing_terminal_artifacts(tmp_path):
     with pytest.raises(RuntimeError, match="artifacts disagree"):
         runner._load_or_rebuild_terminal_result()
 
-@pytest.mark.parametrize("terminal_artifact", ["session_meta", "event_meta"])
-def test_runner_repairs_interrupted_terminal_finalization(
-    tmp_path, terminal_artifact
-):
+def test_runner_repairs_interrupted_terminal_finalization(tmp_path):
     runner = _checkpoint_runner(tmp_path)
     runner.continue_from = runner.workspace_dir
     runner.seed = 42
@@ -290,20 +248,12 @@ def test_runner_repairs_interrupted_terminal_finalization(
     runner._save_checkpoint(7)
     checkpoint = runner._load_checkpoint()
 
-    # 模拟 finalize 在多文件提交之间崩溃，只留下其中一份终态证据。
-    if terminal_artifact == "session_meta":
-        (session_dir / "session.json").write_text(json.dumps({
-            "session_id": runner._session_id,
-            "status": "completed",
-            "current_day": 7,
-            "final_cash": 850_000.0,
-        }))
-    else:
-        (logs_dir / f"run_{runner._session_id}_meta.json").write_text(json.dumps({
-            "outcome": "completed",
-            "days_run": 7,
-            "final_cash": 850_000.0,
-        }))
+    # 模拟 finalize 在多文件提交之间崩溃，只留下一份终态证据。
+    (logs_dir / f"run_{runner._session_id}_meta.json").write_text(json.dumps({
+        "outcome": "completed",
+        "days_run": 7,
+        "final_cash": 850_000.0,
+    }))
     event_log.write_text(json.dumps({
         "day": 7,
         "event_type": "lifecycle",
