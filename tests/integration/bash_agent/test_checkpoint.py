@@ -1,0 +1,114 @@
+"""按职责拆分的 Harness 回归测试。"""
+
+import json
+
+import pytest
+
+from saas_bench.agents.bash_agent.run_test import BashAgentRunner
+
+
+from tests.support.harness import (
+    EMPTY_ENVIRONMENT_LLM_USAGE,
+    make_checkpoint_runner as _checkpoint_runner,
+)
+
+
+
+def test_checkpoint_json_references_the_exact_hashed_database(tmp_path):
+    runner = _checkpoint_runner(tmp_path)
+    runner._http_post = lambda path, data, timeout: {
+        "success": True,
+        "persisted_day": 7,
+        "checkpoint_cash": 900_000.0,
+        "environment_llm_usage": EMPTY_ENVIRONMENT_LLM_USAGE,
+        "server_log_offsets": {"history": 0, "event_log": 0},
+    }
+
+    runner._save_checkpoint(7)
+
+    checkpoint = json.loads((runner.workspace_dir / "checkpoint.json").read_text())
+    checkpoint_db = runner.workspace_dir / checkpoint["database"]["file"]
+    assert checkpoint["format_version"] == runner.CHECKPOINT_FORMAT_VERSION
+    assert checkpoint["run_config_sha256"] == runner._sha256_file(
+        runner.workspace_dir / "config.json"
+    )
+    assert checkpoint["day"] == 7
+    assert checkpoint["cash"] == pytest.approx(900_000.0)
+    assert checkpoint_db.read_bytes() == b"persisted-database"
+    assert checkpoint["database"]["sha256"] == runner._sha256_file(checkpoint_db)
+    assert (runner.workspace_dir / "world.nmdb").read_bytes() == b"persisted-database"
+    runtime = checkpoint["runtime"]
+    conversation = runner.workspace_dir / runtime["conversation"]["file"]
+    assert runtime["conversation"]["sha256"] == runner._sha256_file(conversation)
+    assert runner._git("rev-parse", "HEAD", check=True).stdout.strip() == runtime["workspace_commit"]
+    assert runtime["runner_log_offsets"] == {
+        "tool_results": 0,
+        "raw_responses": 0,
+        "timing": 0,
+    }
+    assert runtime["server_log_offsets"] == {"history": 0, "event_log": 0}
+    assert runtime["environment_llm"] == EMPTY_ENVIRONMENT_LLM_USAGE
+
+def test_failed_database_persistence_keeps_previous_checkpoint(tmp_path):
+    runner = _checkpoint_runner(tmp_path)
+    checkpoint_file = runner.workspace_dir / "checkpoint.json"
+    checkpoint_file.write_text('{"day": 0}')
+    runner._http_post = lambda path, data, timeout: {
+        "success": False,
+        "error": "week_advance_not_stable",
+    }
+
+    with pytest.raises(RuntimeError, match="persistence failed"):
+        runner._save_checkpoint(7)
+
+    assert checkpoint_file.read_text() == '{"day": 0}'
+    assert not (runner.workspace_dir / ".checkpoint_dbs").exists()
+
+def test_runtime_snapshot_failure_keeps_previous_checkpoint_artifacts(tmp_path):
+    runner = _checkpoint_runner(tmp_path)
+    old_db = runner.workspace_dir / ".checkpoint_dbs" / "old.nmdb"
+    old_runtime = runner.workspace_dir / ".checkpoint_runtime" / "conversation_old.json"
+    old_db.parent.mkdir()
+    old_runtime.parent.mkdir()
+    old_db.write_bytes(b"old-database")
+    old_runtime.write_text("old-conversation")
+    checkpoint_file = runner.workspace_dir / "checkpoint.json"
+    checkpoint_file.write_text(json.dumps({
+        "day": 0,
+        "database_file": ".checkpoint_dbs/old.nmdb",
+        "runtime": {"conversation_file": ".checkpoint_runtime/conversation_old.json"},
+    }))
+    runner._http_post = lambda path, data, timeout: {
+        "success": True,
+        "persisted_day": 7,
+        "checkpoint_cash": 900_000.0,
+        "environment_llm_usage": EMPTY_ENVIRONMENT_LLM_USAGE,
+        "server_log_offsets": {"history": 0, "event_log": 0},
+    }
+    runner._capture_workspace_commit = lambda day: (_ for _ in ()).throw(
+        RuntimeError("git failed")
+    )
+
+    with pytest.raises(RuntimeError, match="git failed"):
+        runner._save_checkpoint(7)
+
+    assert json.loads(checkpoint_file.read_text())["day"] == 0
+    assert old_db.read_bytes() == b"old-database"
+    assert old_runtime.read_text() == "old-conversation"
+
+def test_checkpoint_load_rejects_tampered_run_config(tmp_path):
+    runner = _checkpoint_runner(tmp_path)
+    runner._http_post = lambda path, data, timeout: {
+        "success": True,
+        "persisted_day": 7,
+        "checkpoint_cash": 900_000.0,
+        "environment_llm_usage": EMPTY_ENVIRONMENT_LLM_USAGE,
+        "server_log_offsets": {"history": 0, "event_log": 0},
+    }
+    runner._save_checkpoint(7)
+    (runner.workspace_dir / "config.json").write_text(
+        json.dumps({"test_config": False})
+    )
+
+    with pytest.raises(ValueError, match="run config hash mismatch"):
+        runner._load_checkpoint()
