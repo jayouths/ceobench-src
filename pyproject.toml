@@ -44,3 +44,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = ["--strict-markers"]
+markers = [
+    "slow: 执行时间明显较长，不进入日常快速回归",
+    "linux: 仅在 Linux 环境执行",
+    "bwrap: 依赖 Bubblewrap 沙箱",
+    "external: 会访问真实外部服务，默认测试入口不执行",
+]
