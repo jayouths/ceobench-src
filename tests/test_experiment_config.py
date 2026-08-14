@@ -69,39 +69,6 @@ class RecordingOpenAI:
 
 
 
-def test_runner_rejects_missing_decision_model_identity():
-    with pytest.raises(ValueError, match="model must be explicitly configured"):
-        BashAgentRunner(
-            model=None,
-            provider="openai",
-            api_type="openai_responses",
-            max_output_tokens=100,
-            max_decision_turns_per_batch=100,
-        )
-    with pytest.raises(ValueError, match="provider must be explicitly configured"):
-        BashAgentRunner(
-            model="decision",
-            provider=None,
-            api_type="openai_responses",
-            max_output_tokens=100,
-            max_decision_turns_per_batch=100,
-        )
-
-
-def test_runner_rejects_missing_decision_request_limit():
-    with pytest.raises(ValueError, match="max_output_tokens must be configured"):
-        BashAgentRunner(
-            model="decision",
-            provider="openai",
-            api_type="openai_responses",
-            max_decision_turns_per_batch=100,
-            max_invalid_responses_per_turn=3,
-        )
-
-
-def test_agent_rejects_missing_model_identity():
-    with pytest.raises(ValueError, match="agent model must be explicitly configured"):
-        BashAgent(tool_descriptions=[], client=object(), api_type="openai_responses")
 
 
 
@@ -132,27 +99,10 @@ def test_agent_rejects_missing_model_identity():
 
 
 
-def test_short_experiment_is_allowed_and_runner_rounds_to_zero(tmp_path):
-    text = (PROJECT_ROOT / "experiments/smoke.toml").read_text()
-    path = tmp_path / "short.toml"
-    path.write_text(text.replace("days = 7", "days = 6", 1))
 
-    config = load_experiment_config(path)
-    runner = BashAgentRunner(
-        model=config.decision_agent.model,
-        provider=config.decision_agent.provider,
-        api_type=config.decision_agent.api_type,
-        base_url=config.decision_agent.base_url,
-        api_key_required=False,
-        max_output_tokens=config.decision_agent.max_output_tokens,
-        pricing=config.decision_agent.pricing,
-        total_days=config.experiment.days,
-        max_decision_turns_per_batch=config.experiment.max_decision_turns_per_batch,
-        max_invalid_responses_per_turn=config.experiment.max_invalid_responses_per_turn,
-        workspace_base=tmp_path / "runs",
-    )
 
-    assert runner.total_days == 0
+
+
 
 
 def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_path):
@@ -932,103 +882,12 @@ def test_prediction_persistence_failure_prevents_world_advance(monkeypatch):
     assert server._week_advance_failed is True
 
 
-def test_main_starts_new_run_from_the_default_toml(monkeypatch):
-    calls = []
-    assert run_test.DEFAULT_EXPERIMENT_CONFIG == PROJECT_ROOT / "experiments/experiment.toml"
-    assert run_test.DEFAULT_EXPERIMENT_CONFIG.is_file()
-
-    class Runner:
-        def run(self, verbose):
-            assert verbose is True
-            return {
-                "outcome": "completed",
-                "final_cash": 1_000_000.0,
-                "workspace_dir": "/tmp/run",
-            }
-
-    monkeypatch.setattr(
-        run_test,
-        "_new_experiment_runner",
-        lambda path: calls.append(path) or Runner(),
-    )
-    monkeypatch.setattr(
-        run_test,
-        "_resume_runner",
-        lambda value: pytest.fail("resume path should not be used"),
-    )
-
-    run_test.main([])
-
-    assert calls == [run_test.DEFAULT_EXPERIMENT_CONFIG]
 
 
-def test_main_starts_new_run_from_explicit_config(monkeypatch):
-    calls = []
-    config_path = PROJECT_ROOT / "experiments/smoke-deepseek.toml"
-
-    class Runner:
-        def run(self, verbose):
-            return {
-                "outcome": "completed",
-                "final_cash": 1_000_000.0,
-                "workspace_dir": "/tmp/run",
-            }
-
-    monkeypatch.setattr(
-        run_test,
-        "_new_experiment_runner",
-        lambda path: calls.append(path) or Runner(),
-    )
-    monkeypatch.setattr(
-        run_test,
-        "_resume_runner",
-        lambda value: pytest.fail("resume path should not be used"),
-    )
-
-    run_test.main(["--config", str(config_path)])
-
-    assert calls == [config_path]
 
 
-def test_main_resume_uses_only_saved_run_identity(monkeypatch):
-    calls = []
-
-    class Runner:
-        def run(self, verbose):
-            return {
-                "outcome": "completed",
-                "final_cash": 1_000_000.0,
-                "workspace_dir": "/tmp/run",
-            }
-
-    monkeypatch.setattr(
-        run_test,
-        "_new_experiment_runner",
-        lambda path: pytest.fail("current TOML should not be read during resume"),
-    )
-    monkeypatch.setattr(
-        run_test,
-        "_resume_runner",
-        lambda value: calls.append(value) or Runner(),
-    )
-
-    run_test.main(["--resume", "existing"])
-
-    assert calls == ["existing"]
 
 
-@pytest.mark.parametrize(
-    "args",
-    [
-        ["--model", "other-model"],
-        ["--days", "7"],
-        ["--temperature", "0.1"],
-        ["--resume", "existing", "--config", "experiments/full.toml"],
-    ],
-)
-def test_main_rejects_cli_configuration_overrides(args):
-    with pytest.raises(SystemExit):
-        run_test.main(args)
 
 
 def test_simulator_settings_survive_environment_and_session_round_trip(monkeypatch):
@@ -1292,185 +1151,14 @@ def test_unknown_model_cost_requires_explicit_pricing():
         )
 
 
-def test_decision_response_cost_uses_the_served_model(tmp_path):
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.model = "requested"
-    runner.pricing = {
-        "official": {
-            "currency": "CNY",
-            "uncached_input_cost_per_million": 3.0,
-            "cached_input_cost_per_million": 0.25,
-            "output_cost_per_million": 4.0,
-        },
-    }
-    runner.pricing_model_map = {
-        "requested": "official",
-        "served": "official",
-    }
-    runner.total_decision_agent_cost_by_currency = {}
-    runner.response_log_file = tmp_path / "responses.jsonl"
-    runner.agent = SimpleNamespace(
-        last_input_tokens=1_000_000,
-        last_output_tokens=1_000_000,
-        last_cached_tokens=250_000,
-        last_reasoning_tokens=125_000,
-        last_serving_model="served",
-    )
-
-    runner._log_response(1, 0, [], {"model": "served"})
-
-    entry = json.loads(runner.response_log_file.read_text())
-    assert entry["served_model"] == "served"
-    assert entry["pricing_model"] == "official"
-    assert entry["cached_tokens"] == 250_000
-    assert entry["reasoning_tokens"] == 125_000
-    assert entry["cost_amount"] == pytest.approx(6.3125)
-    assert entry["currency"] == "CNY"
-    assert runner.total_decision_agent_cost_by_currency == {
-        "CNY": pytest.approx(6.3125)
-    }
 
 
-def test_decision_agent_request_builder_uses_config_without_hidden_defaults():
-    agent = BashAgent.__new__(BashAgent)
-    agent.model = "decision-test"
-    agent.max_output_tokens = 345
-    agent.temperature = 0.51
-    agent.top_p = 0.92
-    agent.reasoning_effort = "none"
-    agent.request_options = {}
-    agent._get_system_prompt_with_memory = lambda: "system"
-
-    params = agent._build_openai_responses_kwargs([{"role": "user", "content": "x"}], [])
-
-    assert params["max_output_tokens"] == 345
-    assert params["temperature"] == pytest.approx(0.51)
-    assert params["top_p"] == pytest.approx(0.92)
-    assert params["reasoning"] == {"effort": "none", "summary": "auto"}
-
-    agent.temperature = None
-    agent.top_p = None
-    agent.reasoning_effort = None
-    omitted = agent._build_openai_responses_kwargs([], [])
-    assert "temperature" not in omitted
-    assert "top_p" not in omitted
-    assert "reasoning" not in omitted
 
 
-@pytest.mark.parametrize(
-    ("call_method", "builder_name"),
-    [
-        ("_call_openai", "_build_openai_chat_kwargs"),
-        ("_call_openai_responses", "_build_openai_responses_kwargs"),
-    ],
-)
-def test_openai_agent_does_not_retry_local_errors(call_method, builder_name):
-    agent = BashAgent.__new__(BashAgent)
-    agent.timeout_seconds = 1
-    agent.conversation = []
-    agent.tool_descriptions = []
-    setattr(
-        agent,
-        builder_name,
-        lambda *args: (_ for _ in ()).throw(OSError("local failure")),
-    )
-
-    with pytest.raises(OSError, match="local failure"):
-        getattr(agent, call_method)()
 
 
-@pytest.mark.parametrize(
-    ("call_method", "builder_name", "client"),
-    [
-        (
-            "_call_openai",
-            "_build_openai_chat_kwargs",
-            SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace())),
-        ),
-        (
-            "_call_openai_responses",
-            "_build_openai_responses_kwargs",
-            SimpleNamespace(responses=SimpleNamespace()),
-        ),
-    ],
-)
-def test_openai_agent_does_not_retry_bad_requests(call_method, builder_name, client):
-    import httpx
-    import openai
-
-    error = openai.BadRequestError(
-        "bad request",
-        response=httpx.Response(
-            400,
-            request=httpx.Request("POST", "http://example.test"),
-        ),
-        body={},
-    )
-    endpoint = (
-        client.chat.completions
-        if call_method == "_call_openai"
-        else client.responses
-    )
-    endpoint.create = lambda **kwargs: (_ for _ in ()).throw(error)
-
-    agent = BashAgent.__new__(BashAgent)
-    agent.timeout_seconds = 1
-    agent.conversation = []
-    agent.tool_descriptions = []
-    agent.client = client
-    setattr(agent, builder_name, lambda *args: {})
-
-    with pytest.raises(openai.BadRequestError):
-        getattr(agent, call_method)()
 
 
-@pytest.mark.parametrize(
-    ("call_method", "builder_name", "client"),
-    [
-        (
-            "_call_openai",
-            "_build_openai_chat_kwargs",
-            SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace())),
-        ),
-        (
-            "_call_openai_responses",
-            "_build_openai_responses_kwargs",
-            SimpleNamespace(responses=SimpleNamespace()),
-        ),
-    ],
-)
-def test_openai_agent_does_not_add_unbounded_provider_retries(
-    call_method, builder_name, client
-):
-    import httpx
-    import openai
-
-    calls = 0
-
-    def fail(**kwargs):
-        nonlocal calls
-        calls += 1
-        raise openai.APIConnectionError(
-            request=httpx.Request("POST", "http://example.test")
-        )
-
-    endpoint = (
-        client.chat.completions
-        if call_method == "_call_openai"
-        else client.responses
-    )
-    endpoint.create = fail
-    agent = BashAgent.__new__(BashAgent)
-    agent.timeout_seconds = 1
-    agent.conversation = []
-    agent.tool_descriptions = []
-    agent.client = client
-    setattr(agent, builder_name, lambda *args: {})
-
-    with pytest.raises(openai.APIConnectionError):
-        getattr(agent, call_method)()
-
-    assert calls == 1
 
 
 def test_failed_next_week_is_not_returned_to_the_decision_agent(tmp_path, monkeypatch):
@@ -1639,163 +1327,18 @@ def test_file_tools_reject_sibling_path_with_workspace_prefix(tmp_path):
     assert "Path escapes workspace" in glob_result
 
 
-def test_openai_responses_stops_after_configured_invalid_response_limit():
-    calls = []
-
-    def create(**kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(model="test-model", usage=None, output=[])
-
-    agent = BashAgent.__new__(BashAgent)
-    agent.timeout_seconds = 1
-    agent.conversation = []
-    agent.tool_descriptions = []
-    agent.client = SimpleNamespace(responses=SimpleNamespace(create=create))
-    agent.model = "test-model"
-    agent.max_invalid_responses_per_turn = 2
-    agent.total_turns = 0
-    agent._consecutive_errors = 0
-    agent.total_input_tokens = 0
-    agent.total_output_tokens = 0
-    agent.total_cached_tokens = 0
-    agent.total_reasoning_tokens = 0
-    agent.response_callback = None
-    agent.tool_result_callback = None
-    agent._build_openai_responses_kwargs = lambda *args: {}
-
-    with pytest.raises(RuntimeError, match="2 responses"):
-        agent._call_openai_responses()
-
-    assert len(calls) == 2
 
 
-def test_anthropic_agent_does_not_retry_local_errors():
-    agent = BashAgent.__new__(BashAgent)
-    agent.conversation = []
-    agent._get_system_prompt_with_memory = lambda: (
-        _ for _ in ()
-    ).throw(OSError("local failure"))
-
-    with pytest.raises(OSError, match="local failure"):
-        agent._call_anthropic()
 
 
-def test_anthropic_agent_does_not_create_unpriced_prompt_cache():
-    calls = []
-
-    def create(**kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(
-            model="served-anthropic",
-            usage=SimpleNamespace(
-                input_tokens=11,
-                output_tokens=7,
-                cache_read_input_tokens=0,
-                cache_creation_input_tokens=0,
-            ),
-            content=[
-                SimpleNamespace(
-                    type="tool_use",
-                    id="tool-1",
-                    name="bash",
-                    input={"command": "pwd"},
-                )
-            ],
-        )
-
-    agent = BashAgent(
-        tool_descriptions=[],
-        client=SimpleNamespace(messages=SimpleNamespace(create=create)),
-        model="test-model",
-        api_type="anthropic_messages",
-        max_invalid_responses_per_turn=2,
-        max_output_tokens=100,
-    )
-    # 模拟旧 checkpoint 遗留的缓存断点，新请求不应继续携带它。
-    agent.conversation = [
-        Message(
-            role="user",
-            content=[
-                {
-                    "type": "text",
-                    "text": "dashboard",
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-        )
-    ]
-
-    action = agent._call_anthropic()
-
-    assert action == run_test.Action(tool="bash", arguments={"command": "pwd"})
-    assert len(calls) == 1
-    assert "cache_control" not in json.dumps(calls[0])
-    assert agent.last_input_tokens == 11
-    assert agent.last_output_tokens == 7
 
 
-def test_anthropic_agent_does_not_retry_bad_requests():
-    import anthropic
-    import httpx
-
-    error = anthropic.BadRequestError(
-        "bad request",
-        response=httpx.Response(
-            400,
-            request=httpx.Request("POST", "http://example.test"),
-        ),
-        body={},
-    )
-    messages = SimpleNamespace(
-        create=lambda **kwargs: (_ for _ in ()).throw(error)
-    )
-    agent = BashAgent.__new__(BashAgent)
-    agent.conversation = []
-    agent._get_system_prompt_with_memory = lambda: "system"
-    agent.model = "test-model"
-    agent.max_output_tokens = 100
-    agent.temperature = None
-    agent.top_p = None
-    agent.request_options = {}
-    agent.client = SimpleNamespace(messages=messages)
-
-    with pytest.raises(anthropic.BadRequestError):
-        agent._call_anthropic()
 
 
-def test_game_status_is_the_authoritative_day_source():
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner._http_get = lambda path: {
-        "day": 7,
-        "cash": 900_000,
-        "subscribers": 10,
-        "timed_out": False,
-    }
-
-    assert runner._get_game_status()["day"] == 7
 
 
-@pytest.mark.parametrize("status", [{}, {"day": None}, {"day": "7"}, {"day": -1}])
-def test_invalid_game_status_fails_instead_of_falling_back_to_day_zero(status):
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner._http_get = lambda path: status
-
-    with pytest.raises(RuntimeError, match="Invalid simulator status"):
-        runner._get_game_status()
 
 
-def test_tool_execution_does_not_parse_dashboard_text():
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.tool_executor = SimpleNamespace(
-        execute=lambda tool, arguments: "=== arbitrary future dashboard format ==="
-    )
-    runner.agent = SimpleNamespace(
-        check_day_advanced=lambda output: pytest.fail(
-            "dashboard text must not control week advancement"
-        )
-    )
-
-    assert "arbitrary" in runner._execute_tool("bash", {"command": "next-week"})
 
 
 def test_runtime_restore_truncates_logs_to_exact_same_day_offsets(tmp_path):

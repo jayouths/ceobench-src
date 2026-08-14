@@ -1,9 +1,6 @@
 """Regression tests for CEOBench startup state and initial visibility."""
 
 import pytest
-
-from saas_bench.agents.bash_agent.agent import BashAgent
-from saas_bench.agents.bash_agent.run_test import BashAgentRunner
 from saas_bench.config import INITIAL_CUSTOMER_GROUPS
 from saas_bench.database import (
     get_cash,
@@ -13,68 +10,10 @@ from saas_bench.database import (
 )
 
 
-def test_runner_preserves_reasoning_configuration():
-    omitted = BashAgentRunner(
-        model="test-model",
-        provider="openai_compatible",
-        api_type="openai_responses",
-        base_url="http://localhost:11434/v1",
-        api_key_required=False,
-        max_output_tokens=100,
-        max_decision_turns_per_batch=100,
-        max_invalid_responses_per_turn=3,
-        pricing={"test-model": {"currency": "USD", "uncached_input_cost_per_million": 0.0, "cached_input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
-    )
-    disabled = BashAgentRunner(
-        model="test-model",
-        provider="openai_compatible",
-        api_type="openai_responses",
-        base_url="http://localhost:11434/v1",
-        api_key_required=False,
-        max_output_tokens=100,
-        max_decision_turns_per_batch=100,
-        max_invalid_responses_per_turn=3,
-        pricing={"test-model": {"currency": "USD", "uncached_input_cost_per_million": 0.0, "cached_input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
-        reasoning_effort="none",
-    )
-
-    assert omitted.reasoning_effort is None
-    assert disabled.reasoning_effort == "none"
-    assert omitted.temperature is None
-    assert omitted.top_p is None
 
 
-def test_runner_preserves_sampling_configuration():
-    runner = BashAgentRunner(
-        model="test-model",
-        provider="openai_compatible",
-        api_type="openai_responses",
-        base_url="http://localhost:11434/v1",
-        api_key_required=False,
-        max_output_tokens=100,
-        max_decision_turns_per_batch=100,
-        max_invalid_responses_per_turn=3,
-        pricing={"test-model": {"currency": "USD", "uncached_input_cost_per_million": 0.0, "cached_input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
-        temperature=0.6,
-        top_p=0.95,
-    )
-
-    assert runner.temperature == pytest.approx(0.6)
-    assert runner.top_p == pytest.approx(0.95)
 
 
-def test_bash_agent_routes_by_explicit_api_type():
-    agent = BashAgent.__new__(BashAgent)
-    agent._call_anthropic = lambda: "anthropic"
-    agent._call_openai = lambda: "chat"
-    agent._call_openai_responses = lambda: "responses"
-
-    agent.api_type = "openai_responses"
-    assert agent._call_llm() == "responses"
-    agent.api_type = "openai_chat_completions"
-    assert agent._call_llm() == "chat"
-    agent.api_type = "anthropic_messages"
-    assert agent._call_llm() == "anthropic"
 
 
 def test_initial_state_matches_benchmark_defaults(make_initialized_sim):

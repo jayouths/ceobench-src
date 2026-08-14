@@ -22,6 +22,7 @@ tests/
 | 全部组件测试 | `make test-component` |
 | 实验配置 | `make test-config` |
 | LLM 兼容和计费 | `make test-llm` |
+| Bash Agent | `make test-agent` |
 | 模拟器规则 | `make test-simulator` |
 | 完整回归 | `make test-all` |
 | 只检查收集数量 | `make test-collect` |
