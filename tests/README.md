@@ -20,6 +20,7 @@ tests/
 | 日常快速回归 | `make test` |
 | 全部单元测试 | `make test-unit` |
 | 全部组件测试 | `make test-component` |
+| 实验配置 | `make test-config` |
 | LLM 兼容和计费 | `make test-llm` |
 | 模拟器规则 | `make test-simulator` |
 | 完整回归 | `make test-all` |

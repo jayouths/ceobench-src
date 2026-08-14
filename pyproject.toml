@@ -44,7 +44,8 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--strict-markers"]
+# importlib 模式允许不同测试目录使用相同文件名，与生产模块镜像组织。
+addopts = ["--strict-markers", "--import-mode=importlib"]
 markers = [
     "slow: 执行时间明显较长，不进入日常快速回归",
     "linux: 仅在 Linux 环境执行",
