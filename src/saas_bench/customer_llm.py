@@ -240,6 +240,7 @@ class CustomerSimulator:
             output_tokens,
             cached_tokens,
             self.config.social_post_llm_pricing,
+            self.config.social_post_llm_pricing_model_map,
         )
 
     def _log_cost(
@@ -281,6 +282,7 @@ class CustomerSimulator:
                 output_tokens=output_tokens,
                 cost_amount=cost.amount,
                 currency=cost.currency,
+                details={"pricing_model": cost.pricing_model},
             )
 
     # =========================================================================

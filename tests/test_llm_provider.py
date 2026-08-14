@@ -221,8 +221,33 @@ def test_cost_uses_served_model_and_rejects_unknown_model():
     cost = model_token_cost("served", 1_000_000, 1_000_000, 250_000, pricing)
     assert cost.amount == pytest.approx(6.3125)
     assert cost.currency == "CNY"
+    assert cost.pricing_model == "served"
     with pytest.raises(MissingModelPricingError, match="unlisted"):
         model_token_cost("unlisted", 1, 1, 0, pricing)
+
+
+def test_cost_maps_channel_model_to_canonical_pricing_model():
+    pricing = {
+        "deepseek-v4-pro": {
+            "currency": "USD",
+            "uncached_input_cost_per_million": 1.32,
+            "cached_input_cost_per_million": 0.044,
+            "output_cost_per_million": 3.96,
+        }
+    }
+
+    cost = model_token_cost(
+        "DeepSeek-V4-Pro-0813",
+        1_000_000,
+        1_000_000,
+        250_000,
+        pricing,
+        {"DeepSeek-V4-Pro-0813": "deepseek-v4-pro"},
+    )
+
+    assert cost.amount == pytest.approx(4.961)
+    assert cost.currency == "USD"
+    assert cost.pricing_model == "deepseek-v4-pro"
 
 
 @pytest.mark.parametrize(

@@ -35,11 +35,11 @@ if str(package_root) not in sys.path:
     sys.path.insert(0, str(package_root))
 
 DEFAULT_EXPERIMENT_CONFIG = package_root.parent / "experiments" / "experiment.toml"
-RUN_CONFIG_FORMAT_VERSION = 4
+RUN_CONFIG_FORMAT_VERSION = 5
 RUN_CONFIG_FIELDS = {
     "format_version", "run_id", "agent_type", "model", "provider", "api_type",
     "base_url", "reasoning_effort", "temperature", "top_p", "max_output_tokens",
-    "timeout_seconds", "request_options", "pricing", "api_key_env",
+    "timeout_seconds", "request_options", "pricing", "pricing_model_map", "api_key_env",
     "api_key_required", "seed", "scenario", "total_days", "initial_cash",
     "max_decision_turns_per_batch", "max_invalid_responses_per_turn", "label", "simulator_llm",
     "public_bundle_sha256", "harness_git_commit", "harness_git_dirty",
@@ -113,6 +113,7 @@ class BashAgentRunner:
         timeout_seconds: float = 600.0,
         request_options: Optional[Dict[str, Any]] = None,
         pricing: Optional[Dict[str, Dict[str, Any]]] = None,
+        pricing_model_map: Optional[Dict[str, str]] = None,
         api_key_env: Optional[str] = None,
         api_key_required: bool = True,
         simulator_llm_config: Optional[Dict[str, Any]] = None,
@@ -176,9 +177,12 @@ class BashAgentRunner:
         self.timeout_seconds = float(timeout_seconds)
         self.request_options = dict(request_options or {})
         self.pricing = dict(pricing or {})
-        if self.model not in self.pricing:
+        self.pricing_model_map = dict(pricing_model_map or {})
+        configured_pricing_model = self.pricing_model_map.get(self.model, self.model)
+        if configured_pricing_model not in self.pricing:
             raise ValueError(
-                f"decision-agent pricing must include configured model {self.model!r}"
+                f"decision-agent model {self.model!r} resolves to missing pricing "
+                f"model {configured_pricing_model!r}"
             )
         self.total_decision_agent_cost_by_currency: Dict[str, float] = {}
         self.api_key_env = api_key_env
@@ -388,6 +392,7 @@ class BashAgentRunner:
             output_tokens,
             cached_tokens,
             self.pricing,
+            self.pricing_model_map,
         )
         self.total_decision_agent_cost_by_currency[cost.currency] = (
             self.total_decision_agent_cost_by_currency.get(cost.currency, 0.0)
@@ -403,6 +408,7 @@ class BashAgentRunner:
             "cached_tokens": cached_tokens,
             "reasoning_tokens": reasoning_tokens,
             "served_model": served_model,
+            "pricing_model": cost.pricing_model,
             "cost_amount": cost.amount,
             "currency": cost.currency,
             "total_cost_by_currency": self.total_decision_agent_cost_by_currency,
@@ -1589,6 +1595,7 @@ __pycache__/
             'timeout_seconds': self.timeout_seconds,
             'request_options': self.request_options,
             'pricing': self.pricing,
+            'pricing_model_map': self.pricing_model_map,
             'api_key_env': self.api_key_env,
             'api_key_required': self.api_key_required,
             'seed': self.seed,
@@ -2026,7 +2033,11 @@ __pycache__/
                                  cost_by_currency=call_cost_by_currency,
                                  total_cost_by_currency=self.total_decision_agent_cost_by_currency,
                                  requested_model=self.model,
-                                 served_model=self.agent.last_serving_model)
+                                 served_model=self.agent.last_serving_model,
+                                 pricing_model=self.pricing_model_map.get(
+                                     self.agent.last_serving_model,
+                                     self.agent.last_serving_model,
+                                 ))
 
                 if verbose:
                     if tool_name == 'bash':
@@ -2251,6 +2262,7 @@ def _new_experiment_runner(config_path: Path) -> BashAgentRunner:
         timeout_seconds=decision.timeout_seconds,
         request_options=decision.request_options,
         pricing=decision.pricing,
+        pricing_model_map=decision.pricing_model_map,
         simulator_llm_config=file_config.simulator_overrides(),
         label=experiment.label,
     )
@@ -2343,6 +2355,7 @@ def _resume_runner(value: str) -> BashAgentRunner:
         timeout_seconds=saved["timeout_seconds"],
         request_options=saved["request_options"],
         pricing=saved["pricing"],
+        pricing_model_map=saved["pricing_model_map"],
         simulator_llm_config=saved["simulator_llm"],
         public_bundle_sha256=saved["public_bundle_sha256"],
         harness_git_commit=saved["harness_git_commit"],

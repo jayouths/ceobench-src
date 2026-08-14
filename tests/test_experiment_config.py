@@ -128,7 +128,7 @@ def test_smoke_config_is_limited_to_one_week():
     assert config.experiment.label == "smoke-qwen-coder"
 
 
-def test_deepseek_smoke_config_uses_current_models_and_prices():
+def test_deepseek_smoke_config_uses_official_peak_prices():
     config = load_experiment_config(
         PROJECT_ROOT / "experiments/smoke-deepseek.toml"
     )
@@ -138,19 +138,36 @@ def test_deepseek_smoke_config_uses_current_models_and_prices():
     assert config.decision_agent.reasoning_effort == "low"
     assert config.decision_agent.api_key_env == "DEEPSEEK_API_KEY"
     assert config.decision_agent.pricing["deepseek-v4-pro"] == {
-        "currency": "CNY",
-        "uncached_input_cost_per_million": 3.0,
-        "cached_input_cost_per_million": 0.025,
-        "output_cost_per_million": 6.0,
+        "currency": "USD",
+        "uncached_input_cost_per_million": 1.32,
+        "cached_input_cost_per_million": 0.044,
+        "output_cost_per_million": 3.96,
     }
     assert config.social_llm.model == "deepseek-v4-flash"
     assert config.social_llm.reasoning_effort == "none"
     assert config.social_llm.pricing["deepseek-v4-flash"] == {
-        "currency": "CNY",
-        "uncached_input_cost_per_million": 1.0,
-        "cached_input_cost_per_million": 0.02,
-        "output_cost_per_million": 2.0,
+        "currency": "USD",
+        "uncached_input_cost_per_million": 0.44,
+        "cached_input_cost_per_million": 0.014,
+        "output_cost_per_million": 1.32,
     }
+
+
+def test_autodl_models_map_to_official_deepseek_pricing():
+    config = load_experiment_config(
+        PROJECT_ROOT / "experiments/smoke-autodl.toml"
+    )
+
+    assert config.decision_agent.model == "deepseek-v4-pro-202606"
+    assert config.decision_agent.pricing_model_map == {
+        "deepseek-v4-pro-202606": "deepseek-v4-pro",
+        "DeepSeek-V4-Pro": "deepseek-v4-pro",
+        "DeepSeek-V4-Pro-0813": "deepseek-v4-pro",
+    }
+    assert config.social_llm.model == "DeepSeek-V4-Flash"
+    assert config.social_llm.pricing_model_map[
+        "deepseek-v4-flash-202605"
+    ] == "deepseek-v4-flash"
 
 
 def test_full_config_uses_benchmark_horizon():
@@ -234,6 +251,22 @@ def test_model_costs_must_be_configured_as_a_pair(tmp_path):
     )
 
     with pytest.raises(ValueError, match="explicitly configure: output_cost_per_million"):
+        load_experiment_config(path)
+
+
+def test_pricing_model_map_must_target_configured_official_price(tmp_path):
+    text = (PROJECT_ROOT / "experiments/smoke.toml").read_text()
+    pricing_header = '[models.decision_agent.pricing."qwen3-coder:30b"]'
+    path = tmp_path / "invalid-pricing-map.toml"
+    path.write_text(text.replace(
+        pricing_header,
+        '[models.decision_agent.pricing_model_map]\n'
+        '"qwen3-coder:30b" = "missing-official-model"\n\n'
+        + pricing_header,
+        1,
+    ))
+
+    with pytest.raises(ValueError, match="targets unknown pricing model"):
         load_experiment_config(path)
 
 
@@ -347,7 +380,7 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_pat
     run_dir = tmp_path / "run_existing"
     run_dir.mkdir()
     (run_dir / "config.json").write_text(json.dumps({
-        "format_version": 4,
+        "format_version": 5,
         "run_id": "existing",
         "agent_type": "bash_agent",
         "model": "original-model",
@@ -365,6 +398,7 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_pat
             "cached_input_cost_per_million": 0.1,
             "output_cost_per_million": 2.0,
         }},
+        "pricing_model_map": {},
         "request_options": {},
         "api_key_env": None,
         "api_key_required": False,
@@ -1231,12 +1265,15 @@ def test_simulator_settings_survive_environment_and_session_round_trip(monkeypat
         "social_post_llm_top_p": 0.72,
         "social_post_llm_max_tokens": 123,
         "social_post_llm_timeout_seconds": 45.0,
-        "social_post_llm_pricing": {"social-test": {
+        "social_post_llm_pricing": {"official-social": {
             "currency": "USD",
             "uncached_input_cost_per_million": 0.0,
             "cached_input_cost_per_million": 0.0,
             "output_cost_per_million": 0.0,
         }},
+        "social_post_llm_pricing_model_map": {
+            "social-test": "official-social",
+        },
     }
     monkeypatch.setenv("CEOBENCH_SIMULATOR_LLM_CONFIG", json.dumps(overrides))
 
@@ -1480,18 +1517,16 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.model = "requested"
     runner.pricing = {
-        "requested": {
-            "currency": "USD",
-            "uncached_input_cost_per_million": 1.0,
-            "cached_input_cost_per_million": 0.1,
-            "output_cost_per_million": 2.0,
-        },
-        "served": {
+        "official": {
             "currency": "CNY",
             "uncached_input_cost_per_million": 3.0,
             "cached_input_cost_per_million": 0.25,
             "output_cost_per_million": 4.0,
         },
+    }
+    runner.pricing_model_map = {
+        "requested": "official",
+        "served": "official",
     }
     runner.total_decision_agent_cost_by_currency = {}
     runner.response_log_file = tmp_path / "responses.jsonl"
@@ -1507,6 +1542,7 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
 
     entry = json.loads(runner.response_log_file.read_text())
     assert entry["served_model"] == "served"
+    assert entry["pricing_model"] == "official"
     assert entry["cached_tokens"] == 250_000
     assert entry["reasoning_tokens"] == 125_000
     assert entry["cost_amount"] == pytest.approx(6.3125)
@@ -2847,6 +2883,7 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
     runner.seed = 42
     runner.scenario = "default"
     runner.model = "test-model"
+    runner.pricing_model_map = {}
     runner.workspace_dir = tmp_path
     runner._server_port = 1
     runner.setup = lambda: None

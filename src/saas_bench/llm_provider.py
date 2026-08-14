@@ -42,13 +42,18 @@ class TextLLMResult:
 
 @dataclass(frozen=True)
 class TokenCost:
-    """One provider-billed amount in its original settlement currency."""
+    """One normalized amount calculated from the canonical pricing model."""
 
     amount: float
     currency: str
+    pricing_model: str
 
     def as_dict(self) -> dict[str, Any]:
-        return {"amount": self.amount, "currency": self.currency}
+        return {
+            "amount": self.amount,
+            "currency": self.currency,
+            "pricing_model": self.pricing_model,
+        }
 
 
 def validate_provider_api_type(provider: str, api_type: str, section: str) -> None:
@@ -281,12 +286,16 @@ def model_token_cost(
     output_tokens: int,
     cached_tokens: int,
     pricing: Mapping[str, Mapping[str, Any]],
+    pricing_model_map: Optional[Mapping[str, str]] = None,
 ) -> TokenCost:
-    if model not in pricing:
+    # 渠道请求名和服务端返回名可能不同，统一映射到官方模型后计价。
+    pricing_model = (pricing_model_map or {}).get(model, model)
+    if pricing_model not in pricing:
         raise MissingModelPricingError(
-            f"No token pricing configured for served model {model!r}; add it to pricing"
+            f"No token pricing configured for served model {model!r} "
+            f"(resolved pricing model {pricing_model!r})"
         )
-    price = pricing[model]
+    price = pricing[pricing_model]
     return TokenCost(
         amount=token_cost(
             input_tokens,
@@ -297,6 +306,7 @@ def model_token_cost(
             price["output_cost_per_million"],
         ),
         currency=str(price["currency"]),
+        pricing_model=pricing_model,
     )
 
 

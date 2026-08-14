@@ -57,6 +57,7 @@ _SIMULATOR_LLM_CONFIG_FIELDS = (
     "social_post_llm_max_tokens",
     "social_post_llm_timeout_seconds",
     "social_post_llm_pricing",
+    "social_post_llm_pricing_model_map",
     "social_post_llm_request_options",
     "social_post_llm_task_parameters",
 )
@@ -168,9 +169,15 @@ def _apply_simulator_llm_config(config: BenchmarkConfig) -> dict:
             print(f"Error: max_tokens and timeout must be positive for {prefix}", file=sys.stderr)
             sys.exit(1)
         pricing = getattr(config, f"{prefix}_pricing")
+        pricing_model_map = getattr(config, f"{prefix}_pricing_model_map")
         model = getattr(config, f"{prefix}_model")
-        if model not in pricing:
-            print(f"Error: pricing is missing configured model {model!r} for {prefix}", file=sys.stderr)
+        pricing_model = pricing_model_map.get(model, model)
+        if pricing_model not in pricing:
+            print(
+                f"Error: model {model!r} resolves to missing pricing model "
+                f"{pricing_model!r} for {prefix}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         if provider not in {"bedrock"}:
             api_key_env = getattr(config, f"{prefix}_api_key_env")

@@ -1,5 +1,5 @@
-# DeepSeek Smoke Test：只运行 7 天，验证官方 API、工具调用、成本记录与主实验链路。
-# API Key 仅从仓库根目录 .env 的 DEEPSEEK_API_KEY 读取。
+# AutoDL Smoke Test：只运行 7 天，验证 AutoDL API、工具调用、成本记录与主实验链路。
+# API Key 仅从仓库根目录 .env 的 AUTODL_API_KEY 读取。
 
 [experiment]
 seed = 42
@@ -7,21 +7,27 @@ days = 7
 scenario = "default"
 initial_cash = 1000000.0
 workspace = "bash_agent_runs"
-label = "smoke-deepseek-v4"
+label = "smoke-autodl-deepseek-v4"
 max_decision_turns_per_batch = 100
 max_invalid_responses_per_turn = 3
 
-# 决策 Agent 需要稳定的工具调用能力，使用 V4 Pro 的低强度思考模式。
+# Pro 使用已验证可访问的固定版本请求名；实际服务模型由响应的 model 字段记录。
 [models.decision_agent]
 provider = "openai_compatible"
-api_type = "openai_responses"
-model = "deepseek-v4-pro"
-base_url = "https://api.deepseek.com"
-api_key_env = "DEEPSEEK_API_KEY"
+api_type = "openai_chat_completions"
+model = "deepseek-v4-pro-202606"
+base_url = "https://www.autodl.art/api/v1"
+api_key_env = "AUTODL_API_KEY"
 api_key_required = true
 reasoning_effort = "low"
 max_output_tokens = 16384
 timeout_seconds = 600
+
+# AutoDL 请求名和实际服务名都映射到 DeepSeek 官方模型。
+[models.decision_agent.pricing_model_map]
+"deepseek-v4-pro-202606" = "deepseek-v4-pro"
+"DeepSeek-V4-Pro" = "deepseek-v4-pro"
+"DeepSeek-V4-Pro-0813" = "deepseek-v4-pro"
 
 # DeepSeek 2026-08-17 00:00（北京时间）起的官方峰时价，固定作为保守、可复现的论文计价口径。
 # 来源：https://api-docs.deepseek.com/quick_start/pricing
@@ -31,19 +37,26 @@ uncached_input_cost_per_million = 1.32
 cached_input_cost_per_million = 0.044
 output_cost_per_million = 3.96
 
-# 社交环境主要生成短文本，使用成本更低的 V4 Flash，并显式关闭思考。
+# 社交环境生成短文本，使用低成本的 V4 Flash，并显式关闭思考。
 [models.social_llm]
 provider = "openai_compatible"
-api_type = "openai_responses"
-model = "deepseek-v4-flash"
-base_url = "https://api.deepseek.com"
-api_key_env = "DEEPSEEK_API_KEY"
+api_type = "openai_chat_completions"
+model = "DeepSeek-V4-Flash"
+base_url = "https://www.autodl.art/api/v1"
+api_key_env = "AUTODL_API_KEY"
 api_key_required = true
 reasoning_effort = "none"
 temperature = 0.95
 max_output_tokens = 1000
 timeout_seconds = 600
 
+[models.social_llm.pricing_model_map]
+"DeepSeek-V4-Flash" = "deepseek-v4-flash"
+"deepseek-v4-flash-202605" = "deepseek-v4-flash"
+"DeepSeek-V4-Flash-0731" = "deepseek-v4-flash"
+
+# DeepSeek 2026-08-17 00:00（北京时间）起的官方峰时价，单位：美元/百万 Token。
+# 来源：https://api-docs.deepseek.com/quick_start/pricing
 [models.social_llm.pricing."deepseek-v4-flash"]
 currency = "USD"
 uncached_input_cost_per_million = 0.44

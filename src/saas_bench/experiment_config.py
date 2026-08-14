@@ -13,7 +13,7 @@ _REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 _MODEL_KEYS = {
     "provider", "api_type", "model", "base_url", "api_key_env", "api_key_required", "reasoning_effort",
     "temperature", "top_p", "max_output_tokens", "timeout_seconds",
-    "pricing", "request_options", "tasks",
+    "pricing", "pricing_model_map", "request_options", "tasks",
 }
 _TASK_KEYS = {
     "reasoning_effort", "temperature", "top_p", "max_output_tokens", "request_options",
@@ -54,6 +54,7 @@ class ModelSettings:
     top_p: Optional[float] = None
     timeout_seconds: float = 600.0
     pricing: dict[str, dict[str, Any]] = field(default_factory=dict)
+    pricing_model_map: dict[str, str] = field(default_factory=dict)
     request_options: dict[str, Any] = field(default_factory=dict)
     tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -166,6 +167,17 @@ def _load_model(
     from .llm_provider import validate_provider_api_type, validate_reasoning_effort
     validate_provider_api_type(provider, api_type, section)
 
+    pricing = _load_pricing(raw.get("pricing"), section)
+    pricing_model_map = _load_pricing_model_map(
+        raw.get("pricing_model_map"), section, pricing
+    )
+    configured_pricing_model = pricing_model_map.get(raw["model"], raw["model"])
+    if configured_pricing_model not in pricing:
+        raise ValueError(
+            f"{section} model {raw['model']!r} resolves to pricing model "
+            f"{configured_pricing_model!r}, which is missing from {section}.pricing"
+        )
+
     values = {
         "provider": provider,
         "api_type": api_type,
@@ -178,7 +190,8 @@ def _load_model(
         "top_p": raw.get("top_p"),
         "max_output_tokens": raw["max_output_tokens"],
         "timeout_seconds": raw.get("timeout_seconds", 600.0),
-        "pricing": _load_pricing(raw.get("pricing"), section, raw["model"]),
+        "pricing": pricing,
+        "pricing_model_map": pricing_model_map,
         "request_options": _load_request_options(
             raw.get("request_options"), f"{section}.request_options", api_type
         ),
@@ -241,6 +254,7 @@ def _model_overrides(prefix: str, settings: ModelSettings) -> dict[str, Any]:
         f"{prefix}_max_tokens": settings.max_output_tokens,
         f"{prefix}_timeout_seconds": settings.timeout_seconds,
         f"{prefix}_pricing": settings.pricing,
+        f"{prefix}_pricing_model_map": settings.pricing_model_map,
         f"{prefix}_request_options": settings.request_options,
         f"{prefix}_task_parameters": settings.tasks,
     }
@@ -306,9 +320,7 @@ def _load_request_options(
     return options
 
 
-def _load_pricing(
-    value: Any, section: str, configured_model: str
-) -> dict[str, dict[str, Any]]:
+def _load_pricing(value: Any, section: str) -> dict[str, dict[str, Any]]:
     raw = _required_table(value, f"{section}.pricing")
     result: dict[str, dict[str, Any]] = {}
     for model, raw_price in raw.items():
@@ -345,10 +357,33 @@ def _load_pricing(
             "currency": currency,
             **{key: float(price[key]) for key in numeric_keys},
         }
-    if configured_model not in result:
-        raise ValueError(
-            f"{section}.pricing must include configured model {configured_model!r}"
-        )
+    return result
+
+
+def _load_pricing_model_map(
+    value: Any,
+    section: str,
+    pricing: Mapping[str, Mapping[str, Any]],
+) -> dict[str, str]:
+    if value is None:
+        return {}
+    raw = _table(value, f"{section}.pricing_model_map")
+    result: dict[str, str] = {}
+    for channel_model, official_model in raw.items():
+        if not isinstance(channel_model, str) or not channel_model:
+            raise ValueError(
+                f"{section}.pricing_model_map keys must be non-empty strings"
+            )
+        if not isinstance(official_model, str) or not official_model:
+            raise ValueError(
+                f"{section}.pricing_model_map.{channel_model} must be a non-empty string"
+            )
+        if official_model not in pricing:
+            raise ValueError(
+                f"{section}.pricing_model_map.{channel_model} targets unknown "
+                f"pricing model {official_model!r}"
+            )
+        result[channel_model] = official_model
     return result
 
 
