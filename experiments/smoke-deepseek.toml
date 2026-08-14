@@ -11,6 +11,10 @@ label = "smoke-deepseek-v4"
 max_decision_turns_per_batch = 100
 max_invalid_responses_per_turn = 3
 
+# Smoke 默认只验证原始 Baseline 链路。
+[modules.analysis]
+enabled = false
+
 # 决策 Agent 需要稳定的工具调用能力，使用 V4 Pro 的低强度思考模式。
 [models.decision_agent]
 provider = "openai_compatible"

@@ -22,10 +22,13 @@ _SOCIAL_TASKS = {
     "customer_post", "macro_post", "competitor_post", "agent_post_judge",
     "agent_post_reply",
 }
+# analysis 模块包含两类调用：四个职能角色分别生成报告，随后统一重构经营状态。
+_ANALYSIS_TASKS = {"role_report", "state_reconstruction"}
 _EXPERIMENT_KEYS = {
     "seed", "days", "scenario", "initial_cash", "workspace", "label",
     "max_decision_turns_per_batch", "max_invalid_responses_per_turn",
 }
+_ANALYSIS_MODULE_KEYS = {"enabled"}
 
 
 @dataclass(frozen=True)
@@ -63,10 +66,24 @@ class ModelSettings:
 
 
 @dataclass(frozen=True)
+class AnalysisModuleSettings:
+    """隐性经营状态识别模块的实验开关。"""
+
+    enabled: bool
+
+
+@dataclass(frozen=True)
+class ModuleSettings:
+    analysis: AnalysisModuleSettings
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     experiment: ExperimentSettings
+    modules: ModuleSettings
     decision_agent: ModelSettings
     social_llm: ModelSettings
+    analysis: Optional[ModelSettings]
 
     def simulator_overrides(self) -> dict[str, Any]:
         return _model_overrides("social_post_llm", self.social_llm)
@@ -80,26 +97,64 @@ def load_experiment_config(path: Optional[Path]) -> ExperimentConfig:
     with config_path.open("rb") as file:
         raw = tomllib.load(file)
 
-    _reject_unknown(raw, {"experiment", "models"}, "root")
-    experiment_raw = _table(raw.get("experiment"), "experiment")
+    _reject_unknown(raw, {"experiment", "modules", "models"}, "root")
+    experiment = _load_experiment(
+        _table(raw.get("experiment"), "experiment"), ExperimentSettings()
+    )
     models_raw = _required_table(raw.get("models"), "models")
-    _reject_unknown(models_raw, {"decision_agent", "social_llm"}, "models")
+    _reject_unknown(models_raw, {"decision_agent", "social_llm", "analysis"}, "models")
+    decision_agent = _load_model(
+        _required_table(models_raw.get("decision_agent"), "models.decision_agent"),
+        _DECISION_PROVIDERS,
+        "models.decision_agent",
+        valid_tasks=set(),
+    )
+    social_llm = _load_model(
+        _required_table(models_raw.get("social_llm"), "models.social_llm"),
+        _SIMULATOR_PROVIDERS,
+        "models.social_llm",
+        valid_tasks=_SOCIAL_TASKS,
+    )
+
+    modules_raw = _required_table(raw.get("modules"), "modules")
+    _reject_unknown(modules_raw, {"analysis"}, "modules")
+    analysis_module = _load_analysis_module(
+        _required_table(modules_raw.get("analysis"), "modules.analysis")
+    )
+
+    # 关闭模块时不要求配置无用模型；开启后必须完整声明模型身份和价格，
+    # 避免实验运行到第一周才因缺少配置失败。
+    analysis_model_raw = models_raw.get("analysis")
+    if analysis_module.enabled and analysis_model_raw is None:
+        raise ValueError(
+            "models.analysis must be explicitly configured when modules.analysis.enabled is true"
+        )
+    analysis_model = None
+    if analysis_model_raw is not None:
+        analysis_model = _load_model(
+            _required_table(analysis_model_raw, "models.analysis"),
+            _DECISION_PROVIDERS,
+            "models.analysis",
+            valid_tasks=_ANALYSIS_TASKS,
+        )
 
     return ExperimentConfig(
-        experiment=_load_experiment(experiment_raw, ExperimentSettings()),
-        decision_agent=_load_model(
-            _required_table(models_raw.get("decision_agent"), "models.decision_agent"),
-            _DECISION_PROVIDERS,
-            "models.decision_agent",
-            valid_tasks=set(),
-        ),
-        social_llm=_load_model(
-            _required_table(models_raw.get("social_llm"), "models.social_llm"),
-            _SIMULATOR_PROVIDERS,
-            "models.social_llm",
-            valid_tasks=_SOCIAL_TASKS,
-        ),
+        experiment=experiment,
+        modules=ModuleSettings(analysis=analysis_module),
+        decision_agent=decision_agent,
+        social_llm=social_llm,
+        analysis=analysis_model,
     )
+
+
+def _load_analysis_module(raw: Mapping[str, Any]) -> AnalysisModuleSettings:
+    _reject_unknown(raw, _ANALYSIS_MODULE_KEYS, "modules.analysis")
+    if "enabled" not in raw:
+        raise ValueError("modules.analysis must explicitly configure: enabled")
+    enabled = raw["enabled"]
+    if not isinstance(enabled, bool):
+        raise ValueError("modules.analysis.enabled must be a boolean")
+    return AnalysisModuleSettings(enabled=enabled)
 
 
 def _load_experiment(

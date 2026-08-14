@@ -1,17 +1,26 @@
 # 实验运行与模型调用配置
 
-`*.toml` 只配置实验参数和两类 LLM 参数，不修改 CEO-Bench 的经济规则、客户行为规则和评测逻辑。企业客户谈判由官方的结构化规则处理，不调用 LLM。
+`*.toml` 只配置实验参数、创新模块开关和 LLM 参数，不修改 CEO-Bench 的经济规则、客户行为规则和评测逻辑。企业客户谈判由官方的结构化规则处理，不调用 LLM。
 
 `experiment.max_decision_turns_per_batch` 限制单个决策批次的 Agent 行动次数。达到上限仍未执行 `next-week` 时，本次调用会保存可恢复断点并以 `incomplete` 结束，不会替 Agent 强制推进环境。
 
 `experiment.max_invalid_responses_per_turn` 限制同一次行动中连续出现无工具调用或非法工具参数的次数。达到上限后实验直接失败，避免模型异常时无限请求。
 
-启动新实验时不接受 CLI 配置参数，程序固定读取 `experiments/experiment.toml`。以下两个配置块都必须存在，并且必须分别填写 `provider`、`api_type`、`model` 和 `pricing`：
+启动新实验时不接受 CLI 配置参数，程序固定读取 `experiments/experiment.toml`。创新模块必须显式配置开关：
+
+```toml
+[modules.analysis]
+enabled = false
+```
+
+以下两个模型配置块始终必须存在，并且必须分别填写 `provider`、`api_type`、`model` 和 `pricing`：
 
 ```toml
 [models.decision_agent]
 [models.social_llm]
 ```
+
+当 `modules.analysis.enabled = true` 时，还必须显式配置 `[models.analysis]`；关闭模块时不要求配置该模型。
 
 代码不提供模型、Provider 或输出上限的兜底值。两类模型都必须显式填写 `max_output_tokens`，缺少时程序会在实验启动前直接报错。任务级 `max_output_tokens` 可以省略，此时继承所属模型的上限。
 

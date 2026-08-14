@@ -67,6 +67,8 @@ def test_experiment_config_loads_all_experiment_and_model_fields():
     assert config.experiment.initial_cash == pytest.approx(1_000_000)
     assert config.experiment.max_decision_turns_per_batch == 100
     assert config.experiment.max_invalid_responses_per_turn == 3
+    assert config.modules.analysis.enabled is False
+    assert config.analysis is None
     assert config.decision_agent.model == "qwen3-coder:30b"
     assert config.decision_agent.reasoning_effort is None
     assert config.decision_agent.temperature == pytest.approx(0.7)
@@ -79,6 +81,86 @@ def test_experiment_config_loads_all_experiment_and_model_fields():
     assert config.social_llm.model == "qwen3-coder:30b"
     assert config.social_llm.base_url == "http://localhost:11434/v1"
     assert config.social_llm.max_output_tokens == 1000
+
+
+def test_analysis_model_is_required_only_when_module_is_enabled(tmp_path):
+    baseline_text = (PROJECT_ROOT / "experiments/smoke.toml").read_text()
+    enabled_text = baseline_text.replace("enabled = false", "enabled = true", 1)
+    missing_model_path = tmp_path / "analysis-missing-model.toml"
+    missing_model_path.write_text(enabled_text)
+
+    with pytest.raises(
+        ValueError,
+        match=r"models\.analysis must be explicitly configured",
+    ):
+        load_experiment_config(missing_model_path)
+
+    configured_path = tmp_path / "analysis-configured.toml"
+    configured_path.write_text(
+        enabled_text
+        + """
+
+[models.analysis]
+provider = "openai_compatible"
+api_type = "openai_chat_completions"
+model = "analysis-model"
+base_url = "http://localhost:11434/v1"
+api_key_required = false
+reasoning_effort = "none"
+temperature = 0.2
+max_output_tokens = 2000
+timeout_seconds = 600
+
+[models.analysis.pricing."analysis-model"]
+currency = "CNY"
+uncached_input_cost_per_million = 0.0
+cached_input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+
+[models.analysis.tasks.role_report]
+max_output_tokens = 1500
+
+[models.analysis.tasks.state_reconstruction]
+max_output_tokens = 2000
+"""
+    )
+
+    config = load_experiment_config(configured_path)
+
+    assert config.modules.analysis.enabled is True
+    assert config.analysis is not None
+    assert config.analysis.model == "analysis-model"
+    assert config.analysis.tasks["role_report"]["max_output_tokens"] == 1500
+    assert config.analysis.tasks["state_reconstruction"]["max_output_tokens"] == 2000
+
+
+def test_analysis_switch_must_be_explicitly_configured(tmp_path):
+    text = (PROJECT_ROOT / "experiments/smoke.toml").read_text()
+
+    missing_modules_path = tmp_path / "missing-modules.toml"
+    missing_modules_path.write_text(
+        text.replace("[modules.analysis]\nenabled = false\n\n", "", 1)
+    )
+    with pytest.raises(ValueError, match="modules must be explicitly configured"):
+        load_experiment_config(missing_modules_path)
+
+    missing_enabled_path = tmp_path / "missing-analysis-enabled.toml"
+    missing_enabled_path.write_text(text.replace("enabled = false\n", "", 1))
+    with pytest.raises(
+        ValueError,
+        match="modules.analysis must explicitly configure: enabled",
+    ):
+        load_experiment_config(missing_enabled_path)
+
+
+@pytest.mark.parametrize("value", ["1", '"true"'])
+def test_analysis_enabled_must_be_boolean(tmp_path, value):
+    text = (PROJECT_ROOT / "experiments/smoke.toml").read_text()
+    path = tmp_path / "invalid-analysis-switch.toml"
+    path.write_text(text.replace("enabled = false", f"enabled = {value}", 1))
+
+    with pytest.raises(ValueError, match="modules.analysis.enabled must be a boolean"):
+        load_experiment_config(path)
 
 
 def test_experiment_config_path_is_required():

@@ -12,6 +12,10 @@ label = "preliminary-qwen-coder"        # 实验展示标签，不影响模拟�
 max_decision_turns_per_batch = 100      # 单个决策批次的最大 Agent 行动数
 max_invalid_responses_per_turn = 3      # 单次行动允许的连续无效模型输出数
 
+# 创新模块默认关闭，保持本配置为原始 Baseline。
+[modules.analysis]
+enabled = false
+
 # 决策 Agent：读取经营信息、调用工具并做出每周经营决策。
 [models.decision_agent]
 provider = "openai_compatible"           # 客户端类型；Ollama 使用 openai_compatible

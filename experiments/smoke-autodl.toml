@@ -11,6 +11,10 @@ label = "smoke-autodl-deepseek-v4"
 max_decision_turns_per_batch = 100
 max_invalid_responses_per_turn = 3
 
+# Smoke 默认只验证原始 Baseline 链路。
+[modules.analysis]
+enabled = false
+
 # Pro 使用已验证可访问的固定版本请求名；实际服务模型由响应的 model 字段记录。
 [models.decision_agent]
 provider = "openai_compatible"
