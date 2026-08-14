@@ -23,6 +23,7 @@ tests/
 | 实验配置 | `make test-config` |
 | LLM 兼容和计费 | `make test-llm` |
 | Bash Agent | `make test-agent` |
+| Analysis 创新模块 | `make test-analysis` |
 | Checkpoint | `make test-checkpoint` |
 | 断点恢复 | `make test-resume` |
 | API Server | `make test-api` |

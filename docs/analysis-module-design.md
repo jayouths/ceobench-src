@@ -61,7 +61,7 @@ Prompt 必须包含字段语义、枚举范围、数量上限和最小合法输�
 | 服务压力 | `underutilized / balanced / pressured / overloaded / insufficient_data` |
 | 客户健康度 | `healthy / watch / deteriorating / critical / insufficient_data` |
 
-`state_label` 由程序根据五个维度组合生成，不允许 LLM 自由生成不可比较的标签。`diagnosis` 保留一句自然语言总结，用于决策 Agent 阅读。
+不保留 `state_label`。五个固定维度及各自的离散标签共同构成唯一的机器可比较状态，避免再增加一个语义重复且难以验证的综合标签。`diagnosis` 仅保留一句自然语言总结，供决策 Agent 阅读，不参与状态分类。
 
 经营画像同时包含：
 

@@ -101,7 +101,7 @@ modal_deploy/state/
 backups/
 
 # Aux dirs (internal-only, not part of public package)
-analysis/
+/analysis/
 build/
 dist/
 # Generated docs are in public/docs; we DO track top-level docs/ for
