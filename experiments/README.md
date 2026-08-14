@@ -6,11 +6,12 @@
 
 `experiment.max_invalid_responses_per_turn` 限制同一次行动中连续出现无工具调用或非法工具参数的次数。达到上限后实验直接失败，避免模型异常时无限请求。
 
-启动新实验时不接受 CLI 配置参数，程序固定读取 `experiments/experiment.toml`。创新模块必须显式配置开关：
+启动新实验时不接受 CLI 配置参数，程序固定读取 `experiments/experiment.toml`。创新模块的开关和输出修复上限必须显式配置：
 
 ```toml
 [modules.analysis]
 enabled = false
+max_schema_retries = 1
 ```
 
 以下两个模型配置块始终必须存在，并且必须分别填写 `provider`、`api_type`、`model` 和 `pricing`：

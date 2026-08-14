@@ -20,6 +20,7 @@ def test_experiment_config_loads_all_experiment_and_model_fields():
     assert config.experiment.max_decision_turns_per_batch == 100
     assert config.experiment.max_invalid_responses_per_turn == 3
     assert config.modules.analysis.enabled is False
+    assert config.modules.analysis.max_schema_retries == 1
     assert config.analysis is None
     assert config.decision_agent.model == "qwen3-coder:30b"
     assert config.decision_agent.reasoning_effort is None
@@ -84,12 +85,16 @@ max_output_tokens = 2000
     assert config.analysis.tasks["role_report"]["max_output_tokens"] == 1500
     assert config.analysis.tasks["state_reconstruction"]["max_output_tokens"] == 2000
 
-def test_analysis_switch_must_be_explicitly_configured(tmp_path):
+def test_analysis_settings_must_be_explicitly_configured(tmp_path):
     text = (PROJECT_ROOT / "experiments/smoke.toml").read_text()
 
     missing_modules_path = tmp_path / "missing-modules.toml"
     missing_modules_path.write_text(
-        text.replace("[modules.analysis]\nenabled = false\n\n", "", 1)
+        text.replace(
+            "[modules.analysis]\nenabled = false\nmax_schema_retries = 1                  # JSON Schema 校验失败后的最大修复次数\n\n",
+            "",
+            1,
+        )
     )
     with pytest.raises(ValueError, match="modules must be explicitly configured"):
         load_experiment_config(missing_modules_path)
@@ -102,6 +107,16 @@ def test_analysis_switch_must_be_explicitly_configured(tmp_path):
     ):
         load_experiment_config(missing_enabled_path)
 
+    missing_retries_path = tmp_path / "missing-analysis-retries.toml"
+    missing_retries_path.write_text(
+        text.replace("max_schema_retries = 1", "", 1)
+    )
+    with pytest.raises(
+        ValueError,
+        match="modules.analysis must explicitly configure: max_schema_retries",
+    ):
+        load_experiment_config(missing_retries_path)
+
 @pytest.mark.parametrize("value", ["1", '"true"'])
 def test_analysis_enabled_must_be_boolean(tmp_path, value):
     text = (PROJECT_ROOT / "experiments/smoke.toml").read_text()
@@ -109,6 +124,21 @@ def test_analysis_enabled_must_be_boolean(tmp_path, value):
     path.write_text(text.replace("enabled = false", f"enabled = {value}", 1))
 
     with pytest.raises(ValueError, match="modules.analysis.enabled must be a boolean"):
+        load_experiment_config(path)
+
+@pytest.mark.parametrize("value", ["-1", "true"])
+def test_analysis_schema_retries_must_be_non_negative_integer(tmp_path, value):
+    text = (PROJECT_ROOT / "experiments/smoke.toml").read_text()
+    path = tmp_path / "invalid-analysis-schema-retries.toml"
+    path.write_text(
+        text.replace(
+            "max_schema_retries = 1",
+            f"max_schema_retries = {value}",
+            1,
+        )
+    )
+
+    with pytest.raises(ValueError, match="must be a non-negative integer"):
         load_experiment_config(path)
 
 def test_experiment_config_path_is_required():

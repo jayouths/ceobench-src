@@ -28,7 +28,7 @@ _EXPERIMENT_KEYS = {
     "seed", "days", "scenario", "initial_cash", "workspace", "label",
     "max_decision_turns_per_batch", "max_invalid_responses_per_turn",
 }
-_ANALYSIS_MODULE_KEYS = {"enabled"}
+_ANALYSIS_MODULE_KEYS = {"enabled", "max_schema_retries"}
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,7 @@ class AnalysisModuleSettings:
     """隐性经营状态识别模块的实验开关。"""
 
     enabled: bool
+    max_schema_retries: int
 
 
 @dataclass(frozen=True)
@@ -149,12 +150,27 @@ def load_experiment_config(path: Optional[Path]) -> ExperimentConfig:
 
 def _load_analysis_module(raw: Mapping[str, Any]) -> AnalysisModuleSettings:
     _reject_unknown(raw, _ANALYSIS_MODULE_KEYS, "modules.analysis")
-    if "enabled" not in raw:
-        raise ValueError("modules.analysis must explicitly configure: enabled")
+    missing = sorted(_ANALYSIS_MODULE_KEYS - set(raw))
+    if missing:
+        raise ValueError(
+            f"modules.analysis must explicitly configure: {', '.join(missing)}"
+        )
     enabled = raw["enabled"]
     if not isinstance(enabled, bool):
         raise ValueError("modules.analysis.enabled must be a boolean")
-    return AnalysisModuleSettings(enabled=enabled)
+    max_schema_retries = raw["max_schema_retries"]
+    if (
+        not isinstance(max_schema_retries, int)
+        or isinstance(max_schema_retries, bool)
+        or max_schema_retries < 0
+    ):
+        raise ValueError(
+            "modules.analysis.max_schema_retries must be a non-negative integer"
+        )
+    return AnalysisModuleSettings(
+        enabled=enabled,
+        max_schema_retries=max_schema_retries,
+    )
 
 
 def _load_experiment(
