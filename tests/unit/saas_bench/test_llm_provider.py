@@ -32,6 +32,7 @@ def test_openai_responses_request_and_normalized_result():
             input_tokens=12,
             output_tokens=5,
             input_tokens_details=SimpleNamespace(cached_tokens=7),
+            output_tokens_details=SimpleNamespace(reasoning_tokens=3),
         ),
     ))
     client = SimpleNamespace(responses=recorder)
@@ -54,6 +55,7 @@ def test_openai_responses_request_and_normalized_result():
         "served-responses", 12, 5,
     )
     assert result.cached_tokens == 7
+    assert result.reasoning_tokens == 3
     assert recorder.calls == [{
         "model": "requested",
         "input": [
@@ -73,6 +75,7 @@ def test_openai_chat_request_and_normalized_result():
             prompt_tokens=8,
             completion_tokens=3,
             prompt_tokens_details=SimpleNamespace(cached_tokens=2),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=1),
         ),
         choices=[SimpleNamespace(message=SimpleNamespace(content="chat text"))],
     ))
@@ -94,6 +97,7 @@ def test_openai_chat_request_and_normalized_result():
         "chat text", "served-chat", 8, 3,
     )
     assert result.cached_tokens == 2
+    assert result.reasoning_tokens == 1
     assert recorder.calls[0]["reasoning_effort"] == "high"
     assert recorder.calls[0]["max_completion_tokens"] == 50
     assert recorder.calls[0]["top_p"] == pytest.approx(0.8)
@@ -127,6 +131,7 @@ def test_deepseek_chat_cache_hit_tokens_are_normalized():
     assert result.input_tokens == 12
     assert result.output_tokens == 4
     assert result.cached_tokens == 9
+    assert result.reasoning_tokens == 0
 
 
 def test_chat_cache_fields_must_not_disagree():
@@ -172,6 +177,7 @@ def test_anthropic_messages_request_and_normalized_result():
         "first\nsecond", "served-anthropic", 25, 9,
     )
     assert result.cached_tokens == 5
+    assert result.reasoning_tokens == 0
     assert recorder.calls[0]["thinking"] == {"type": "adaptive"}
     assert recorder.calls[0]["output_config"] == {"effort": "medium"}
 

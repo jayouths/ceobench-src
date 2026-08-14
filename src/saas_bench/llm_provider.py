@@ -27,6 +27,7 @@ class TextLLMResult:
 
     input_tokens 是计费总输入，cached_tokens 是其中命中缓存的部分；
     output_tokens 是按输出单价计费的总输出，推理 Token 通常包含在其中。
+    reasoning_tokens 只用于独立观测，不从 output_tokens 中减除，也不重复计费。
     OpenAI/DeepSeek 基本直接符合该口径；Anthropic 的缓存读写量原本
     独立于 input_tokens，必须在本兼容层合并。接入新 Provider 时应依据
     其官方计费文档单独适配，不能只根据字段名称推断包含关系。
@@ -37,6 +38,7 @@ class TextLLMResult:
     input_tokens: int
     output_tokens: int
     cached_tokens: int
+    reasoning_tokens: int
     raw_response: Any
 
 
@@ -197,6 +199,8 @@ def call_text_model(
             ),
             output_tokens=_int_attr(usage, "output_tokens"),
             cached_tokens=cache_read_tokens,
+            # Anthropic Messages 当前没有统一的独立推理 Token 用量字段。
+            reasoning_tokens=0,
             raw_response=response,
         )
 
@@ -224,6 +228,9 @@ def call_text_model(
             cached_tokens=_nested_int_attr(
                 usage, "input_tokens_details", "cached_tokens"
             ),
+            reasoning_tokens=_nested_int_attr(
+                usage, "output_tokens_details", "reasoning_tokens"
+            ),
             raw_response=response,
         )
 
@@ -247,6 +254,9 @@ def call_text_model(
             input_tokens=_int_attr(usage, "prompt_tokens"),
             output_tokens=_int_attr(usage, "completion_tokens"),
             cached_tokens=openai_chat_cached_tokens(usage),
+            reasoning_tokens=_nested_int_attr(
+                usage, "completion_tokens_details", "reasoning_tokens"
+            ),
             raw_response=response,
         )
 
