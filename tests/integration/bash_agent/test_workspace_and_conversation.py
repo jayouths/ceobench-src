@@ -14,6 +14,7 @@ from saas_bench.agents.bash_agent.run_test import BashAgentRunner, _resume_runne
 
 
 from tests.support.harness import (
+    EMPTY_ANALYSIS_USAGE,
     EMPTY_ENVIRONMENT_LLM_USAGE,
     make_checkpoint_runner as _checkpoint_runner,
 )
@@ -217,6 +218,7 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
                     "decision_cost_by_currency": {},
                 },
                 "environment_llm": EMPTY_ENVIRONMENT_LLM_USAGE,
+                "analysis": EMPTY_ANALYSIS_USAGE,
             },
         }
 
@@ -251,6 +253,9 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
     assert result["environment_llm_output_tokens"] == 0
     assert result["environment_llm_cost_by_currency"] == {}
     assert result["environment_llm_usage_by_purpose"] == {}
+    assert result["analysis_completed_days"] == []
+    assert result["analysis_llm_calls"] == 0
+    assert result["analysis_cost_by_currency"] == {}
     assert checkpoint_calls == [
         (0, {
             "resume_conversation": True,

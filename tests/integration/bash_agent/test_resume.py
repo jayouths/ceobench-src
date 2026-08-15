@@ -12,6 +12,7 @@ from saas_bench.agents.bash_agent.run_test import BashAgentRunner, _resume_runne
 
 
 from tests.support.harness import (
+    EMPTY_ANALYSIS_USAGE,
     EMPTY_ENVIRONMENT_LLM_USAGE,
     PROJECT_ROOT,
     make_checkpoint_runner as _checkpoint_runner,
@@ -157,6 +158,7 @@ def test_resume_restores_database_and_metadata_before_server_launch(tmp_path):
             "workspace_commit": workspace_commit,
             "runner_log_offsets": {},
             "server_log_offsets": {"history": 0, "event_log": 0},
+            "analysis": EMPTY_ANALYSIS_USAGE,
         },
     }
     (session_dir / "world.nmdb").write_bytes(b"newer-uncommitted-state")
@@ -219,6 +221,7 @@ def test_resume_stops_server_when_restored_day_does_not_match(tmp_path):
             "workspace_commit": "checkpoint-commit",
             "runner_log_offsets": {},
             "server_log_offsets": {"history": 0, "event_log": 0},
+            "analysis": EMPTY_ANALYSIS_USAGE,
         },
     }
     calls = []

@@ -85,3 +85,30 @@ max_output_tokens = 100
 [models.social_llm.tasks.agent_post_reply]
 temperature = 0.9
 max_output_tokens = 150
+
+# Analysis 四角色只做结构化状态识别，使用低成本 Flash 并关闭思考。
+[models.analysis]
+provider = "openai_compatible"
+api_type = "openai_chat_completions"
+model = "DeepSeek-V4-Flash"
+base_url = "https://www.autodl.art/api/v1"
+api_key_env = "AUTODL_API_KEY"
+api_key_required = true
+reasoning_effort = "none"
+temperature = 0.2
+max_output_tokens = 5000
+timeout_seconds = 600
+
+[models.analysis.pricing_model_map]
+"DeepSeek-V4-Flash" = "deepseek-v4-flash"
+"deepseek-v4-flash-202605" = "deepseek-v4-flash"
+"DeepSeek-V4-Flash-0731" = "deepseek-v4-flash"
+
+[models.analysis.pricing."deepseek-v4-flash"]
+currency = "USD"
+uncached_input_cost_per_million = 0.44
+cached_input_cost_per_million = 0.014
+output_cost_per_million = 1.32
+
+[models.analysis.tasks.role_report]
+max_output_tokens = 3000

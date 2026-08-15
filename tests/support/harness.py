@@ -17,6 +17,27 @@ EMPTY_ENVIRONMENT_LLM_USAGE = {
     "by_purpose": {},
 }
 
+EMPTY_ANALYSIS_USAGE = {
+    "completed_days": [],
+    "call_count": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cached_tokens": 0,
+    "reasoning_tokens": 0,
+    "cost_by_currency": {},
+    "by_role": {
+        role: {
+            "call_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "reasoning_tokens": 0,
+            "cost_by_currency": {},
+        }
+        for role in ("market", "finance", "product", "customer")
+    },
+}
+
 
 class RecordingResponses:
     def __init__(self):

@@ -49,6 +49,7 @@ RUN_CONFIG_FIELDS = {
 
 from saas_bench.experiment_config import load_experiment_config
 from saas_bench.llm_provider import (
+    call_text_model,
     create_llm_client,
     model_token_cost,
     validate_provider_api_type,
@@ -58,6 +59,16 @@ from saas_bench.llm_provider import (
 from saas_bench.environment import Action
 from saas_bench.agents.bash_agent.agent import BashAgent
 from saas_bench.agents.bash_agent.analysis.signal_models import AnalysisSignals
+from saas_bench.agents.bash_agent.analysis.models import (
+    Role,
+    RoleCallKind,
+    RoleCallUsage,
+    RoleReportsArtifact,
+)
+from saas_bench.agents.bash_agent.analysis.role_reports import (
+    RoleCallOutcome,
+    RoleReportGenerator,
+)
 from saas_bench.agents.bash_agent.analysis.signals import (
     SignalCollector,
     parse_public_week_snapshot,
@@ -97,7 +108,7 @@ class BashAgentRunner:
     checkpoint management. All simulation state is queried via HTTP.
     """
 
-    CHECKPOINT_FORMAT_VERSION = 4
+    CHECKPOINT_FORMAT_VERSION = 5
 
     def __init__(
         self,
@@ -313,6 +324,7 @@ class BashAgentRunner:
             base_url=self.base_url,
             timeout_seconds=self.timeout_seconds,
         )
+        self.analysis_client = self._create_analysis_client() if self.analysis_enabled else None
 
         # Components (initialized in setup)
         self.agent = None
@@ -322,6 +334,60 @@ class BashAgentRunner:
         self._server_socket_dir = None
         self._server_socket_path = None
         self._session_id = None
+
+    def _create_analysis_client(self):
+        """为 Analysis 创建独立客户端，避免与决策 Agent 配置串用。"""
+
+        config = self.analysis_model_config
+        if config is None:
+            raise ValueError("analysis model config is required")
+        provider = config.get("provider")
+        api_type = config.get("api_type")
+        model = config.get("model")
+        if not all(isinstance(value, str) and value for value in (provider, api_type, model)):
+            raise ValueError("analysis provider, api_type, and model must be configured")
+        validate_provider_api_type(provider, api_type, "models.analysis")
+        validate_reasoning_effort(
+            api_type,
+            config.get("reasoning_effort"),
+            "models.analysis",
+        )
+        for task, values in config.get("tasks", {}).items():
+            validate_reasoning_effort(
+                api_type,
+                values.get("reasoning_effort", config.get("reasoning_effort")),
+                f"models.analysis.tasks.{task}",
+            )
+
+        pricing = config.get("pricing") or {}
+        pricing_model_map = config.get("pricing_model_map") or {}
+        pricing_model = pricing_model_map.get(model, model)
+        if pricing_model not in pricing:
+            raise ValueError(
+                f"analysis model {model!r} resolves to missing pricing model "
+                f"{pricing_model!r}"
+            )
+
+        api_key_env = config.get("api_key_env")
+        api_key = (
+            self._env_vars.get(api_key_env) or os.environ.get(api_key_env)
+            if api_key_env else None
+        )
+        api_key_required = config.get("api_key_required", True)
+        if not api_key and not api_key_required:
+            api_key = "not-required"
+        if not api_key and provider != "bedrock":
+            raise ValueError(
+                f"No API key found for analysis provider {provider!r} "
+                f"from environment variable {api_key_env!r}"
+            )
+        return create_llm_client(
+            provider=provider,
+            api_type=api_type,
+            api_key=api_key,
+            base_url=config.get("base_url"),
+            timeout_seconds=float(config.get("timeout_seconds", 600.0)),
+        )
 
     # =========================================================================
     # HTTP helpers — all simulation interaction goes through these
@@ -411,6 +477,14 @@ class BashAgentRunner:
     def _analysis_signal_path(self, day: int) -> Path:
         return self.workspace_dir / "analysis" / f"day_{day:03d}" / "signals.json"
 
+    def _analysis_role_reports_path(self, day: int) -> Path:
+        return (
+            self.workspace_dir
+            / "analysis"
+            / f"day_{day:03d}"
+            / "role_reports.json"
+        )
+
     def _load_analysis_history(self, before_or_at_day: int) -> Dict[int, AnalysisSignals]:
         """读取已完成周的确定性产物，供环比和 Dashboard 独有指标使用。"""
         history = {}
@@ -452,8 +526,215 @@ class BashAgentRunner:
         write_json_atomic(path, signals.model_dump(mode="json"))
         return signals
 
-    def _prune_analysis_artifacts_after(self, day: int) -> None:
-        """恢复断点时删除更晚日期的孤立产物，保留当前周已生成的信号。"""
+    def _analysis_task_parameters(self, task: str) -> Dict[str, Any]:
+        """合并 Analysis 模型公共参数与任务级覆盖。"""
+
+        config = self.analysis_model_config
+        if config is None:
+            raise ValueError("analysis model config is required")
+        task_values = dict(config.get("tasks", {}).get(task, {}))
+        request_options = {
+            key: dict(value)
+            for key, value in config.get("request_options", {}).items()
+        }
+        for key, value in task_values.get("request_options", {}).items():
+            request_options.setdefault(key, {}).update(value)
+        return {
+            "max_output_tokens": task_values.get(
+                "max_output_tokens", config["max_output_tokens"]
+            ),
+            "temperature": task_values.get("temperature", config.get("temperature")),
+            "top_p": task_values.get("top_p", config.get("top_p")),
+            "reasoning_effort": task_values.get(
+                "reasoning_effort", config.get("reasoning_effort")
+            ),
+            "request_options": request_options,
+        }
+
+    @staticmethod
+    def _jsonable_llm_response(raw_response: Any) -> Any:
+        if hasattr(raw_response, "model_dump"):
+            return raw_response.model_dump(
+                mode="json", exclude_none=False, by_alias=True
+            )
+        if isinstance(raw_response, (dict, list, str, int, float, bool)):
+            return raw_response
+        return str(raw_response)
+
+    def _call_analysis_role_model(
+        self,
+        day: int,
+        role: Role,
+        attempt: int,
+        call_kind: RoleCallKind,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> RoleCallOutcome:
+        """执行并完整记录一次角色报告或修复调用。"""
+
+        if self.analysis_client is None or self.analysis_model_config is None:
+            raise RuntimeError("analysis client is not initialized")
+        config = self.analysis_model_config
+        parameters = self._analysis_task_parameters("role_report")
+        started = _time.monotonic()
+        response = call_text_model(
+            client=self.analysis_client,
+            api_type=config["api_type"],
+            model=config["model"],
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            **parameters,
+        )
+        elapsed = _time.monotonic() - started
+        cost = model_token_cost(
+            response.model,
+            response.input_tokens,
+            response.output_tokens,
+            response.cached_tokens,
+            config["pricing"],
+            config.get("pricing_model_map"),
+        )
+        usage = RoleCallUsage(
+            role=role,
+            attempt=attempt,
+            call_kind=call_kind,
+            requested_model=config["model"],
+            served_model=response.model,
+            pricing_model=cost.pricing_model,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cached_tokens=response.cached_tokens,
+            reasoning_tokens=response.reasoning_tokens,
+            elapsed_seconds=elapsed,
+            cost_amount=cost.amount,
+            currency=cost.currency,
+        )
+
+        # 原始回答和完整 Prompt 用于复现；统计日志保留轻量指标供批量分析。
+        raw_entry = {
+            "timestamp": now(),
+            "component": "analysis",
+            "analysis_task": "role_report",
+            "role": role.value,
+            "attempt": attempt,
+            "call_kind": call_kind.value,
+            "day": day,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "response_text": response.text,
+            "raw_response": self._jsonable_llm_response(response.raw_response),
+            **usage.model_dump(mode="json"),
+        }
+        with open(self.response_log_file, "a") as file:
+            file.write(json.dumps(raw_entry, ensure_ascii=False) + "\n")
+        self._log_timing(
+            "analysis_llm_call",
+            raw_entry["day"],
+            component="analysis",
+            analysis_task="role_report",
+            role=role.value,
+            attempt=attempt,
+            call_kind=call_kind.value,
+            elapsed_s=round(elapsed, 3),
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cached_tokens=response.cached_tokens,
+            reasoning_tokens=response.reasoning_tokens,
+            cost_amount=cost.amount,
+            currency=cost.currency,
+            requested_model=config["model"],
+            served_model=response.model,
+            pricing_model=cost.pricing_model,
+        )
+        return RoleCallOutcome(text=response.text, usage=usage)
+
+    def _ensure_analysis_role_reports(
+        self,
+        signals: AnalysisSignals,
+    ) -> tuple[RoleReportsArtifact | None, bool]:
+        """返回周度角色报告；布尔值表示本次是否产生了新的 LLM 调用。"""
+
+        if not self.analysis_enabled:
+            return None, False
+        path = self._analysis_role_reports_path(signals.day)
+        if path.is_file():
+            artifact = RoleReportsArtifact.model_validate_json(path.read_text())
+            if artifact.day != signals.day:
+                raise ValueError(f"Analysis role report day mismatch: {path}")
+            return artifact, False
+
+        generator = RoleReportGenerator(
+            self._call_analysis_role_model,
+            max_schema_retries=self.analysis_module_config["max_schema_retries"],
+        )
+        artifact = generator.generate(signals)
+        write_json_atomic(path, artifact.model_dump(mode="json"))
+        return artifact, True
+
+    def _analysis_usage_summary(self, before_or_at_day: int) -> Dict[str, Any]:
+        """从已落盘周产物重建 Analysis 累计用量，避免维护第二份可变计数器。"""
+
+        totals = {
+            "call_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "reasoning_tokens": 0,
+            "cost_by_currency": {},
+        }
+        by_role = {
+            role.value: {
+                "call_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_tokens": 0,
+                "reasoning_tokens": 0,
+                "cost_by_currency": {},
+            }
+            for role in Role
+        }
+        completed_days: list[int] = []
+        analysis_dir = self.workspace_dir / "analysis"
+        if analysis_dir.is_dir():
+            for path in sorted(analysis_dir.glob("day_*/role_reports.json")):
+                artifact = RoleReportsArtifact.model_validate_json(path.read_text())
+                if artifact.day > before_or_at_day:
+                    continue
+                completed_days.append(artifact.day)
+                for call in artifact.calls:
+                    role_usage = by_role[call.role.value]
+                    for field in (
+                        "input_tokens",
+                        "output_tokens",
+                        "cached_tokens",
+                        "reasoning_tokens",
+                    ):
+                        totals[field] += getattr(call, field)
+                        role_usage[field] += getattr(call, field)
+                    totals["call_count"] += 1
+                    role_usage["call_count"] += 1
+                    total_costs = totals["cost_by_currency"]
+                    total_costs[call.currency] = (
+                        total_costs.get(call.currency, 0.0) + call.cost_amount
+                    )
+                    role_costs = role_usage["cost_by_currency"]
+                    role_costs[call.currency] = (
+                        role_costs.get(call.currency, 0.0) + call.cost_amount
+                    )
+        return {
+            "completed_days": completed_days,
+            **totals,
+            "by_role": by_role,
+        }
+
+    def _prune_analysis_artifacts_after(
+        self,
+        day: int,
+        completed_role_report_days: set[int] | None = None,
+    ) -> None:
+        """恢复时删除断点未确认的角色报告，并保留可重算的确定性信号。"""
+
+        completed_role_report_days = completed_role_report_days or set()
         analysis_dir = self.workspace_dir / "analysis"
         if not analysis_dir.is_dir():
             return
@@ -464,6 +745,8 @@ class BashAgentRunner:
                 continue
             if artifact_day > day:
                 shutil.rmtree(directory)
+            elif artifact_day not in completed_role_report_days:
+                (directory / "role_reports.json").unlink(missing_ok=True)
 
     def _terminal_outcome(self, status: Dict[str, Any]) -> Optional[str]:
         """Classify one validated simulator status, with failure states first."""
@@ -980,6 +1263,10 @@ __pycache__/
         environment_llm_usage = self._validate_environment_llm_usage(
             persisted.get("environment_llm_usage")
         )
+        analysis_usage = self._validate_analysis_usage(
+            self._analysis_usage_summary(day),
+            max_day=day,
+        )
 
         session_nmdb = self.agent_workspace / "sessions" / self._session_id / "world.nmdb"
         if not session_nmdb.is_file():
@@ -1045,6 +1332,7 @@ __pycache__/
                 },
                 'workspace_commit': workspace_commit,
                 'environment_llm': environment_llm_usage,
+                'analysis': analysis_usage,
                 'agent': {
                     'total_turns': self.agent.total_turns if self.agent else 0,
                     'input_tokens': self.agent.total_input_tokens if self.agent else 0,
@@ -1402,6 +1690,88 @@ __pycache__/
         return usage
 
     @classmethod
+    def _validate_analysis_usage(
+        cls,
+        usage: Any,
+        *,
+        max_day: int,
+    ) -> Dict[str, Any]:
+        scalar_fields = {
+            "call_count",
+            "input_tokens",
+            "output_tokens",
+            "cached_tokens",
+            "reasoning_tokens",
+        }
+        expected = scalar_fields | {
+            "completed_days",
+            "cost_by_currency",
+            "by_role",
+        }
+        if not isinstance(usage, dict) or set(usage) != expected:
+            raise ValueError("Invalid Analysis usage summary")
+        completed_days = usage["completed_days"]
+        if (
+            not isinstance(completed_days, list)
+            or any(
+                not isinstance(day, int)
+                or isinstance(day, bool)
+                or day < 0
+                or day > max_day
+                for day in completed_days
+            )
+            or completed_days != sorted(set(completed_days))
+        ):
+            raise ValueError("Invalid Analysis completed days")
+        for field in scalar_fields:
+            cls._require_non_negative_integer(usage[field], f"analysis.{field}")
+        if usage["cached_tokens"] > usage["input_tokens"]:
+            raise ValueError("Analysis cached tokens exceed input tokens")
+        cls._validate_cost_by_currency(
+            usage["cost_by_currency"], "analysis.cost_by_currency"
+        )
+
+        by_role = usage["by_role"]
+        expected_roles = {role.value for role in Role}
+        if not isinstance(by_role, dict) or set(by_role) != expected_roles:
+            raise ValueError("Invalid Analysis usage by_role")
+        role_expected = scalar_fields | {"cost_by_currency"}
+        for role, values in by_role.items():
+            if not isinstance(values, dict) or set(values) != role_expected:
+                raise ValueError(f"Invalid Analysis usage for role {role!r}")
+            for field in scalar_fields:
+                cls._require_non_negative_integer(
+                    values[field], f"analysis.{role}.{field}"
+                )
+            if values["cached_tokens"] > values["input_tokens"]:
+                raise ValueError(
+                    f"Analysis cached tokens exceed input tokens for role {role!r}"
+                )
+            cls._validate_cost_by_currency(
+                values["cost_by_currency"],
+                f"analysis.{role}.cost_by_currency",
+            )
+
+        for field in scalar_fields:
+            if usage[field] != sum(values[field] for values in by_role.values()):
+                raise ValueError(f"Analysis {field} total does not match by_role")
+        expected_costs: Dict[str, float] = {}
+        for values in by_role.values():
+            for currency, amount in values["cost_by_currency"].items():
+                expected_costs[currency] = expected_costs.get(currency, 0.0) + amount
+        if set(usage["cost_by_currency"]) != set(expected_costs) or any(
+            not math.isclose(
+                usage["cost_by_currency"][currency],
+                amount,
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            )
+            for currency, amount in expected_costs.items()
+        ):
+            raise ValueError("Analysis cost total does not match by_role")
+        return usage
+
+    @classmethod
     def _validate_cost_by_currency(cls, value: Any, field: str) -> Dict[str, float]:
         if not isinstance(value, dict):
             raise ValueError(f"Invalid checkpoint {field}: {value!r}")
@@ -1448,7 +1818,7 @@ __pycache__/
         runtime = checkpoint['runtime']
         required_runtime = {
             'runner_log_offsets', 'server_log_offsets', 'conversation',
-            'workspace_commit', 'environment_llm', 'agent',
+            'workspace_commit', 'environment_llm', 'analysis', 'agent',
         }
         if not isinstance(runtime, dict) or set(runtime) != required_runtime:
             raise ValueError(
@@ -1459,6 +1829,7 @@ __pycache__/
         if not isinstance(runtime['workspace_commit'], str) or not runtime['workspace_commit']:
             raise ValueError("Checkpoint workspace_commit must be a non-empty string")
         self._validate_environment_llm_usage(runtime['environment_llm'])
+        self._validate_analysis_usage(runtime['analysis'], max_day=checkpoint['day'])
 
         conversation = runtime['conversation']
         if not isinstance(conversation, dict) or set(conversation) != {'file', 'sha256', 'resume'}:
@@ -1558,7 +1929,14 @@ __pycache__/
             self._restore_logs_to_offsets(runtime['runner_log_offsets'])
             # EventLogger 启动后会以 append 模式打开文件，必须在启动前回退。
             self._restore_server_logs_before_server(runtime['server_log_offsets'])
-            self._prune_analysis_artifacts_after(self._resume_checkpoint['day'])
+            self._prune_analysis_artifacts_after(
+                self._resume_checkpoint['day'],
+                set(
+                    self._resume_checkpoint['runtime']['analysis'][
+                        'completed_days'
+                    ]
+                ),
+            )
         self._launch_server()
         if self._resume_checkpoint:
             expected_day = self._resume_checkpoint['day']
@@ -1841,6 +2219,7 @@ __pycache__/
     ) -> Dict[str, Any]:
         agent_state = checkpoint['runtime']['agent']
         environment_state = checkpoint['runtime']['environment_llm']
+        analysis_state = checkpoint['runtime']['analysis']
         return {
             'run_id': self.run_id,
             'seed': self.seed,
@@ -1859,6 +2238,14 @@ __pycache__/
             'environment_llm_cached_tokens': environment_state['cached_tokens'],
             'environment_llm_cost_by_currency': environment_state['cost_by_currency'],
             'environment_llm_usage_by_purpose': environment_state['by_purpose'],
+            'analysis_completed_days': analysis_state['completed_days'],
+            'analysis_llm_calls': analysis_state['call_count'],
+            'analysis_input_tokens': analysis_state['input_tokens'],
+            'analysis_output_tokens': analysis_state['output_tokens'],
+            'analysis_cached_tokens': analysis_state['cached_tokens'],
+            'analysis_reasoning_tokens': analysis_state['reasoning_tokens'],
+            'analysis_cost_by_currency': analysis_state['cost_by_currency'],
+            'analysis_usage_by_role': analysis_state['by_role'],
             'resumable': outcome in {'timeout', 'incomplete'},
             'workspace_dir': str(self.workspace_dir),
             **self._harness_result_fields(),
@@ -2057,10 +2444,26 @@ __pycache__/
             _t0 = _time.monotonic()
             dashboard_payload = self._get_dashboard_payload()
             dashboard = dashboard_payload['dashboard']
-            self._ensure_analysis_signals(dashboard_payload)
             _dashboard_elapsed = _time.monotonic() - _t0
             self._log_tool_result(0, sim_day, '_dashboard', {}, dashboard)
             self._log_timing("dashboard", sim_day, elapsed_s=round(_dashboard_elapsed, 3))
+
+            _analysis_started = _time.monotonic()
+            signals = self._ensure_analysis_signals(dashboard_payload)
+            role_reports_generated = False
+            if signals is not None:
+                _, role_reports_generated = self._ensure_analysis_role_reports(signals)
+            if self.analysis_enabled:
+                self._log_timing(
+                    "analysis_week",
+                    sim_day,
+                    elapsed_s=round(_time.monotonic() - _analysis_started, 3),
+                    role_reports_generated=role_reports_generated,
+                )
+            if role_reports_generated:
+                # 角色报告及其日志完成后立即建立同日稳定断点。恢复时可复用产物，
+                # 不会重复调用模型或重复计费。
+                stable_checkpoint = self._save_checkpoint(sim_day)
 
             # Agent Loop：只要本周的决策尚未结束，就持续执行
             observation = dashboard
@@ -2293,9 +2696,26 @@ __pycache__/
             sim_day = last_status['day']
             # incomplete 已保存带完整对话的断点；终态需要补存最终环境状态。
             if game_outcome in {'completed', 'bankrupt'}:
+                if self.analysis_enabled:
+                    # 最后一周没有下一轮决策，但仍生成完整 Analysis 产物。
+                    final_analysis_started = _time.monotonic()
+                    final_payload = self._get_dashboard_payload()
+                    final_signals = self._ensure_analysis_signals(final_payload)
+                    if final_signals is None:
+                        raise RuntimeError("Analysis signals were not generated")
+                    _, final_reports_generated = self._ensure_analysis_role_reports(
+                        final_signals
+                    )
+                    self._log_timing(
+                        "analysis_week",
+                        sim_day,
+                        elapsed_s=round(
+                            _time.monotonic() - final_analysis_started, 3
+                        ),
+                        role_reports_generated=final_reports_generated,
+                        terminal=True,
+                    )
                 self._save_checkpoint(sim_day)
-                # 最后一周没有下一轮决策，但仍保存期末信号用于实验分析。
-                self._ensure_analysis_signals(self._get_dashboard_payload())
                 stable_checkpoint = self._load_checkpoint()
             if not stable_checkpoint:
                 raise RuntimeError("Experiment ended without a stable checkpoint")

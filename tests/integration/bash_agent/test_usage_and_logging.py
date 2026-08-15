@@ -12,6 +12,8 @@ from saas_bench.database import add_api_cost, get_api_usage_summary
 
 from saas_bench.event_logger import EventLogger
 
+from tests.support.harness import EMPTY_ANALYSIS_USAGE
+
 
 def test_environment_llm_usage_is_summarized_by_purpose():
     conn = sqlite3.connect(":memory:")
@@ -72,6 +74,36 @@ def test_environment_llm_usage_rejects_inconsistent_totals():
     with pytest.raises(ValueError, match="input token total"):
         BashAgentRunner._validate_environment_llm_usage(usage)
 
+
+def test_analysis_usage_is_validated_against_role_totals():
+    usage = {
+        **EMPTY_ANALYSIS_USAGE,
+        "completed_days": [0],
+        "call_count": 4,
+        "input_tokens": 40,
+        "output_tokens": 20,
+        "cached_tokens": 8,
+        "reasoning_tokens": 4,
+        "cost_by_currency": {"USD": 0.04},
+        "by_role": {
+            role: {
+                "call_count": 1,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cached_tokens": 2,
+                "reasoning_tokens": 1,
+                "cost_by_currency": {"USD": 0.01},
+            }
+            for role in ("market", "finance", "product", "customer")
+        },
+    }
+
+    assert BashAgentRunner._validate_analysis_usage(usage, max_day=0) == usage
+
+    usage["input_tokens"] = 39
+    with pytest.raises(ValueError, match="input_tokens total"):
+        BashAgentRunner._validate_analysis_usage(usage, max_day=0)
+
 def test_result_includes_environment_llm_usage_from_checkpoint(tmp_path):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.run_id = "test"
@@ -111,7 +143,8 @@ def test_result_includes_environment_llm_usage_from_checkpoint(tmp_path):
                 "reasoning_tokens": 5,
                 "decision_cost_by_currency": {"CNY": 0.1},
             },
-            "environment_llm": environment_usage,
+                "environment_llm": environment_usage,
+                "analysis": EMPTY_ANALYSIS_USAGE,
         },
     }
 

@@ -4,10 +4,18 @@ import json
 
 import pytest
 
+from saas_bench.agents.bash_agent.analysis.models import (
+    Role,
+    RoleCallKind,
+    RoleCallUsage,
+    RoleReport,
+    RoleReportsArtifact,
+)
 from saas_bench.agents.bash_agent.run_test import BashAgentRunner
 
 
 from tests.support.harness import (
+    EMPTY_ANALYSIS_USAGE,
     EMPTY_ENVIRONMENT_LLM_USAGE,
     make_checkpoint_runner as _checkpoint_runner,
 )
@@ -48,6 +56,54 @@ def test_checkpoint_json_references_the_exact_hashed_database(tmp_path):
     }
     assert runtime["server_log_offsets"] == {"history": 0, "event_log": 0}
     assert runtime["environment_llm"] == EMPTY_ENVIRONMENT_LLM_USAGE
+    assert runtime["analysis"] == EMPTY_ANALYSIS_USAGE
+
+
+def test_checkpoint_persists_role_report_usage_from_artifacts(tmp_path):
+    runner = _checkpoint_runner(tmp_path)
+    reports = [
+        RoleReport(role=role, day=7, evidence=[], hypotheses=[], risks=[])
+        for role in Role
+    ]
+    calls = [
+        RoleCallUsage(
+            role=role,
+            attempt=1,
+            call_kind=RoleCallKind.INITIAL,
+            requested_model="channel-model",
+            served_model="served-model",
+            pricing_model="official-model",
+            input_tokens=10,
+            output_tokens=5,
+            cached_tokens=2,
+            reasoning_tokens=1,
+            elapsed_seconds=0.1,
+            cost_amount=0.01,
+            currency="USD",
+        )
+        for role in Role
+    ]
+    artifact = RoleReportsArtifact(day=7, reports=reports, calls=calls)
+    artifact_path = runner.workspace_dir / "analysis/day_007/role_reports.json"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text(artifact.model_dump_json())
+    runner._http_post = lambda path, data, timeout: {
+        "success": True,
+        "persisted_day": 7,
+        "checkpoint_cash": 900_000.0,
+        "environment_llm_usage": EMPTY_ENVIRONMENT_LLM_USAGE,
+        "server_log_offsets": {"history": 0, "event_log": 0},
+    }
+
+    checkpoint = runner._save_checkpoint(7)
+    analysis = checkpoint["runtime"]["analysis"]
+
+    assert analysis["completed_days"] == [7]
+    assert analysis["call_count"] == 4
+    assert analysis["input_tokens"] == 40
+    assert analysis["reasoning_tokens"] == 4
+    assert analysis["cost_by_currency"] == {"USD": pytest.approx(0.04)}
+    assert analysis["by_role"]["finance"]["output_tokens"] == 5
 
 def test_failed_database_persistence_keeps_previous_checkpoint(tmp_path):
     runner = _checkpoint_runner(tmp_path)

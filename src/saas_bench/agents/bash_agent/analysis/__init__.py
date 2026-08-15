@@ -3,6 +3,7 @@
 from .models import (
     Role,
     RoleAnalysis,
+    RoleReportsArtifact,
     RoleReport,
     StateAssessment,
     StatePortrait,
@@ -14,6 +15,7 @@ from .signals import SignalCollector, parse_public_week_snapshot
 __all__ = [
     "Role",
     "RoleAnalysis",
+    "RoleReportsArtifact",
     "RoleReport",
     "StateAssessment",
     "StatePortrait",

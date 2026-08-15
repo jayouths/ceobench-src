@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, ClassVar, Self
+from typing import Annotated, ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -16,6 +16,9 @@ class AnalysisModel(BaseModel):
 
 Confidence = Annotated[float, Field(strict=True, ge=0.0, le=1.0)]
 NonNegativeDay = Annotated[int, Field(strict=True, ge=0)]
+PositiveInt = Annotated[int, Field(strict=True, ge=1)]
+NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
+NonNegativeFloat = Annotated[float, Field(strict=True, ge=0.0)]
 HorizonWeeks = Annotated[int, Field(strict=True, ge=1, le=26)]
 Severity = Annotated[int, Field(strict=True, ge=1, le=5)]
 
@@ -107,6 +110,69 @@ class RoleReport(RoleAnalysis):
             "day": day,
             **analysis.model_dump(),
         })
+
+
+class RoleCallKind(StrEnum):
+    INITIAL = "initial"
+    REPAIR = "repair"
+
+
+class RoleCallUsage(AnalysisModel):
+    """一次角色 LLM 调用的可复现用量和计价结果。"""
+
+    role: Role
+    attempt: PositiveInt
+    call_kind: RoleCallKind
+    requested_model: str = Field(min_length=1)
+    served_model: str = Field(min_length=1)
+    pricing_model: str = Field(min_length=1)
+    input_tokens: NonNegativeInt
+    output_tokens: NonNegativeInt
+    cached_tokens: NonNegativeInt
+    reasoning_tokens: NonNegativeInt
+    elapsed_seconds: NonNegativeFloat
+    cost_amount: NonNegativeFloat
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+
+    @model_validator(mode="after")
+    def validate_cached_tokens(self) -> Self:
+        if self.cached_tokens > self.input_tokens:
+            raise ValueError("cached tokens cannot exceed input tokens")
+        return self
+
+
+class RoleReportsArtifact(AnalysisModel):
+    """一个模拟周的四角色报告及其全部调用成本。"""
+
+    schema_version: Literal["1.0"] = "1.0"
+    day: NonNegativeDay
+    reports: list[RoleReport] = Field(min_length=4, max_length=4)
+    calls: list[RoleCallUsage] = Field(min_length=4)
+
+    @model_validator(mode="after")
+    def validate_complete_week(self) -> Self:
+        expected_roles = set(Role)
+        report_roles = [report.role for report in self.reports]
+        if set(report_roles) != expected_roles or len(set(report_roles)) != 4:
+            raise ValueError("reports must contain each role exactly once")
+        if any(report.day != self.day for report in self.reports):
+            raise ValueError("all role reports must match artifact day")
+
+        for role in Role:
+            role_calls = [call for call in self.calls if call.role is role]
+            if not role_calls:
+                raise ValueError(f"missing {role.value} role call usage")
+            attempts = [call.attempt for call in role_calls]
+            if attempts != list(range(1, len(role_calls) + 1)):
+                raise ValueError(f"{role.value} call attempts must be consecutive")
+            if role_calls[0].call_kind is not RoleCallKind.INITIAL:
+                raise ValueError(f"{role.value} first call must be initial")
+            if any(
+                call.call_kind is not RoleCallKind.REPAIR
+                for call in role_calls[1:]
+            ):
+                raise ValueError(f"{role.value} later calls must be repairs")
+        return self
 
 
 class DimensionName(StrEnum):

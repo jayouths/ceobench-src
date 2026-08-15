@@ -187,6 +187,9 @@ def test_deepseek_smoke_config_uses_official_peak_prices():
         "cached_input_cost_per_million": 0.014,
         "output_cost_per_million": 1.32,
     }
+    assert config.analysis is not None
+    assert config.analysis.model == "deepseek-v4-flash"
+    assert config.analysis.tasks["role_report"]["max_output_tokens"] == 3000
 
 def test_autodl_models_map_to_official_deepseek_pricing():
     config = load_experiment_config(
@@ -203,6 +206,9 @@ def test_autodl_models_map_to_official_deepseek_pricing():
     assert config.social_llm.pricing_model_map[
         "deepseek-v4-flash-202605"
     ] == "deepseek-v4-flash"
+    assert config.analysis is not None
+    assert config.analysis.model == "DeepSeek-V4-Flash"
+    assert config.analysis.tasks["role_report"]["max_output_tokens"] == 3000
 
 def test_full_config_uses_benchmark_horizon():
     config = load_experiment_config(PROJECT_ROOT / "experiments/full.toml")
