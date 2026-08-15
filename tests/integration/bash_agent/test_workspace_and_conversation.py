@@ -130,6 +130,7 @@ def test_restored_midweek_context_does_not_duplicate_first_observation():
 
     assert [message.content for message in captured[0]] == ["saved tool result"]
     assert agent._skip_next_observation is False
+    assert agent.initial_observation_for_audit is None
 
 def test_day_zero_initializes_chat_context_with_system_prompt():
     agent = BashAgent.__new__(BashAgent)
@@ -153,6 +154,7 @@ def test_day_zero_initializes_chat_context_with_system_prompt():
         ("system", "system prompt"),
         ("user", "day zero dashboard"),
     ]
+    assert agent.initial_observation_for_audit == "day zero dashboard"
 
 def test_agent_does_not_hide_memory_read_failure(tmp_path):
     agent = BashAgent.__new__(BashAgent)

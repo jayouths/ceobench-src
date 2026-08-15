@@ -1,5 +1,6 @@
 """Bash Agent 对应逻辑的快速单元测试。"""
 
+import hashlib
 import json
 
 from types import SimpleNamespace
@@ -50,6 +51,99 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
     assert runner.total_decision_agent_cost_by_currency == {
         "CNY": pytest.approx(6.3125)
     }
+
+
+def _make_response_logging_runner(tmp_path, initial_observation, analysis_enabled):
+    runner = BashAgentRunner.__new__(BashAgentRunner)
+    runner.model = "requested"
+    runner.pricing = {
+        "official": {
+            "currency": "USD",
+            "uncached_input_cost_per_million": 1.0,
+            "cached_input_cost_per_million": 0.0,
+            "output_cost_per_million": 1.0,
+        },
+    }
+    runner.pricing_model_map = {"served": "official"}
+    runner.total_decision_agent_cost_by_currency = {}
+    runner.response_log_file = tmp_path / "responses.jsonl"
+    runner.analysis_enabled = analysis_enabled
+    runner.agent = SimpleNamespace(
+        last_input_tokens=10,
+        last_output_tokens=5,
+        last_cached_tokens=0,
+        last_reasoning_tokens=0,
+        last_serving_model="served",
+        initial_observation_for_audit=initial_observation,
+    )
+    return runner
+
+
+def test_analysis_initial_observation_is_auditable_without_repeated_context(tmp_path):
+    brief = "# STRATEGY BRIEF\n\n经营状态"
+    observation = f"dashboard\n\n---\n\n{brief}"
+    brief_path = tmp_path / "analysis/day_007/STRATEGY_BRIEF.md"
+    brief_path.parent.mkdir(parents=True)
+    brief_path.write_text(brief)
+    runner = _make_response_logging_runner(tmp_path, observation, True)
+    runner._analysis_brief_path = lambda day: brief_path
+
+    # Chat Completions 的 messages 含 system + user；审计值取自 Agent
+    # 实际追加的 observation，因此不依赖具体 Provider 的消息封装。
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": observation},
+    ]
+    runner._log_response(1, 7, messages, {"id": "first"})
+    runner.agent.initial_observation_for_audit = None
+    runner._log_response(2, 7, messages, {"id": "second"})
+
+    first, second = [
+        json.loads(line) for line in runner.response_log_file.read_text().splitlines()
+    ]
+    assert first["initial_observation"] == observation
+    assert first["initial_observation_sha256"] == hashlib.sha256(
+        observation.encode("utf-8")
+    ).hexdigest()
+    assert first["analysis_brief_injected"] is True
+    assert first["analysis_brief_sha256"] == hashlib.sha256(
+        brief.encode("utf-8")
+    ).hexdigest()
+    assert "initial_observation" not in second
+    assert "analysis_brief_injected" not in second
+
+
+def test_baseline_initial_observation_records_original_dashboard(tmp_path):
+    runner = _make_response_logging_runner(tmp_path, "baseline dashboard", False)
+
+    runner._log_response(
+        1,
+        0,
+        [{"role": "user", "content": "baseline dashboard"}],
+        {"id": "baseline"},
+    )
+
+    entry = json.loads(runner.response_log_file.read_text())
+    assert entry["initial_observation"] == "baseline dashboard"
+    assert entry["analysis_brief_injected"] is False
+    assert "analysis_brief_sha256" not in entry
+
+
+def test_response_callback_consumes_initial_observation_once():
+    agent = BashAgent.__new__(BashAgent)
+    agent.total_turns = 1
+    agent.current_day = 7
+    agent._initial_observation_for_audit = "weekly observation"
+    captured = []
+    agent.response_callback = lambda **kwargs: captured.append(
+        agent.initial_observation_for_audit
+    )
+
+    agent._emit_response_callback([], {"id": "first"})
+    agent._emit_response_callback([], {"id": "retry"})
+
+    assert captured == ["weekly observation", None]
+    assert agent.initial_observation_for_audit is None
 
 def test_decision_agent_request_builder_uses_config_without_hidden_defaults():
     agent = BashAgent.__new__(BashAgent)

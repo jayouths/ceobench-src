@@ -111,6 +111,7 @@ class BashAgent(BaseAgent):
         self.turns_today: int = 0
         self._pending_tool_calls: List[Dict] = []
         self._last_observation: str = ""
+        self._initial_observation_for_audit: Optional[str] = None
         self.total_turns: int = 0
         self._consecutive_errors: int = 0
 
@@ -207,6 +208,26 @@ class BashAgent(BaseAgent):
         self.turns_today = 0
         self._pending_tool_calls = []
         self._last_observation = ""
+        self._initial_observation_for_audit = None
+
+    @property
+    def initial_observation_for_audit(self) -> Optional[str]:
+        """Return the weekly observation attached to the current LLM request."""
+        return self._initial_observation_for_audit
+
+    def _emit_response_callback(self, messages: List[Dict], raw_response: Any) -> None:
+        """Log one response and consume any pending weekly observation audit."""
+        try:
+            if self.response_callback:
+                self.response_callback(
+                    turn=self.total_turns,
+                    day=self.current_day,
+                    messages=messages,
+                    raw_response=raw_response,
+                )
+        finally:
+            # 每周完整 observation 只随第一次模型响应落盘，避免累计上下文重复写入。
+            self._initial_observation_for_audit = None
 
     def _reset_week_context(self) -> None:
         """Discard last week's conversation and rebuild the system context."""
@@ -234,11 +255,13 @@ class BashAgent(BaseAgent):
         # Day 0 是实验的合法首日；不能只用“日期变大”判断首次上下文初始化。
         current_day = info.get('day', 0)
         needs_initial_context = not self.conversation and not self._skip_next_observation
-        if needs_initial_context or current_day > self.current_day:
+        starts_new_week = needs_initial_context or current_day > self.current_day
+        if starts_new_week:
             self._reset_week_context()
             self.current_day = current_day
             self.turns_today = 0
 
+        self._initial_observation_for_audit = None
         # If we have pending tool call results to process, add them
         if self._skip_next_observation:
             # checkpoint 已把最后一次工具结果写入对话，恢复后的首轮不能重复追加 Dashboard。
@@ -271,6 +294,9 @@ class BashAgent(BaseAgent):
                 role='user',
                 content=observation
             ))
+            if starts_new_week:
+                # 这里保存的是实际追加到请求上下文的字符串，不依赖 Provider 消息格式。
+                self._initial_observation_for_audit = observation
 
         # Call LLM
         action = self._call_llm()
@@ -588,13 +614,10 @@ class BashAgent(BaseAgent):
                 self.total_cached_tokens += self.last_cached_tokens
                 self.total_reasoning_tokens += self.last_reasoning_tokens
 
-                if self.response_callback:
-                    self.response_callback(
-                        turn=self.total_turns,
-                        day=self.current_day,
-                        messages=messages,
-                        raw_response=response.model_dump() if hasattr(response, 'model_dump') else str(response),
-                    )
+                self._emit_response_callback(
+                    messages,
+                    response.model_dump() if hasattr(response, 'model_dump') else str(response),
+                )
 
                 assistant_msg = response.choices[0].message
 
@@ -793,13 +816,10 @@ class BashAgent(BaseAgent):
                 self.total_cached_tokens += self.last_cached_tokens
                 self.total_reasoning_tokens += self.last_reasoning_tokens
 
-                if self.response_callback:
-                    self.response_callback(
-                        turn=self.total_turns,
-                        day=self.current_day,
-                        messages=input_items,
-                        raw_response=response.model_dump() if hasattr(response, 'model_dump') else str(response),
-                    )
+                self._emit_response_callback(
+                    input_items,
+                    response.model_dump() if hasattr(response, 'model_dump') else str(response),
+                )
 
                 # Log reasoning content if present
                 for item in response.output:
@@ -1038,13 +1058,10 @@ class BashAgent(BaseAgent):
                 self.total_cached_tokens += self.last_cached_tokens
                 self.total_reasoning_tokens += self.last_reasoning_tokens
 
-                if self.response_callback:
-                    self.response_callback(
-                        turn=self.total_turns,
-                        day=self.current_day,
-                        messages=messages,
-                        raw_response=self._anthropic_response_dict(response) or str(response),
-                    )
+                self._emit_response_callback(
+                    messages,
+                    self._anthropic_response_dict(response) or str(response),
+                )
 
                 assistant_content = response.content
                 self.conversation.append(Message(
