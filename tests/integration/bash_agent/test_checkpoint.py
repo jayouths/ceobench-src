@@ -59,6 +59,23 @@ def test_checkpoint_json_references_the_exact_hashed_database(tmp_path):
     assert runtime["analysis"] == EMPTY_ANALYSIS_USAGE
 
 
+def test_checkpoint_can_be_loaded_before_runner_session_is_initialized(tmp_path):
+    runner = _checkpoint_runner(tmp_path)
+    runner._http_post = lambda path, data, timeout: {
+        "success": True,
+        "persisted_day": 7,
+        "checkpoint_cash": 900_000.0,
+        "environment_llm_usage": EMPTY_ENVIRONMENT_LLM_USAGE,
+        "server_log_offsets": {"history": 0, "event_log": 0},
+    }
+    runner._save_checkpoint(7)
+    runner._session_id = None
+
+    checkpoint = runner._load_checkpoint()
+
+    assert checkpoint["session_id"] == "session-1"
+
+
 def test_checkpoint_persists_role_report_usage_from_artifacts(tmp_path):
     runner = _checkpoint_runner(tmp_path)
     reports = [

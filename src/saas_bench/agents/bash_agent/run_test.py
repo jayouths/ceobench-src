@@ -1560,16 +1560,23 @@ __pycache__/
                     f"{offsets[name]} > {current_size}"
                 )
 
-    def _server_log_files(self) -> Dict[str, Path]:
-        session_dir = self.agent_workspace / "sessions" / self._session_id
+    def _server_log_files(self, session_id: str | None = None) -> Dict[str, Path]:
+        resolved_session_id = session_id or self._session_id
+        if not resolved_session_id:
+            raise ValueError("session_id is required to resolve server logs")
+        session_dir = self.agent_workspace / "sessions" / resolved_session_id
         return {
             "history": session_dir / "history.jsonl",
-            "event_log": session_dir / "logs" / f"run_{self._session_id}.jsonl",
+            "event_log": session_dir / "logs" / f"run_{resolved_session_id}.jsonl",
         }
 
-    def _validate_server_log_offsets(self, offsets: Any) -> Dict[str, int]:
+    def _validate_server_log_offsets(
+        self,
+        offsets: Any,
+        session_id: str | None = None,
+    ) -> Dict[str, int]:
         return self._validate_server_log_offsets_for_files(
-            offsets, self._server_log_files()
+            offsets, self._server_log_files(session_id)
         )
 
     def _restore_server_logs_before_server(self, offsets: Any) -> None:
@@ -1988,7 +1995,10 @@ __pycache__/
                 f"Checkpoint runtime fields must contain exactly: {sorted(required_runtime)}"
             )
         self._validate_runner_log_offsets(runtime['runner_log_offsets'])
-        self._validate_server_log_offsets(runtime['server_log_offsets'])
+        self._validate_server_log_offsets(
+            runtime['server_log_offsets'],
+            checkpoint['session_id'],
+        )
         if not isinstance(runtime['workspace_commit'], str) or not runtime['workspace_commit']:
             raise ValueError("Checkpoint workspace_commit must be a non-empty string")
         self._validate_environment_llm_usage(runtime['environment_llm'])
