@@ -121,16 +121,23 @@ class RoleReportGenerator:
 
         role_payload = getattr(signals, report.role.value).model_dump(mode="json")
         prefix = report.role.value + "."
+        errors: list[str] = []
         for evidence in report.evidence:
             if not evidence.metric.startswith(prefix):
-                raise ValueError(
+                errors.append(
                     f"metric path must start with {prefix!r}: {evidence.metric!r}"
                 )
+                continue
             target = role_payload
             for part in evidence.metric.removeprefix(prefix).split("."):
                 if not isinstance(target, dict) or part not in target:
-                    raise ValueError(f"unknown metric path: {evidence.metric!r}")
+                    errors.append(f"unknown metric path: {evidence.metric!r}")
+                    target = None
+                    break
                 target = target[part]
+
+            if target is None:
+                continue
 
             expected_direction = None
             if isinstance(target, dict) and "direction" in target:
@@ -144,7 +151,9 @@ class RoleReportGenerator:
                 expected_direction is not None
                 and evidence.direction.value != expected_direction
             ):
-                raise ValueError(
+                errors.append(
                     f"metric direction mismatch for {evidence.metric!r}: "
                     f"expected {expected_direction!r}, got {evidence.direction.value!r}"
                 )
+        if errors:
+            raise ValueError("; ".join(errors))

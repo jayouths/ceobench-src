@@ -100,10 +100,11 @@ def test_role_prompts_only_include_the_selected_role(day_zero_signals):
     system_prompt, user_prompt = build_role_prompts(day_zero_signals, Role.MARKET)
 
     payload = json.loads(user_prompt.split("：\n", 1)[1])
-    assert payload["signals"] == day_zero_signals.market.model_dump(mode="json")
+    assert payload["market"] == day_zero_signals.market.model_dump(mode="json")
+    assert "signals" not in payload
     assert "finance" not in payload
     assert "不得输出行动建议" in system_prompt
-    assert "metric 必须填写输入中的精确字段路径" in system_prompt
+    assert "metric 必须从输入 JSON 的 market 顶层键开始" in system_prompt
 
 
 def test_generator_repairs_invalid_json_with_self_contained_context(day_zero_signals):
@@ -125,7 +126,7 @@ def test_generator_repairs_invalid_json_with_self_contained_context(day_zero_sig
     assert market_repair[3] is AnalysisCallKind.REPAIR
     assert "not-json" in market_repair[4]
     assert "程序校验错误" in market_repair[4]
-    assert '"signals"' in market_repair[4]
+    assert '"market"' in market_repair[4]
 
 
 def test_generator_fails_after_configured_repair_limit(day_zero_signals):
@@ -168,6 +169,29 @@ def test_generator_repairs_unknown_metric_path(day_zero_signals):
 
     assert len(artifact.calls) == 5
     assert "unknown metric path" in observed[1]
+
+
+def test_generator_reports_all_invalid_metric_paths_in_one_repair(day_zero_signals):
+    observed = []
+
+    def call_model(day, role, attempt, call_kind, system_prompt, user_prompt):
+        observed.append(user_prompt)
+        text = _valid_response(role)
+        if role is Role.MARKET and attempt == 1:
+            payload = json.loads(text)
+            second = dict(payload["evidence"][0])
+            payload["evidence"][0]["metric"] = "signals.first.invalid"
+            second["id"] = "MAR-2"
+            second["metric"] = "market.second.invalid"
+            payload["evidence"].append(second)
+            text = json.dumps(payload, ensure_ascii=False)
+        return RoleCallOutcome(text=text, usage=_usage(role, attempt, call_kind))
+
+    RoleReportGenerator(call_model, max_schema_retries=1).generate(day_zero_signals)
+
+    repair_prompt = observed[1]
+    assert "signals.first.invalid" in repair_prompt
+    assert "market.second.invalid" in repair_prompt
 
 
 def test_generator_repairs_metric_direction_mismatch(day_zero_signals):

@@ -50,7 +50,8 @@ def role_signal_payload(signals: AnalysisSignals, role: Role) -> dict[str, Any]:
         "day": signals.day,
         "week": signals.week,
         "windows": signals.windows.model_dump(mode="json"),
-        "signals": getattr(signals, role.value).model_dump(mode="json"),
+        # 顶层键与 metric 前缀保持一致，模型可以直接复制完整 JSON 路径。
+        role.value: getattr(signals, role.value).model_dump(mode="json"),
     }
 
 
@@ -86,7 +87,7 @@ def build_role_prompts(signals: AnalysisSignals, role: Role) -> tuple[str, str]:
 必须遵守：
 1. 只能使用用户提供的 JSON 信号，不得补充外部事实或隐藏状态。
 2. evidence 是可由输入直接核验的事实，最多 5 条；id 必须使用 {prefix}-1 至 {prefix}-5。
-3. metric 必须填写输入中的精确字段路径，不能使用含糊名称。
+3. metric 必须从输入 JSON 的 {role.value} 顶层键开始，逐层复制完整字段路径；不得添加 signals 前缀或省略中间层级。
 4. direction 只能是 up、down、flat、insufficient_data；没有完整可比窗口时使用 insufficient_data。
 5. strength 表示证据对 observation 的支持强度，不表示业务重要程度。
 6. hypotheses 最多 3 条，必须引用已输出的 evidence id，并写出可由后续公开信号执行的验证方式。
