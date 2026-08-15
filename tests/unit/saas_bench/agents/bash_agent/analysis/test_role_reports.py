@@ -261,10 +261,13 @@ def test_runner_writes_reuses_and_summarizes_role_reports(
     assert usage["cost_by_currency"]["USD"] == pytest.approx(0.004)
 
 
-def test_runner_records_raw_response_timing_and_official_cost(tmp_path, monkeypatch):
+def test_runner_records_analysis_call_in_trajectory_with_official_cost(
+    tmp_path, monkeypatch
+):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.analysis_client = object()
     runner.analysis_model_config = {
+        "provider": "openai_compatible",
         "api_type": "openai_chat_completions",
         "model": "channel-model",
         "max_output_tokens": 1000,
@@ -284,9 +287,10 @@ def test_runner_records_raw_response_timing_and_official_cost(tmp_path, monkeypa
         },
     }
     runner.run_id = "test"
-    runner.response_log_file = tmp_path / "raw.jsonl"
-    runner.timing_log_file = tmp_path / "timing.jsonl"
-    runner._timing_queue = None
+    runner.trajectory_log_file = tmp_path / "trajectory.jsonl"
+    runner.performance_log_file = tmp_path / "performance.jsonl"
+    runner._experiment_log_writer = None
+    runner._performance_queue = None
     runner._dashboard_url = ""
 
     monkeypatch.setattr(
@@ -312,14 +316,13 @@ def test_runner_records_raw_response_timing_and_official_cost(tmp_path, monkeypa
         "user",
     )
 
-    raw = json.loads(runner.response_log_file.read_text())
-    timing = json.loads(runner.timing_log_file.read_text())
+    event = json.loads(runner.trajectory_log_file.read_text())
     assert outcome.usage.pricing_model == "official-model"
     assert outcome.usage.cost_amount == pytest.approx(0.000131)
-    assert raw["component"] == "analysis"
-    assert raw["raw_response"] == {"id": "raw-response"}
-    assert timing["event"] == "analysis_llm_call"
-    assert timing["reasoning_tokens"] == 5
+    assert event["event_type"] == "llm_call"
+    assert event["component"] == "analysis"
+    assert event["raw_response"] == {"id": "raw-response"}
+    assert event["reasoning_tokens"] == 5
 
 
 def test_resume_prunes_llm_artifacts_at_their_independent_checkpoint_boundaries(tmp_path):

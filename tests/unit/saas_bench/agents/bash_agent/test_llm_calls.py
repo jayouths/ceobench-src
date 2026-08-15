@@ -16,6 +16,8 @@ from saas_bench.agents.bash_agent.run_test import BashAgentRunner
 def test_decision_response_cost_uses_the_served_model(tmp_path):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.model = "requested"
+    runner.provider = "openai_compatible"
+    runner.api_type = "openai_responses"
     runner.pricing = {
         "official": {
             "currency": "CNY",
@@ -29,7 +31,12 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
         "served": "official",
     }
     runner.total_decision_agent_cost_by_currency = {}
-    runner.response_log_file = tmp_path / "responses.jsonl"
+    runner.run_id = "test"
+    runner.trajectory_log_file = tmp_path / "trajectory.jsonl"
+    runner.performance_log_file = tmp_path / "performance.jsonl"
+    runner._experiment_log_writer = None
+    runner._performance_queue = None
+    runner._pending_decision_context = None
     runner.agent = SimpleNamespace(
         last_input_tokens=1_000_000,
         last_output_tokens=1_000_000,
@@ -38,9 +45,12 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
         last_serving_model="served",
     )
 
-    runner._log_response(1, 0, [], {"model": "served"})
+    runner._log_decision_llm_call(1, 0, [], {"model": "served"}, 1.25)
 
-    entry = json.loads(runner.response_log_file.read_text())
+    entry = json.loads(runner.trajectory_log_file.read_text())
+    assert entry["event_type"] == "llm_call"
+    assert entry["react_round"] == 1
+    assert entry["elapsed_seconds"] == pytest.approx(1.25)
     assert entry["served_model"] == "served"
     assert entry["pricing_model"] == "official"
     assert entry["cached_tokens"] == 250_000
@@ -55,6 +65,8 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
 def _make_response_logging_runner(tmp_path, initial_observation, analysis_enabled):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.model = "requested"
+    runner.provider = "openai_compatible"
+    runner.api_type = "openai_responses"
     runner.pricing = {
         "official": {
             "currency": "USD",
@@ -65,7 +77,12 @@ def _make_response_logging_runner(tmp_path, initial_observation, analysis_enable
     }
     runner.pricing_model_map = {"served": "official"}
     runner.total_decision_agent_cost_by_currency = {}
-    runner.response_log_file = tmp_path / "responses.jsonl"
+    runner.run_id = "test"
+    runner.workspace_dir = tmp_path
+    runner.trajectory_log_file = tmp_path / "trajectory.jsonl"
+    runner.performance_log_file = tmp_path / "performance.jsonl"
+    runner._experiment_log_writer = None
+    runner._performance_queue = None
     runner.analysis_enabled = analysis_enabled
     runner.agent = SimpleNamespace(
         last_input_tokens=10,
@@ -85,7 +102,12 @@ def test_analysis_initial_observation_is_auditable_without_repeated_context(tmp_
     brief_path.parent.mkdir(parents=True)
     brief_path.write_text(brief)
     runner = _make_response_logging_runner(tmp_path, observation, True)
-    runner._analysis_brief_path = lambda day: brief_path
+    runner._pending_decision_context = {
+        "dashboard": "dashboard",
+        "strategy_brief": brief,
+        "strategy_brief_artifact": "analysis/day_007/STRATEGY_BRIEF.md",
+        "decision_observation": observation,
+    }
 
     # Chat Completions 的 messages 含 system + user；审计值取自 Agent
     # 实际追加的 observation，因此不依赖具体 Provider 的消息封装。
@@ -93,32 +115,51 @@ def test_analysis_initial_observation_is_auditable_without_repeated_context(tmp_
         {"role": "system", "content": "system"},
         {"role": "user", "content": observation},
     ]
-    runner._log_response(1, 7, messages, {"id": "first"})
+    raw_response = {
+        "output": [
+            {"type": "function_call", "name": "bash", "arguments": "{}"}
+        ]
+    }
+    runner._log_decision_llm_call(1, 7, messages, raw_response)
     runner.agent.initial_observation_for_audit = None
-    runner._log_response(2, 7, messages, {"id": "second"})
+    runner._log_decision_llm_call(2, 7, messages, raw_response)
 
-    first, second = [
-        json.loads(line) for line in runner.response_log_file.read_text().splitlines()
+    observation_event, first_call, second_call = [
+        json.loads(line)
+        for line in runner.trajectory_log_file.read_text().splitlines()
     ]
-    assert first["initial_observation"] == observation
-    assert first["analysis_brief_injected"] is True
-    assert "initial_observation" not in second
-    assert "analysis_brief_injected" not in second
+    assert observation_event["event_type"] == "decision_observation"
+    assert observation_event["dashboard"] == "dashboard"
+    assert observation_event["strategy_brief"] == brief
+    assert observation_event["rendered_observation"] == observation
+    assert first_call["event_type"] == "llm_call"
+    assert second_call["event_type"] == "llm_call"
 
 
 def test_baseline_initial_observation_records_original_dashboard(tmp_path):
     runner = _make_response_logging_runner(tmp_path, "baseline dashboard", False)
+    runner._pending_decision_context = {
+        "dashboard": "baseline dashboard",
+        "strategy_brief": None,
+        "strategy_brief_artifact": None,
+        "decision_observation": "baseline dashboard",
+    }
 
-    runner._log_response(
+    runner._log_decision_llm_call(
         1,
         0,
         [{"role": "user", "content": "baseline dashboard"}],
-        {"id": "baseline"},
+        {"output": [{"type": "function_call", "name": "bash", "arguments": "{}"}]},
     )
 
-    entry = json.loads(runner.response_log_file.read_text())
-    assert entry["initial_observation"] == "baseline dashboard"
-    assert entry["analysis_brief_injected"] is False
+    observation_event, call_event = [
+        json.loads(line)
+        for line in runner.trajectory_log_file.read_text().splitlines()
+    ]
+    assert observation_event["dashboard"] == "baseline dashboard"
+    assert observation_event["strategy_brief"] is None
+    assert observation_event["rendered_observation"] == "baseline dashboard"
+    assert call_event["status"] == "valid"
 
 
 def test_response_callback_consumes_initial_observation_once():
@@ -128,14 +169,49 @@ def test_response_callback_consumes_initial_observation_once():
     agent._initial_observation_for_audit = "weekly observation"
     captured = []
     agent.response_callback = lambda **kwargs: captured.append(
-        agent.initial_observation_for_audit
+        (agent.initial_observation_for_audit, kwargs["elapsed_seconds"])
     )
 
-    agent._emit_response_callback([], {"id": "first"})
-    agent._emit_response_callback([], {"id": "retry"})
+    agent._emit_response_callback([], {"id": "first"}, 1.25)
+    agent._emit_response_callback([], {"id": "retry"}, 0.75)
 
-    assert captured == ["weekly observation", None]
+    assert captured == [("weekly observation", 1.25), (None, 0.75)]
     assert agent.initial_observation_for_audit is None
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {"function": {"name": "bash", "arguments": "{}"}}
+                            ]
+                        }
+                    }
+                ]
+            },
+            ("valid", 1, None),
+        ),
+        (
+            {
+                "output": [
+                    {"type": "function_call", "name": "bash", "arguments": "{"}
+                ]
+            },
+            ("invalid", 1, "invalid_tool_arguments"),
+        ),
+        ({"content": [{"type": "text", "text": "answer"}]},
+         ("invalid", 0, "missing_tool_call")),
+    ],
+)
+def test_decision_response_status_matches_harness_tool_validation(
+    response, expected
+):
+    assert BashAgentRunner._decision_response_status(response) == expected
 
 def test_decision_agent_request_builder_uses_config_without_hidden_defaults():
     agent = BashAgent.__new__(BashAgent)

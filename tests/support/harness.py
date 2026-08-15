@@ -83,8 +83,10 @@ def make_checkpoint_runner(tmp_path):
     runner.run_id = "test"
     runner.logs_dir = runner.workspace_dir / "logs"
     runner.logs_dir.mkdir()
-    runner.response_log_file = runner.logs_dir / "raw_responses_test.jsonl"
-    runner.timing_log_file = runner.logs_dir / "timing_test.jsonl"
+    runner.trajectory_log_file = runner.logs_dir / "trajectory_test.jsonl"
+    runner.performance_log_file = runner.logs_dir / "performance_test.jsonl"
+    runner._experiment_log_writer = None
+    runner._performance_queue = None
     runner.model = "model"
     runner.provider = "openai"
     runner.api_type = "openai_responses"

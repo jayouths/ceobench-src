@@ -50,9 +50,8 @@ def test_checkpoint_json_references_the_exact_hashed_database(tmp_path):
     assert runtime["conversation"]["sha256"] == runner._sha256_file(conversation)
     assert runner._git("rev-parse", "HEAD", check=True).stdout.strip() == runtime["workspace_commit"]
     assert runtime["runner_log_offsets"] == {
-        "tool_results": 0,
-        "raw_responses": 0,
-        "timing": 0,
+        "trajectory": 0,
+        "performance": 0,
     }
     assert runtime["server_log_offsets"] == {"history": 0, "event_log": 0}
     assert runtime["environment_llm"] == EMPTY_ENVIRONMENT_LLM_USAGE

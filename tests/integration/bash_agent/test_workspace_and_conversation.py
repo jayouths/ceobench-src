@@ -177,6 +177,11 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
     runner.model = "test-model"
     runner.pricing_model_map = {}
     runner.workspace_dir = tmp_path
+    runner.trajectory_log_file = tmp_path / "logs/trajectory_turn-limit.jsonl"
+    runner.performance_log_file = tmp_path / "logs/performance_turn-limit.jsonl"
+    runner._experiment_log_writer = None
+    runner._performance_queue = None
+    runner._pending_decision_context = None
     runner._server_port = 1
     runner.setup = lambda: None
     runner._repair_terminal_checkpoint_after_setup = lambda: None
@@ -190,8 +195,6 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
     runner.analysis_enabled = False
     runner._get_dashboard_payload = lambda: {"dashboard": "dashboard", "day": 0}
     runner._ensure_analysis_signals = lambda payload: None
-    runner._log_tool_result = lambda *args, **kwargs: None
-    runner._log_timing = lambda *args, **kwargs: None
     runner._commit_weeks_up_to = lambda day: None
     runner._execute_tool = lambda tool, arguments: "query result"
     runner._http_get = lambda path: {
@@ -259,6 +262,21 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
     assert result["analysis_state_portrait_days"] == []
     assert result["analysis_llm_calls"] == 0
     assert result["analysis_cost_by_currency"] == {}
+    trajectory_events = [
+        json.loads(line)["event_type"]
+        for line in runner.trajectory_log_file.read_text().splitlines()
+    ]
+    performance_events = [
+        json.loads(line)["event_type"]
+        for line in runner.performance_log_file.read_text().splitlines()
+    ]
+    assert trajectory_events == [
+        "week_start",
+        "dashboard",
+        "tool_execution",
+        "turn_cap_reached",
+    ]
+    assert performance_events == ["decision_batch", "run_summary"]
     assert checkpoint_calls == [
         (0, {
             "resume_conversation": True,

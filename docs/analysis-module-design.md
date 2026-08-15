@@ -242,7 +242,9 @@ run_<run_id>/analysis/day_007/
 - `state_portrait.json`：统一经营状态画像。
 - `STRATEGY_BRIEF.md`：由程序格式化、实际注入本周 ReAct Agent 上下文的内容。
 
-四份周产物均已生成并使用原子写入，防止中途崩溃留下外观完整但内容截断的文件。Analysis LLM 的每次调用同时进入现有原始响应和耗时日志，并标记 `component=analysis` 和任务；角色报告调用额外标记角色。
+四份周产物均使用原子写入，防止中途崩溃留下外观完整但内容截断的文件。`logs/trajectory_<run_id>.jsonl` 按真实顺序记录周边界、Dashboard、Analysis 调用、产物索引、决策 Observation、决策 LLM 调用和工具执行。Dashboard、`STRATEGY_BRIEF.md` 和实际发送文本分字段保存，便于单独评估创新模块产物并核对注入结果。
+
+`logs/performance_<run_id>.jsonl` 只记录 Analysis 周汇总、决策批次、完整周和实验级汇总，不重复原始请求和响应。决策 LLM 每次真实返回均记为独立 `react_round`；非法响应标记为 `invalid`，后续纠错调用进入新轮次。工具执行通过 `react_round` 与产生它的模型响应关联。
 
 `STRATEGY_BRIEF.md` 不再调用 LLM，而是由程序根据 `role_reports.json` 和 `state_portrait.json` 确定性格式化。内容包含核心诊断、五维经营状态、已确认事实、待验证假设、潜在风险、因果链和完整证据索引。决策 Agent 每周第一次调用时接收 `原始 Dashboard + STRATEGY_BRIEF.md`；后续工具结果仍按 Baseline 原样进入 ReAct 循环。
 

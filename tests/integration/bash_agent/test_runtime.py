@@ -82,17 +82,17 @@ def test_runner_releases_resources_when_experiment_fails():
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.continue_from = None
     calls = []
-    runner._start_timing_poster = lambda: calls.append("timing-start")
+    runner._start_performance_poster = lambda: calls.append("performance-start")
     runner._run_experiment = lambda verbose: (_ for _ in ()).throw(
         RuntimeError("experiment failed")
     )
     runner._stop_server = lambda: calls.append("server-stop")
-    runner._stop_timing_poster = lambda: calls.append("timing-stop")
+    runner._stop_performance_poster = lambda: calls.append("performance-stop")
 
     with pytest.raises(RuntimeError, match="experiment failed"):
         runner.run(verbose=False)
 
-    assert calls == ["timing-start", "server-stop", "timing-stop"]
+    assert calls == ["performance-start", "server-stop", "performance-stop"]
 
 def test_stop_server_reaps_process_after_forced_kill():
     calls = []
@@ -203,8 +203,8 @@ def test_new_setup_removes_run_directory_when_session_creation_fails(
     runner.workspace_dir = runner.workspace_base / f"run_{runner.run_id}"
     runner.agent_workspace = runner.workspace_dir / "agent_workspace"
     runner.logs_dir = runner.workspace_dir / "logs"
-    runner.response_log_file = runner.logs_dir / f"raw_responses_{runner.run_id}.jsonl"
-    runner.timing_log_file = runner.logs_dir / f"timing_{runner.run_id}.jsonl"
+    runner.trajectory_log_file = runner.logs_dir / f"trajectory_{runner.run_id}.jsonl"
+    runner.performance_log_file = runner.logs_dir / f"performance_{runner.run_id}.jsonl"
     runner._verify_public_bundle = lambda: None
     runner._initialize_from_public_repo = lambda: (
         _ for _ in ()
@@ -230,8 +230,8 @@ def test_new_setup_removes_run_directory_when_initial_checkpoint_fails(
     runner.workspace_dir = runner.workspace_base / f"run_{runner.run_id}"
     runner.agent_workspace = runner.workspace_dir / "agent_workspace"
     runner.logs_dir = runner.workspace_dir / "logs"
-    runner.response_log_file = runner.logs_dir / f"raw_responses_{runner.run_id}.jsonl"
-    runner.timing_log_file = runner.logs_dir / f"timing_{runner.run_id}.jsonl"
+    runner.trajectory_log_file = runner.logs_dir / f"trajectory_{runner.run_id}.jsonl"
+    runner.performance_log_file = runner.logs_dir / f"performance_{runner.run_id}.jsonl"
     runner._verify_public_bundle = lambda: None
     runner._initialize_from_public_repo = lambda: setattr(
         runner, "_session_id", "session-1"

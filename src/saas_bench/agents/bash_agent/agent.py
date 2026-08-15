@@ -222,7 +222,12 @@ class BashAgent(BaseAgent):
         """Return the weekly observation attached to the current LLM request."""
         return self._initial_observation_for_audit
 
-    def _emit_response_callback(self, messages: List[Dict], raw_response: Any) -> None:
+    def _emit_response_callback(
+        self,
+        messages: List[Dict],
+        raw_response: Any,
+        elapsed_seconds: float = 0.0,
+    ) -> None:
         """Log one response and consume any pending weekly observation audit."""
         try:
             if self.response_callback:
@@ -231,6 +236,7 @@ class BashAgent(BaseAgent):
                     day=self.current_day,
                     messages=messages,
                     raw_response=raw_response,
+                    elapsed_seconds=elapsed_seconds,
                 )
         finally:
             # 每周完整 observation 只随第一次模型响应落盘，避免累计上下文重复写入。
@@ -593,7 +599,9 @@ class BashAgent(BaseAgent):
                 old_handler = signal.signal(signal.SIGALRM, _llm_timeout_handler)
                 signal.alarm(LLM_WALL_CLOCK_TIMEOUT)
                 try:
+                    call_started = time.monotonic()
                     response = self.client.chat.completions.create(**api_kwargs)
+                    call_elapsed = time.monotonic() - call_started
                 finally:
                     signal.alarm(0)  # Cancel alarm
                     signal.signal(signal.SIGALRM, old_handler)  # Restore handler
@@ -624,6 +632,7 @@ class BashAgent(BaseAgent):
                 self._emit_response_callback(
                     messages,
                     response.model_dump() if hasattr(response, 'model_dump') else str(response),
+                    call_elapsed,
                 )
 
                 assistant_msg = response.choices[0].message
@@ -794,7 +803,9 @@ class BashAgent(BaseAgent):
                 old_handler = signal.signal(signal.SIGALRM, _llm_timeout_handler)
                 signal.alarm(LLM_WALL_CLOCK_TIMEOUT)
                 try:
+                    call_started = time.monotonic()
                     response = self.client.responses.create(**api_kwargs)
+                    call_elapsed = time.monotonic() - call_started
                 finally:
                     signal.alarm(0)
                     signal.signal(signal.SIGALRM, old_handler)
@@ -826,6 +837,7 @@ class BashAgent(BaseAgent):
                 self._emit_response_callback(
                     input_items,
                     response.model_dump() if hasattr(response, 'model_dump') else str(response),
+                    call_elapsed,
                 )
 
                 # Log reasoning content if present
@@ -1020,11 +1032,13 @@ class BashAgent(BaseAgent):
                 use_streaming = True
 
             try:
+                call_started = time.monotonic()
                 if use_streaming:
                     with anthropic_messages.stream(**api_kwargs) as stream:
                         response = stream.get_final_message()
                 else:
                     response = anthropic_messages.create(**api_kwargs)
+                call_elapsed = time.monotonic() - call_started
 
                 self.total_turns += 1
                 self._consecutive_errors = 0
@@ -1069,6 +1083,7 @@ class BashAgent(BaseAgent):
                 self._emit_response_callback(
                     messages,
                     self._anthropic_response_dict(response) or str(response),
+                    call_elapsed,
                 )
 
                 assistant_content = response.content

@@ -171,10 +171,11 @@ exclusive.
 **4. Output.** Each run lands at `bash_agent_runs/run_<id>/`: `result.json`
 (machine-readable outcome), `world.nmdb` (encrypted ledger), `config.json`,
 `checkpoint.json`, `agent_workspace/` (the
-agent's sandbox, a fresh git repo with weekly commits), and `logs/` containing
-per-turn `raw_responses_<id>.jsonl` (model thinking + tool calls),
-`tool_results_<id>.jsonl` (tool calls + their outputs), and
-`timing_<id>.jsonl`. To score and analyze the run, see
+agent's sandbox, a fresh git repo with weekly commits), `analysis/day_<day>/`
+(signals, role reports, state portrait, and `STRATEGY_BRIEF.md` when Analysis
+is enabled), and `logs/` containing `trajectory_<id>.jsonl` (ordered week,
+LLM, and tool events) plus `performance_<id>.jsonl` (week, decision-batch,
+module, and run summaries). To score and analyze the run, see
 [docs/analyze_trajectory.md](docs/analyze_trajectory.md).
 
 If you edit `src/saas_bench/config.py`, rebuild the bundle the agent sees with

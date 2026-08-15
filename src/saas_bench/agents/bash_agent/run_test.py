@@ -81,12 +81,8 @@ from saas_bench.agents.bash_agent.analysis.signals import (
     SignalCollector,
     parse_public_week_snapshot,
 )
+from saas_bench.agents.bash_agent.experiment_logs import ExperimentLogWriter
 from saas_bench.json_io import write_json_atomic, write_text_atomic
-
-
-def now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-
 
 def load_env_file(env_path: Path) -> Dict[str, str]:
     env_vars = {}
@@ -116,7 +112,7 @@ class BashAgentRunner:
     checkpoint management. All simulation state is queried via HTTP.
     """
 
-    CHECKPOINT_FORMAT_VERSION = 6
+    CHECKPOINT_FORMAT_VERSION = 7
 
     def __init__(
         self,
@@ -278,16 +274,16 @@ class BashAgentRunner:
         # Logs directory
         self.logs_dir = self.workspace_dir / "logs"
 
-        # Log file for raw responses
-        self.response_log_file = self.logs_dir / f"raw_responses_{self.run_id}.jsonl"
+        # 原子过程与聚合性能分开保存，避免同一次调用在多个文件重复。
+        self.trajectory_log_file = self.logs_dir / f"trajectory_{self.run_id}.jsonl"
+        self.performance_log_file = self.logs_dir / f"performance_{self.run_id}.jsonl"
+        self._experiment_log_writer = None
+        self._pending_decision_context: Optional[Dict[str, Any]] = None
 
-        # 记录每次 LLM 调用、工具执行和决策批次的耗时。
-        self.timing_log_file = self.logs_dir / f"timing_{self.run_id}.jsonl"
-
-        # CEOBench dashboard URL for live timing push (set via env var)
+        # CEOBench dashboard URL for live performance-summary push (set via env var)
         self._dashboard_url = os.environ.get("CEOBENCH_DASHBOARD_URL", "")
-        self._timing_queue = None
-        self._timing_thread = None
+        self._performance_queue = None
+        self._performance_thread = None
 
         # Load API key
         env_file = Path(__file__).parent.parent.parent.parent.parent / ".env"
@@ -628,11 +624,12 @@ class BashAgentRunner:
             "analysis_task": task,
             "attempt": attempt,
             "call_kind": call_kind.value,
-            "day": day,
         }
         if role is not None:
             identity["role"] = role.value
         usage_fields = {
+            "provider": config["provider"],
+            "api_type": config["api_type"],
             "requested_model": config["model"],
             "served_model": response.model,
             "pricing_model": cost.pricing_model,
@@ -643,23 +640,16 @@ class BashAgentRunner:
             "cost_amount": cost.amount,
             "currency": cost.currency,
         }
-        raw_entry = {
-            "timestamp": now(),
-            **identity,
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
-            "response_text": response.text,
-            "raw_response": self._jsonable_llm_response(response.raw_response),
-            "elapsed_seconds": elapsed,
-            **usage_fields,
-        }
-        with open(self.response_log_file, "a") as file:
-            file.write(json.dumps(raw_entry, ensure_ascii=False) + "\n")
-        self._log_timing(
-            "analysis_llm_call",
+        self._log_trajectory(
+            "llm_call",
             day,
-            **{key: value for key, value in identity.items() if key != "day"},
-            elapsed_s=round(elapsed, 3),
+            **identity,
+            status="completed",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_text=response.text,
+            raw_response=self._jsonable_llm_response(response.raw_response),
+            elapsed_seconds=elapsed,
             **usage_fields,
         )
         return response, cost, elapsed
@@ -908,7 +898,91 @@ class BashAgentRunner:
     # Logging
     # =========================================================================
 
-    def _log_response(self, turn: int, day: int, messages: List[Dict], raw_response: Any):
+    def _experiment_logs(self) -> ExperimentLogWriter:
+        """延迟创建日志器，便于断点恢复和轻量单元测试共用。"""
+        writer = getattr(self, "_experiment_log_writer", None)
+        if writer is None:
+            writer = ExperimentLogWriter(
+                run_id=self.run_id,
+                trajectory_file=self.trajectory_log_file,
+                performance_file=self.performance_log_file,
+                performance_callback=self._queue_performance_entry,
+            )
+            self._experiment_log_writer = writer
+        return writer
+
+    def _log_trajectory(self, event_type: str, day: int, **fields: Any) -> None:
+        self._experiment_logs().trajectory(event_type, day, **fields)
+
+    def _log_performance(self, event_type: str, day: int, **fields: Any) -> None:
+        self._experiment_logs().performance(event_type, day, **fields)
+
+    def _log_analysis_artifacts(self, day: int) -> None:
+        """记录 Analysis 产物索引，产物正文仍以独立文件为准。"""
+        if self._experiment_logs().has_trajectory_event("analysis_artifacts", day):
+            return
+        self._log_trajectory(
+            "analysis_artifacts",
+            day,
+            component="analysis",
+            signals=str(
+                self._analysis_signal_path(day).relative_to(self.workspace_dir)
+            ),
+            role_reports=str(
+                self._analysis_role_reports_path(day).relative_to(self.workspace_dir)
+            ),
+            state_portrait=str(
+                self._analysis_state_portrait_path(day).relative_to(self.workspace_dir)
+            ),
+            strategy_brief=str(
+                self._analysis_brief_path(day).relative_to(self.workspace_dir)
+            ),
+        )
+
+    @staticmethod
+    def _decision_response_status(raw_response: Any) -> tuple[str, int, Optional[str]]:
+        """根据原始响应判断 Harness 是否会接受这一轮工具调用。"""
+        if not isinstance(raw_response, dict):
+            return "invalid", 0, "unstructured_response"
+
+        tool_calls: List[Any] = []
+        choices = raw_response.get("choices") or []
+        if choices:
+            message = (choices[0] or {}).get("message") or {}
+            tool_calls = message.get("tool_calls") or []
+        elif isinstance(raw_response.get("output"), list):
+            tool_calls = [
+                item
+                for item in raw_response["output"]
+                if isinstance(item, dict) and item.get("type") == "function_call"
+            ]
+        elif isinstance(raw_response.get("content"), list):
+            tool_calls = [
+                item
+                for item in raw_response["content"]
+                if isinstance(item, dict) and item.get("type") == "tool_use"
+            ]
+
+        if not tool_calls:
+            return "invalid", 0, "missing_tool_call"
+        for tool_call in tool_calls:
+            function = tool_call.get("function") or {}
+            arguments = function.get("arguments", tool_call.get("arguments"))
+            if isinstance(arguments, str) and arguments:
+                try:
+                    json.loads(arguments)
+                except json.JSONDecodeError:
+                    return "invalid", len(tool_calls), "invalid_tool_arguments"
+        return "valid", len(tool_calls), None
+
+    def _log_decision_llm_call(
+        self,
+        turn: int,
+        day: int,
+        messages: List[Dict],
+        raw_response: Any,
+        elapsed_seconds: float = 0.0,
+    ) -> None:
         input_tokens = self.agent.last_input_tokens if self.agent else 0
         output_tokens = self.agent.last_output_tokens if self.agent else 0
         cached_tokens = self.agent.last_cached_tokens if self.agent else 0
@@ -926,11 +1000,38 @@ class BashAgentRunner:
             self.total_decision_agent_cost_by_currency.get(cost.currency, 0.0)
             + cost.amount
         )
+        initial_observation = (
+            getattr(self.agent, "initial_observation_for_audit", None)
+            if self.agent else None
+        )
+        if initial_observation is not None:
+            context = self._pending_decision_context
+            if context is None or context["decision_observation"] != initial_observation:
+                raise RuntimeError("Logged decision observation does not match Agent input")
+            # Dashboard 和创新模块产物分字段保存，同时保留真实发送文本。
+            self._log_trajectory(
+                "decision_observation",
+                day,
+                dashboard=context["dashboard"],
+                strategy_brief=context["strategy_brief"],
+                strategy_brief_artifact=context["strategy_brief_artifact"],
+                rendered_observation=initial_observation,
+            )
+            self._pending_decision_context = None
+
+        status, tool_call_count, invalid_reason = self._decision_response_status(
+            raw_response
+        )
         entry = {
-            "timestamp": now(),
-            "turn": turn,
-            "day": day,
+            "component": "bash_agent",
+            "react_round": turn,
             "messages_count": len(messages),
+            "status": status,
+            "returned_tool_call_count": tool_call_count,
+            "elapsed_seconds": elapsed_seconds,
+            "provider": self.provider,
+            "api_type": self.api_type,
+            "requested_model": self.model,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cached_tokens": cached_tokens,
@@ -939,68 +1040,56 @@ class BashAgentRunner:
             "pricing_model": cost.pricing_model,
             "cost_amount": cost.amount,
             "currency": cost.currency,
-            "total_cost_by_currency": self.total_decision_agent_cost_by_currency,
+            "cumulative_cost_by_currency": dict(
+                self.total_decision_agent_cost_by_currency
+            ),
             "raw_response": raw_response,
         }
-        initial_observation = (
-            getattr(self.agent, "initial_observation_for_audit", None)
-            if self.agent else None
+        if invalid_reason is not None:
+            entry["invalid_reason"] = invalid_reason
+        self._log_trajectory("llm_call", day, **entry)
+
+    def _log_tool_execution(
+        self,
+        *,
+        react_round: int,
+        day: int,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        result: Any,
+        elapsed_seconds: float,
+        status: str,
+    ) -> None:
+        self._log_trajectory(
+            "tool_execution",
+            day,
+            component="bash_agent",
+            react_round=react_round,
+            tool_index=0,
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result,
+            elapsed_seconds=elapsed_seconds,
+            status=status,
         )
-        if initial_observation is not None:
-            # 保存实际进入模型请求的周初 observation，完整正文已经足够用于实验审计。
-            entry["initial_observation"] = initial_observation
-            entry["analysis_brief_injected"] = False
-            if self.analysis_enabled:
-                brief_path = self._analysis_brief_path(day)
-                if brief_path.is_file():
-                    brief = brief_path.read_text()
-                    expected_suffix = f"\n\n---\n\n{brief}"
-                    if initial_observation.endswith(expected_suffix):
-                        entry["analysis_brief_injected"] = True
-        with open(self.response_log_file, 'a') as f:
-            f.write(json.dumps(entry) + "\n")
 
-    def _log_tool_result(self, turn: int, day: int, tool_name: str, arguments: Dict, result: str):
-        tool_results_file = self.logs_dir / f"tool_results_{self.run_id}.jsonl"
-        entry = {
-            "timestamp": now(),
-            "turn": turn,
-            "day": day,
-            "tool": tool_name,
-            "arguments": arguments,
-            "result": result,
-        }
-        with open(tool_results_file, 'a') as f:
-            f.write(json.dumps(entry) + "\n")
-
-    def _log_timing(self, event: str, day: int, turn: int = 0, **kwargs):
-        """Log a timing event to the timing JSONL file and push to dashboard."""
-        entry = {
-            "timestamp": now(),
-            "run_id": self.run_id,
-            "event": event,
-            "day": day,
-            "turn": turn,
-            **kwargs,
-        }
-        with open(self.timing_log_file, 'a') as f:
-            f.write(json.dumps(entry) + "\n")
-        # Push to ceobench dashboard (non-blocking)
-        if self._timing_queue is not None:
+    def _queue_performance_entry(self, entry: Dict[str, Any]) -> None:
+        """将聚合性能事件异步推送给可选仪表盘。"""
+        if self._performance_queue is not None:
             try:
-                self._timing_queue.put_nowait(entry)
+                self._performance_queue.put_nowait(entry)
             except Exception:
                 pass
 
-    def _start_timing_poster(self) -> None:
+    def _start_performance_poster(self) -> None:
         """Start the optional dashboard sender inside the managed run lifecycle."""
-        if not self._dashboard_url or self._timing_thread is not None:
+        if not self._dashboard_url or self._performance_thread is not None:
             return
 
         import queue
         import threading
 
-        self._timing_queue = queue.Queue(maxsize=500)
+        self._performance_queue = queue.Queue(maxsize=500)
 
         def _post_batch(batch: List[Dict[str, Any]]) -> None:
             try:
@@ -1015,19 +1104,19 @@ class BashAgentRunner:
             except Exception:
                 pass  # 仪表盘不可用不得影响主实验。
 
-        def _timing_poster() -> None:
+        def _performance_poster() -> None:
             while True:
                 batch = []
                 stop_requested = False
                 try:
-                    item = self._timing_queue.get(timeout=5)
+                    item = self._performance_queue.get(timeout=5)
                     if item is None:
                         stop_requested = True
                     else:
                         batch.append(item)
                     for _ in range(20):
                         try:
-                            item = self._timing_queue.get_nowait()
+                            item = self._performance_queue.get_nowait()
                         except queue.Empty:
                             break
                         if item is None:
@@ -1041,17 +1130,17 @@ class BashAgentRunner:
                 if stop_requested:
                     return
 
-        self._timing_thread = threading.Thread(
-            target=_timing_poster,
-            name=f"ceobench-timing-{self.run_id}",
+        self._performance_thread = threading.Thread(
+            target=_performance_poster,
+            name=f"ceobench-performance-{self.run_id}",
             daemon=True,
         )
-        self._timing_thread.start()
+        self._performance_thread.start()
 
-    def _stop_timing_poster(self) -> None:
-        """Flush queued timing entries and stop the optional sender."""
-        thread = self._timing_thread
-        queue = self._timing_queue
+    def _stop_performance_poster(self) -> None:
+        """Flush queued performance entries and stop the optional sender."""
+        thread = self._performance_thread
+        queue = self._performance_queue
         if thread is None:
             return
         if queue is not None:
@@ -1060,8 +1149,8 @@ class BashAgentRunner:
             except Exception:
                 pass
         thread.join(timeout=15)
-        self._timing_thread = None
-        self._timing_queue = None
+        self._performance_thread = None
+        self._performance_queue = None
 
     # =========================================================================
     # Workspace setup
@@ -1532,9 +1621,8 @@ __pycache__/
 
     def _checkpoint_log_files(self) -> Dict[str, Path]:
         return {
-            "tool_results": self.logs_dir / f"tool_results_{self.run_id}.jsonl",
-            "raw_responses": self.response_log_file,
-            "timing": self.timing_log_file,
+            "trajectory": self.trajectory_log_file,
+            "performance": self.performance_log_file,
         }
 
     def _capture_log_offsets(self) -> Dict[str, int]:
@@ -2219,7 +2307,7 @@ __pycache__/
                 model=self.model,
                 api_type=self.api_type,
                 max_invalid_responses_per_turn=self.max_invalid_responses_per_turn,
-                response_callback=self._log_response,
+                response_callback=self._log_decision_llm_call,
                 reasoning_effort=self.reasoning_effort,
                 temperature=self.temperature,
                 top_p=self.top_p,
@@ -2227,7 +2315,8 @@ __pycache__/
                 max_output_tokens=self.max_output_tokens,
                 timeout_seconds=self.timeout_seconds,
                 request_options=self.request_options,
-                tool_result_callback=self._log_tool_result,
+                # 推理文本和非法响应已包含在原始 LLM 事件中，不伪装成工具结果。
+                tool_result_callback=None,
                 workspace_path=self.agent_workspace,
                 total_days=self.total_days,
             )
@@ -2581,13 +2670,13 @@ __pycache__/
         terminal_result = self._load_or_rebuild_terminal_result()
         if terminal_result is not None:
             return terminal_result
-        self._start_timing_poster()
+        self._start_performance_poster()
         try:
             return self._run_experiment(verbose)
         finally:
             # 主循环任何位置失败，都必须先关模拟器，再停止日志转发线程。
             self._stop_server()
-            self._stop_timing_poster()
+            self._stop_performance_poster()
 
     def _run_experiment(self, verbose: bool = True) -> Dict[str, Any]:
         """Execute the experiment; resource ownership stays in run()."""
@@ -2637,6 +2726,15 @@ __pycache__/
             status = self._get_game_status()
             last_status = status
             sim_day = status['day']
+            batch_start_day = sim_day
+
+            if not self._experiment_logs().has_trajectory_event("week_start", sim_day):
+                self._log_trajectory(
+                    "week_start",
+                    sim_day,
+                    cash=status["cash"],
+                    subscribers=status["subscribers"],
+                )
 
             if verbose:
                 print(f"\n{'='*40}")
@@ -2648,8 +2746,12 @@ __pycache__/
             dashboard_payload = self._get_dashboard_payload()
             dashboard = dashboard_payload['dashboard']
             _dashboard_elapsed = _time.monotonic() - _t0
-            self._log_tool_result(0, sim_day, '_dashboard', {}, dashboard)
-            self._log_timing("dashboard", sim_day, elapsed_s=round(_dashboard_elapsed, 3))
+            self._log_trajectory(
+                "dashboard",
+                sim_day,
+                dashboard=dashboard,
+                elapsed_seconds=round(_dashboard_elapsed, 3),
+            )
 
             _analysis_started = _time.monotonic()
             signals = self._ensure_analysis_signals(dashboard_payload)
@@ -2676,20 +2778,38 @@ __pycache__/
                     state_portrait,
                 )
             if self.analysis_enabled:
-                self._log_timing(
-                    "analysis_week",
-                    sim_day,
-                    elapsed_s=round(_time.monotonic() - _analysis_started, 3),
-                    role_reports_generated=role_reports_generated,
-                    state_portrait_generated=state_portrait_generated,
-                    brief_generated=brief_generated,
-                )
+                if not self._experiment_logs().has_performance_event(
+                    "analysis_week", sim_day
+                ):
+                    self._log_performance(
+                        "analysis_week",
+                        sim_day,
+                        component="analysis",
+                        elapsed_seconds=round(
+                            _time.monotonic() - _analysis_started, 3
+                        ),
+                        role_reports_generated=role_reports_generated,
+                        state_portrait_generated=state_portrait_generated,
+                        brief_generated=brief_generated,
+                    )
+                self._log_analysis_artifacts(sim_day)
             if state_portrait_generated:
                 # 状态画像和本周汇总日志完成后再次提交，形成完整 Analysis 断点。
                 stable_checkpoint = self._save_checkpoint(sim_day)
 
             # Agent Loop：只要本周的决策尚未结束，就持续执行
             observation = self._decision_observation(dashboard, analysis_brief)
+            brief_path = self._analysis_brief_path(sim_day)
+            self._pending_decision_context = {
+                "dashboard": dashboard,
+                "strategy_brief": analysis_brief,
+                "strategy_brief_artifact": (
+                    str(brief_path.relative_to(self.workspace_dir))
+                    if analysis_brief is not None and brief_path.is_file()
+                    else None
+                ),
+                "decision_observation": observation,
+            }
             info = {'day': sim_day, 'cash': status['cash']}
             turns_in_batch = 0
             week_advanced = False
@@ -2700,6 +2820,7 @@ __pycache__/
             batch_output_tokens = 0
             batch_cached_tokens = 0
             batch_reasoning_tokens = 0
+            batch_api_calls = 0
 
             while (
                 not week_advanced
@@ -2713,7 +2834,6 @@ __pycache__/
                 _before_output_tokens = self.agent.total_output_tokens
                 _before_cached_tokens = self.agent.total_cached_tokens
                 _before_reasoning_tokens = self.agent.total_reasoning_tokens
-                _before_cost = dict(self.total_decision_agent_cost_by_currency)
                 _t0 = _time.monotonic()
                 action = self.agent.act(observation, 0, False, info)
                 _llm_elapsed = _time.monotonic() - _t0
@@ -2722,6 +2842,7 @@ __pycache__/
                 _turn_output_tokens = self.agent.total_output_tokens - _before_output_tokens
                 _turn_cached_tokens = self.agent.total_cached_tokens - _before_cached_tokens
                 _turn_reasoning_tokens = self.agent.total_reasoning_tokens - _before_reasoning_tokens
+                batch_api_calls += _call_count
                 batch_llm_s += _llm_elapsed
                 batch_input_tokens += _turn_input_tokens
                 batch_output_tokens += _turn_output_tokens
@@ -2747,29 +2868,6 @@ __pycache__/
                 else:
                     tool_args_preview = json.dumps(action.arguments or {})[:120]
 
-                # 将本次 LLM 的调用信息(llm_call)记录到日志文件（耗时、使用工具、Token 使用情况、请求的模型等）
-                call_cost_by_currency = {
-                    currency: amount - _before_cost.get(currency, 0.0)
-                    for currency, amount in self.total_decision_agent_cost_by_currency.items()
-                    if not math.isclose(amount, _before_cost.get(currency, 0.0))
-                }
-                self._log_timing("llm_call", sim_day, turn=turns_in_batch,
-                                 elapsed_s=round(_llm_elapsed, 2),
-                                 tool=tool_name, tool_preview=tool_args_preview,
-                                 api_calls=_call_count,
-                                 input_tokens=_turn_input_tokens,
-                                 output_tokens=_turn_output_tokens,
-                                 cached_tokens=_turn_cached_tokens,
-                                 reasoning_tokens=_turn_reasoning_tokens,
-                                 cost_by_currency=call_cost_by_currency,
-                                 total_cost_by_currency=self.total_decision_agent_cost_by_currency,
-                                 requested_model=self.model,
-                                 served_model=self.agent.last_serving_model,
-                                 pricing_model=self.pricing_model_map.get(
-                                     self.agent.last_serving_model,
-                                     self.agent.last_serving_model,
-                                 ))
-
                 if verbose:
                     if tool_name == 'bash':
                         print(f"    [Turn {turns_in_batch}] bash: {tool_args_preview[:100]}")
@@ -2783,6 +2881,15 @@ __pycache__/
                     result = self._execute_tool(action.tool, action.arguments or {})
                 except self._NextWeekTimeoutError as e:
                     _tool_elapsed = _time.monotonic() - _t0
+                    self._log_tool_execution(
+                        react_round=self.agent.total_turns,
+                        day=sim_day,
+                        tool_name=action.tool,
+                        arguments=action.arguments or {},
+                        result={"error": str(e)},
+                        elapsed_seconds=round(_tool_elapsed, 3),
+                        status="timeout",
+                    )
                     print(f"\n⚠️  next_week timed out on sim day {sim_day} ({e})")
                     print("Auto-quitting. Keeping the previous completed checkpoint.")
                     game_outcome = 'timeout'
@@ -2791,16 +2898,14 @@ __pycache__/
                 batch_tool_s += _tool_elapsed
                 observation = result if isinstance(result, str) else json.dumps(result)
 
-                # 将工具调用耗时信息(tool_exec)记录到日志文件
-                self._log_timing("tool_exec", sim_day, turn=turns_in_batch,
-                                 elapsed_s=round(_tool_elapsed, 3),
-                                 tool=tool_name, tool_preview=tool_args_preview)
-
-                # 将工具调用执行结果信息(tool_result)记录到日志文件
-                self._log_tool_result(
-                    self.agent.total_turns, sim_day,
-                    action.tool, action.arguments or {},
-                    observation  # Full result in JSONL (tool already caps at 50K)
+                self._log_tool_execution(
+                    react_round=self.agent.total_turns,
+                    day=sim_day,
+                    tool_name=action.tool,
+                    arguments=action.arguments or {},
+                    result=observation,
+                    elapsed_seconds=round(_tool_elapsed, 3),
+                    status="completed",
                 )
 
                 if verbose:
@@ -2832,18 +2937,21 @@ __pycache__/
                         )
                     break
 
-            if game_outcome is not None:
+            if game_outcome == 'timeout':
                 break
+
+            terminal_batch = game_outcome in {'completed', 'bankrupt'}
+            resumable_batch = not week_advanced and not terminal_batch
 
             # 达到配置上限仍未推进时保留同一模拟日，不伪造缺少理由和预测参数的 next-week。
             # 当前上下文会随 checkpoint 一起保存，下一轮可以继续决策。
-            if not week_advanced:
+            if resumable_batch:
                 print(
                     f"\n⚠️  Turn cap reached on sim day {sim_day} without next-week; "
                     "saving a resumable checkpoint and ending this invocation."
                 )
-                self._log_timing(
-                    "turn_cap_no_advance", sim_day, turns=turns_in_batch
+                self._log_trajectory(
+                    "turn_cap_reached", sim_day, turns=turns_in_batch
                 )
 
             # 内层每次工具执行后已经校验服务端状态，这里直接复用。
@@ -2856,25 +2964,49 @@ __pycache__/
             batch_other_s = (
                 batch_elapsed_s - batch_llm_s - batch_tool_s - _dashboard_elapsed
             )
-            self._log_timing("decision_batch_summary", sim_day,
-                             decision_batch=decision_batch,
-                             elapsed_s=round(batch_elapsed_s, 1),
-                             llm_total_s=round(batch_llm_s, 1),
-                             agent_tool_s=round(agent_tool_s, 1),
-                             environment_advance_s=round(environment_advance_s, 1),
-                             dashboard_s=round(_dashboard_elapsed, 2),
-                             other_s=round(max(batch_other_s, 0), 1),
-                             turns=turns_in_batch,
-                             subs=subscribers,
-                             cash=cash,
-                             batch_input_tokens=batch_input_tokens,
-                             batch_output_tokens=batch_output_tokens,
-                             batch_cached_tokens=batch_cached_tokens,
-                             batch_reasoning_tokens=batch_reasoning_tokens,
-                             total_input_tokens=self.agent.total_input_tokens,
-                             total_output_tokens=self.agent.total_output_tokens,
-                             total_cached_tokens=self.agent.total_cached_tokens,
-                             total_reasoning_tokens=self.agent.total_reasoning_tokens)
+            if week_advanced or terminal_batch:
+                self._log_trajectory(
+                    "week_end",
+                    batch_start_day,
+                    end_sim_day=sim_day,
+                    cash=cash,
+                    subscribers=subscribers,
+                    outcome=game_outcome,
+                )
+
+            self._log_performance(
+                "decision_batch",
+                batch_start_day,
+                decision_batch=decision_batch,
+                end_sim_day=sim_day,
+                elapsed_seconds=round(batch_elapsed_s, 1),
+                llm_seconds=round(batch_llm_s, 1),
+                agent_tool_seconds=round(agent_tool_s, 1),
+                environment_advance_seconds=round(environment_advance_s, 1),
+                dashboard_seconds=round(_dashboard_elapsed, 2),
+                other_seconds=round(max(batch_other_s, 0), 1),
+                turns=turns_in_batch,
+                api_calls=batch_api_calls,
+                subs=subscribers,
+                cash=cash,
+                batch_input_tokens=batch_input_tokens,
+                batch_output_tokens=batch_output_tokens,
+                batch_cached_tokens=batch_cached_tokens,
+                batch_reasoning_tokens=batch_reasoning_tokens,
+                total_input_tokens=self.agent.total_input_tokens,
+                total_output_tokens=self.agent.total_output_tokens,
+                total_cached_tokens=self.agent.total_cached_tokens,
+                total_reasoning_tokens=self.agent.total_reasoning_tokens,
+            )
+            if week_advanced or terminal_batch:
+                self._log_performance(
+                    "week_summary",
+                    batch_start_day,
+                    end_sim_day=sim_day,
+                    cash=cash,
+                    subscribers=subscribers,
+                    **self._experiment_logs().summarize_week(batch_start_day),
+                )
 
             pct_llm = (batch_llm_s / batch_elapsed_s * 100) if batch_elapsed_s > 0 else 0
             pct_environment = (environment_advance_s / batch_elapsed_s * 100) if batch_elapsed_s > 0 else 0
@@ -2898,11 +3030,11 @@ __pycache__/
             # 保存当前 sim_day 的 checkpoint
             stable_checkpoint = self._save_checkpoint(
                 sim_day,
-                resume_conversation=not week_advanced,
-                pending_observation=observation if not week_advanced else None,
+                resume_conversation=resumable_batch,
+                pending_observation=observation if resumable_batch else None,
             )
 
-            if not week_advanced:
+            if resumable_batch:
                 game_outcome = 'incomplete'
                 break
 
@@ -2922,7 +3054,23 @@ __pycache__/
                 if self.analysis_enabled:
                     # 最后一周没有下一轮决策，但仍生成完整 Analysis 产物。
                     final_analysis_started = _time.monotonic()
+                    self._log_trajectory(
+                        "terminal_snapshot",
+                        sim_day,
+                        cash=last_status["cash"],
+                        subscribers=last_status["subscribers"],
+                    )
+                    final_dashboard_started = _time.monotonic()
                     final_payload = self._get_dashboard_payload()
+                    self._log_trajectory(
+                        "dashboard",
+                        sim_day,
+                        dashboard=final_payload["dashboard"],
+                        terminal=True,
+                        elapsed_seconds=round(
+                            _time.monotonic() - final_dashboard_started, 3
+                        ),
+                    )
                     final_signals = self._ensure_analysis_signals(final_payload)
                     if final_signals is None:
                         raise RuntimeError("Analysis signals were not generated")
@@ -2943,10 +3091,12 @@ __pycache__/
                         final_reports,
                         final_portrait,
                     )
-                    self._log_timing(
+                    self._log_analysis_artifacts(sim_day)
+                    self._log_performance(
                         "analysis_week",
                         sim_day,
-                        elapsed_s=round(
+                        component="analysis",
+                        elapsed_seconds=round(
                             _time.monotonic() - final_analysis_started, 3
                         ),
                         role_reports_generated=final_reports_generated,
@@ -2970,6 +3120,26 @@ __pycache__/
         result_agent_state = stable_checkpoint['runtime']['agent']
         sim_day = stable_checkpoint['day']
         final_cash = stable_checkpoint['cash']
+        self._log_performance(
+            "run_summary",
+            sim_day,
+            outcome=game_outcome,
+            final_cash=final_cash,
+            modules={
+                "bash_agent": {
+                    "call_count": result_agent_state["total_turns"],
+                    "input_tokens": result_agent_state["input_tokens"],
+                    "output_tokens": result_agent_state["output_tokens"],
+                    "cached_tokens": result_agent_state["cached_tokens"],
+                    "reasoning_tokens": result_agent_state["reasoning_tokens"],
+                    "cost_by_currency": result_agent_state[
+                        "decision_cost_by_currency"
+                    ],
+                },
+                "analysis": stable_checkpoint["runtime"]["analysis"],
+                "social_llm": stable_checkpoint["runtime"]["environment_llm"],
+            },
+        )
 
         if verbose:
             print(f"\n{'='*60}")

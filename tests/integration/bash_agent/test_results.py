@@ -95,7 +95,9 @@ def test_run_returns_existing_terminal_result_without_starting_resources(tmp_pat
         "days_run": 7,
         "final_cash": 850_000.0,
     }))
-    runner._start_timing_poster = lambda: pytest.fail("must not start timing poster")
+    runner._start_performance_poster = lambda: pytest.fail(
+        "must not start performance poster"
+    )
     runner._run_experiment = lambda verbose: pytest.fail("must not run experiment")
 
     assert runner.run(verbose=False) == result
