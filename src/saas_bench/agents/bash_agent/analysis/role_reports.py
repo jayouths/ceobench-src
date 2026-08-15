@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from json import JSONDecodeError
 
 from pydantic import ValidationError
 
@@ -18,6 +18,7 @@ from .models import (
     RoleReportsArtifact,
 )
 from .role_prompts import build_repair_prompt, build_role_prompts
+from .json_response import parse_json_object
 from .signal_models import AnalysisSignals
 
 
@@ -94,9 +95,7 @@ class RoleReportGenerator:
             last_text = outcome.text
 
             try:
-                payload = json.loads(last_text)
-                if not isinstance(payload, dict):
-                    raise ValueError("top-level response must be a JSON object")
+                payload = parse_json_object(last_text)
                 analysis = RoleAnalysis.model_validate(payload)
                 report = RoleReport.from_analysis(role, signals.day, analysis)
                 self._validate_evidence_metrics(signals, report)
@@ -104,7 +103,7 @@ class RoleReportGenerator:
                     report,
                     role_calls,
                 )
-            except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            except (JSONDecodeError, ValidationError, ValueError) as exc:
                 last_error = str(exc)
 
         raise RoleReportGenerationError(

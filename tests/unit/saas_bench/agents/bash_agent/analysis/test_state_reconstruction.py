@@ -166,6 +166,25 @@ def test_reconstructor_repairs_unknown_evidence_with_self_contained_context():
     assert '"role_reports"' in observed[1]
 
 
+def test_reconstructor_accepts_one_complete_json_code_fence():
+    calls = []
+
+    def call_model(day, attempt, call_kind, system_prompt, user_prompt):
+        calls.append(attempt)
+        return StateCallOutcome(
+            text=f"```json\n{_valid_assessment()}\n```",
+            usage=_usage(attempt, call_kind),
+        )
+
+    artifact = StateReconstructor(
+        call_model,
+        max_schema_retries=1,
+    ).generate(_role_reports())
+
+    assert artifact.day == 7
+    assert calls == [1]
+
+
 def test_reconstructor_fails_after_configured_repair_limit():
     calls = []
 

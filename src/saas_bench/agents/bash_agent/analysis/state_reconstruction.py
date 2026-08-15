@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from json import JSONDecodeError
 
 from pydantic import ValidationError
 
@@ -16,6 +16,7 @@ from .models import (
     StatePortraitArtifact,
 )
 from .state_prompts import build_state_prompts, build_state_repair_prompt
+from .json_response import parse_json_object
 
 
 @dataclass(frozen=True)
@@ -78,9 +79,7 @@ class StateReconstructor:
             last_text = outcome.text
 
             try:
-                payload = json.loads(last_text)
-                if not isinstance(payload, dict):
-                    raise ValueError("top-level response must be a JSON object")
+                payload = parse_json_object(last_text)
                 assessment = StateAssessment.model_validate(payload)
                 self._validate_evidence_references(role_reports, assessment)
                 return StatePortraitArtifact.from_assessment(
@@ -88,7 +87,7 @@ class StateReconstructor:
                     assessment,
                     calls,
                 )
-            except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            except (JSONDecodeError, ValidationError, ValueError) as exc:
                 last_error = str(exc)
 
         raise StateReconstructionError(
