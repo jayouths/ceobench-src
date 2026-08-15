@@ -5,7 +5,7 @@
 Analysis 是“隐性经营状态识别”模块，只负责识别企业当前的经营状态。它不提供行动建议，不读取历史策略，不修改模拟环境，不包含后续的战略协商和历史复盘。
 
 ```text
-Dashboard + 公开经营数据
+公开周度经营快照 + 公开经营明细
 → 四个职能视角分别分析
 → 统一重构经营状态
 → 生成状态简报
@@ -16,7 +16,7 @@ Dashboard + 公开经营数据
 
 Analysis 在每个新模拟周开始时执行一次，包括初始的 day 0。
 
-1. Runner 读取 `game-status` 和 Dashboard。
+1. Runner 读取 `game-status` 和 `/dashboard` 返回的 `public_week_snapshot`；Dashboard 文本继续原样提供给 ReAct Agent。
 2. Runner 通过现有 `/query` 接口读取公开经营数据。
 3. 程序计算最近 7 天、之前 7 天及环比变化，不让 LLM 自行完成算术。
 4. 市场、财务、产品和客户四个角色按固定顺序生成报告。
@@ -28,7 +28,31 @@ Analysis 在每个新模拟周开始时执行一次，包括初始的 day 0。
 
 ## 3. 数据边界与统计信号
 
-Analysis 只能通过现有 `/query` 接口查询结构化经营数据。该接口继续负责禁止写操作、隐藏表、隐藏字段和 Schema 探测。除此之外，模块只使用 Baseline 已公开的 Dashboard，以及此前由 Analysis 保存的公开统计快照；不直接打开 `world.nmdb`，不为创新模块增加更高的数据权限。
+Analysis 只能通过现有 `/query` 接口查询结构化经营明细。该接口继续负责禁止写操作、隐藏表、隐藏字段和 Schema 探测。除此之外，模块只使用 Baseline 已公开的 `public_week_snapshot`，以及此前由 Analysis 保存的公开统计快照；不直接打开 `world.nmdb`，不为创新模块增加更高的数据权限。
+
+Dashboard 不再作为一段需要解析的文本输入。模拟器在每个周边界只生成一次 `public_week_snapshot`，Dashboard 渲染器和 Analysis 信号计算器分别消费其中需要的字段：
+
+```text
+数据库当前状态 + 本周 DayResult
+            ↓
+  public_week_snapshot
+       ↙           ↘
+Dashboard 文本      Analysis 统计信号
+```
+
+快照统一保存当前经营状态、本周经营活动、当前配置、交付质量、社交帖子摘要、周度计算和收件箱。现金、客户基础、取消数、使用量和服务质量等字段可由 Dashboard 与 Analysis 共用；周度计算、收件箱等内容主要用于 Dashboard；环比、现金跑道、获客效率和利润率等 Analysis 专用指标则由快照与 `/query` 返回的公开明细进一步确定性计算。字段本身不写入消费者标签，由 Dashboard 渲染器和 Analysis 信号生成器显式声明各自依赖，避免展示职责污染数据模型。
+
+`/dashboard` 当前同时返回 Dashboard 文本和结构化快照：
+
+```json
+{
+  "dashboard": "...",
+  "day": 7,
+  "public_week_snapshot": {}
+}
+```
+
+`modules.analysis.enabled = false` 时，Runner 仍只把原有 Dashboard 文本交给决策 Agent，不执行额外查询或 LLM 调用。该结构化改造只统一数据口径，不改变模拟器规则、随机数状态或 Baseline 上下文。
 
 字段不照搬交付原型，而是从业务含义和状态识别目标反向选择。每个候选字段必须满足以下要求：
 
@@ -46,8 +70,8 @@ Analysis 只能通过现有 `/query` 接口查询结构化经营数据。该接�
 | --- | --- | --- | --- |
 | 市场 | 已完成数据源审计 | `subscriptions`、`customers`、`enterprise_turns`、`ad_channel_leads`、`social_media_posts`、`macroeconomic_conditions` | 有效线索、来源结构、付费获客效率、外部反馈和宏观环境 |
 | 财务 | 已完成数据源审计 | `ledger`、`ads_revenue` | 现金、收入、支出、净现金流、成本结构、交付利润率和现金跑道 |
-| 产品 | 已完成数据源审计 | `service_day`、`config_history`、`research_projects`、Dashboard | 使用量、容量压力、可靠性、产品配置和研发管线 |
-| 客户 | 已完成数据源审计 | `subscriptions`、`customers`、`issues`、`enterprise_turns`、Dashboard、历史公开统计快照 | 客户基础、新增、流失、工单压力和企业谈判状态 |
+| 产品 | 已完成数据源审计 | `service_day`、`config_history`、`research_projects`、`public_week_snapshot` | 使用量、容量压力、可靠性、产品配置和研发管线 |
+| 客户 | 已完成数据源审计 | `subscriptions`、`customers`、`issues`、`enterprise_turns`、`public_week_snapshot`、历史公开统计快照 | 客户基础、新增、流失、工单压力和企业谈判状态 |
 
 ### 3.1 市场信号设计
 
@@ -90,7 +114,7 @@ Analysis 只能通过现有 `/query` 接口查询结构化经营数据。该接�
 | 服务可靠性 | `p95_ms`、`error_rate`、`downtime_minutes` | 分别保留两个窗口的平均值、峰值、宕机总分钟和宕机天数，避免只看一次极值。 |
 | 产品配置 | `config_history` | 比较当前日与一周前有效的模型档位、配额、容量档位、运营投入和开发投入，并列出期间变化。价格不归入产品状态。 |
 | 研发管线 | `research_projects` | 区分进行中与已完成项目。进行中项目的预计完成日和预计提升只表示未来管线；只有已完成项目的 `quality_boost_applied` 能证明能力已经释放。 |
-| 当前交付质量 | Dashboard 的 Delivered Quality | 这是 Baseline 已公开给 Agent 的当前能力信息，可以作为证据；Analysis 不查询隐藏质量状态。 |
+| 当前交付质量 | `public_week_snapshot.delivered_quality` | 这是 Baseline 已通过 Dashboard 公开给 Agent 的当前能力信息，可以作为证据；Analysis 不查询隐藏质量状态。 |
 
 `config_history` 实际保存配置变更后的快照，不能当作连续的逐日观测求平均。延迟、错误率和宕机包含随机波动，产品角色可以提出原因假设，但不得仅凭时间先后认定某次配置修改造成了指标变化。
 
@@ -102,7 +126,7 @@ Analysis 只能通过现有 `/query` 接口查询结构化经营数据。该接�
 | --- | --- | --- |
 | 当前客户基础 | `subscriptions` 联结 `customers` | 分开统计活跃个人订阅数、企业客户数、企业席位数和当前套餐结构，不把个人账户与企业席位直接相加。 |
 | 新增付费订阅 | `start_day` 与订阅状态 | 只统计当前状态为 `subscribed` 或 `cancelled` 的记录并比较两个 7 天窗口。`lead` 和 `lost` 从未形成付费订阅，必须排除；已经取消的历史付费订阅仍应计入其开始窗口。 |
-| 取消订阅 | 当前 Dashboard 与历史公开统计快照 | Dashboard 的 `Cancellations` 是本周权威值。企业谈判超时时，`subscriptions.end_day` 可能写为未来合同到期日，因此不能用它重建所有历史取消事件。 |
+| 取消订阅 | 当前 `public_week_snapshot.weekly_activity` 与历史公开统计快照 | 快照中的 `cancellations` 是 Dashboard 同源的本周权威值。企业谈判超时时，`subscriptions.end_day` 可能写为未来合同到期日，因此不能用它重建所有历史取消事件。 |
 | 客户基础净变化 | 当前与上周公开客户基础快照之差 | 分别比较活跃个人订阅数和企业席位数；不把账户与席位混成同一个净增指标。 |
 | 流失率 | 周度取消数 / 周初活跃账户数 | 7 天流失率使用相邻快照；28 天流失率累计最近四次完整周度取消数，并使用 28 天前的活跃账户快照。公开数据不能可靠拆分所有历史取消席位和类型，因此不输出这些指标。 |
 | 工单压力 | `issues` | 统计当前未解决数量、平均和最长积压时间、超 7 天与超 14 天工单，并比较两个窗口的新开、解决数量和解决时长。 |
@@ -212,6 +236,8 @@ Analysis 模型配置、模块开关、累计用量和已完成的模拟周必�
 
 | 位置 | 计划改动 |
 | --- | --- |
+| `src/saas_bench/public_week_snapshot.py` | 统一构建公开周度经营事实并确定性渲染 Dashboard |
+| `src/saas_bench/api_server.py` 与 `environment.py` | 在 `/dashboard` 暴露结构化快照，Dashboard 复用同一数据来源 |
 | `src/saas_bench/llm_provider.py` | 在统一 LLM 返回结构中补充推理 Token |
 | `src/saas_bench/agents/bash_agent/analysis/` | 新增 Schema、统计信号、Prompt、流程编排和简报生成 |
 | `src/saas_bench/agents/bash_agent/run_test.py` | 接入独立模型、每周调用、简报注入、用量与恢复 |

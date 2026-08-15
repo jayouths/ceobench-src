@@ -10,189 +10,19 @@ Observations are tool outputs (including weekly dashboard from next_week).
 """
 
 import sqlite3
-import json
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple, List
 from pathlib import Path
 from numpy.random import Generator, default_rng
 
-from .config import BenchmarkConfig, MODEL_TIERS, CAPACITY_TIERS
-from .database import init_database, get_config, get_cash, get_mrr, get_active_subscriber_count, get_discovered_groups
+from .config import BenchmarkConfig, CAPACITY_TIERS
+from .database import init_database, get_cash, get_mrr, get_active_subscriber_count
+from .public_week_snapshot import (
+    build_public_week_snapshot,
+    render_weekly_dashboard,
+)
 from .simulation import Simulator, DayResult
 from .tools import AgentTools, ToolResult
-
-
-def build_weekly_dashboard(
-    conn: sqlite3.Connection,
-    day: int,
-    day_result: Optional[DayResult] = None,
-    calc_outputs: Optional[Dict[str, str]] = None,
-    inbox_items: Optional[list] = None,
-) -> str:
-    """Build the weekly dashboard string — SINGLE SOURCE OF TRUTH.
-
-    This is the canonical dashboard format returned by the next_week tool.
-    All agent runners and the environment should call this function instead
-    of maintaining their own dashboard builders.
-
-    Args:
-        conn: Database connection
-        day: Current day number (last day of the week)
-        day_result: Accumulated results from the week's simulation (None on Week 1).
-                    Additive fields (new_leads, cancellations, etc.) are cumulative
-                    for the week. Snapshot fields (cash, mrr, subs) are end-of-week.
-        calc_outputs: Dict mapping calculation name to output string
-        inbox_items: List of inbox items (notifications, threads) for this week
-
-    Returns:
-        Formatted dashboard string
-    """
-    config = get_config(conn, day) or {}
-    cash = get_cash(conn)
-    sub_count = get_active_subscriber_count(conn)
-
-    # Get open issues count
-    open_issues = conn.execute("""
-        SELECT COUNT(*) FROM customer_state cs
-        JOIN subscriptions s ON cs.customer_id = s.customer_id
-        WHERE s.status = 'subscribed' AND s.end_day IS NULL
-          AND cs.open_issue_days > 0
-    """).fetchone()[0]
-
-
-    # Use day_result if available, otherwise fall back to DB queries
-    # (day_result is None on the first day after a resume)
-    if day_result:
-        ind_subs = day_result.total_individual_subscribers
-        ent_seats = day_result.total_enterprise_subscription_seats
-    else:
-        # Fall back to DB
-        ind_subs = conn.execute("""
-            SELECT COUNT(*) FROM subscriptions s
-            JOIN customers c ON s.customer_id = c.customer_id
-            WHERE s.status = 'subscribed' AND s.end_day IS NULL
-              AND c.customer_type = 'small'
-        """).fetchone()[0]
-        ent_seats = conn.execute("""
-            SELECT COALESCE(SUM(CAST(c.seat_count AS INTEGER)), 0) FROM subscriptions s
-            JOIN customers c ON s.customer_id = c.customer_id
-            WHERE s.status = 'subscribed' AND s.end_day IS NULL
-              AND c.customer_type = 'large'
-        """).fetchone()[0]
-
-    week = (day + 6) // 7  # Week number (1-indexed)
-    lines = [
-        f"=== Week {week} Dashboard (Day {day}) ===",
-        "",
-        f"Cash: ${cash:,.0f}",
-        f"Individual Subscribers: {ind_subs}",
-        f"Enterprise Subscribed Seats: {ent_seats}",
-        f"Open Issues: {open_issues}",
-    ]
-
-    # This week's metrics (only after Week 1)
-    if day_result:
-        lines.extend([
-            "",
-            "--- This Week's Metrics ---",
-            f"Usage: {day_result.total_usage:,} units",
-            f"New Individual Leads: {day_result.new_individual_leads} | New Enterprise Leads: {day_result.new_enterprise_leads}",
-            f"New Individual Subscribers: {day_result.new_individual_subscribers} | New Enterprise Subscribed Seats: {day_result.new_enterprise_subscribers_seats}",
-            f"Cancellations: {day_result.cancellations}",
-            f"Upgrades: {day_result.upgrades} | Downgrades: {day_result.downgrades}",
-            f"Overload (peak): {day_result.overload:.1%}" if day_result.overload > 0 else "Overload: None",
-            f"Outage: {'YES (' + str(day_result.downtime_minutes) + ' min total)' if day_result.outage else 'No'}",
-            f"P95 Latency (peak): {day_result.p95_ms:.0f}ms | Error Rate (peak): {day_result.error_rate:.2%}",
-        ])
-
-
-    # Current Config
-    lines.extend([
-        "",
-        "--- Current Config ---",
-        f"Prices: A=${config.get('price_A', 0):.0f}, B=${config.get('price_B', 0):.0f}, C=${config.get('price_C', 0):.0f}",
-        f"Model Tiers: A={config.get('tier_A', 1)}, B={config.get('tier_B', 2)}, C={config.get('tier_C', 3)}",
-        f"Quotas: A={config.get('quota_A', 100)}, B={config.get('quota_B', 500)}, C={config.get('quota_C', 2000)} units/day",
-        f"Capacity: Tier {config.get('capacity_tier', 0)}",
-        f"Daily Spend: Ops=${config.get('spend_operations', 0):.0f}, Dev=${config.get('spend_development', 0):.0f} (ad spend is per (channel, group) — see set_targeted_ad_spend)",
-    ])
-
-    # Quality info — per discovered group, with all bonuses + tier multiplier
-    q_shared_bonus_row = conn.execute("SELECT value FROM global_state WHERE key = 'q_shared_bonus'").fetchone()
-    q_shared_bonus = float(q_shared_bonus_row['value']) if q_shared_bonus_row else 0.0
-
-    # Per-group quality bonuses from targeted dev spend
-    q_group_bonuses = {}
-    for row in conn.execute("SELECT key, value FROM global_state WHERE key LIKE 'q_group_bonus_%'").fetchall():
-        gid = row['key'][len('q_group_bonus_'):]
-        q_group_bonuses[gid] = float(row['value'])
-
-    base_pq = BenchmarkConfig.base_product_quality
-    tier_a = config.get('tier_A', 1)
-    tier_b = config.get('tier_B', 2)
-    tier_c = config.get('tier_C', 3)
-    mult_a = MODEL_TIERS[tier_a].quality_multiplier
-    mult_b = MODEL_TIERS[tier_b].quality_multiplier
-    mult_c = MODEL_TIERS[tier_c].quality_multiplier
-
-    lines.append("")
-    lines.append(f"--- Delivered Quality (base={base_pq:.2f}, global_bonus={q_shared_bonus:.4f}) ---")
-    lines.append(f"{'Group':<8} {'Plan A (T'+str(tier_a)+')':<14} {'Plan B (T'+str(tier_b)+')':<14} {'Plan C (T'+str(tier_c)+')':<14} {'Grp Bonus':<10}")
-
-    discovered = sorted(get_discovered_groups(conn))
-    for gid in discovered:
-        gb = q_group_bonuses.get(gid, 0.0)
-        qa = (base_pq + q_shared_bonus + gb) * mult_a
-        qb = (base_pq + q_shared_bonus + gb) * mult_b
-        qc = (base_pq + q_shared_bonus + gb) * mult_c
-        gb_str = f"+{gb:.4f}" if gb > 0 else "0"
-        lines.append(f"{gid:<8} {qa:<14.4f} {qb:<14.4f} {qc:<14.4f} {gb_str:<10}")
-
-    # Agent social media post metrics (comments on this week's posts)
-    if day > 7:
-        # Show agent posts from the previous week (7 days)
-        week_start = day - 7
-        agent_posts = conn.execute("""
-            SELECT asp.agent_post_id, asp.content, asp.views, asp.comment_post_ids,
-                   COUNT(smp.post_id) AS comment_count
-            FROM agent_social_media_posts asp
-            LEFT JOIN social_media_posts smp ON smp.reply_to_agent_post_id = asp.agent_post_id
-            WHERE asp.day > ? AND asp.day <= ?
-            GROUP BY asp.agent_post_id
-        """, (week_start, day)).fetchall()
-        if agent_posts:
-            lines.append("")
-            lines.append("--- Your Social Media Posts (This Week) ---")
-            for post in agent_posts:
-                comment_ids_str = ""
-                try:
-                    cids = json.loads(post['comment_post_ids'] or '[]')
-                    if cids:
-                        comment_ids_str = f" (comment post_ids: {cids})"
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                lines.append(f"  Post #{post['agent_post_id']}: {post['views']} views, {post['comment_count']} comments{comment_ids_str} — \"{post['content'][:80]}{'...' if len(post['content']) > 80 else ''}\"")
-
-
-    # Weekly calculation outputs
-    if calc_outputs:
-        lines.append("")
-        lines.append("--- Weekly Calculations ---")
-        for name, output in calc_outputs.items():
-            lines.append(f"[{name}]")
-            lines.append(output[:500])  # Truncate long outputs
-
-    # Inbox
-    lines.append("")
-    lines.append("--- Inbox ---")
-    if inbox_items:
-        for item in inbox_items:
-            lines.append(f"  • {item}")
-    else:
-        lines.append("  (No new messages)")
-
-    return '\n'.join(lines)
-
 
 def get_thread_inbox_items(conn: sqlite3.Connection, day: int, week_start_day: int = None) -> List[str]:
     """Get inbox summary items — counts of new enterprise messages this week.
@@ -566,18 +396,20 @@ class SaaSBenchEnv:
         )
 
     def _build_initial_dashboard(self) -> str:
-        """Build the initial dashboard for Week 1. Delegates to build_weekly_dashboard()."""
-        dashboard = build_weekly_dashboard(self.conn, self.current_day)
+        """Build the initial dashboard for Week 1."""
+        snapshot = build_public_week_snapshot(self.conn, self.current_day)
+        dashboard = render_weekly_dashboard(snapshot)
         dashboard += "\n\nWelcome to NovaMind! Your AI SaaS company is ready to launch."
         dashboard += "\nUse tools to configure your business, then call next_week to advance."
         return dashboard
 
     def _build_weekly_dashboard(self, result: DayResult, calc_outputs: Dict[str, str]) -> str:
-        """Build the weekly dashboard from week results. Delegates to build_weekly_dashboard()."""
+        """Build the weekly dashboard from one shared public snapshot."""
         inbox_items = self._get_inbox_items()
-        return build_weekly_dashboard(
+        snapshot = build_public_week_snapshot(
             self.conn, self.current_day, result, calc_outputs, inbox_items
         )
+        return render_weekly_dashboard(snapshot)
 
     def _get_inbox_items(self) -> List[str]:
         """Get inbox items (today's notifications, new threads, and new messages)."""

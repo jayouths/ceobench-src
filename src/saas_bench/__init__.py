@@ -17,7 +17,11 @@ del _os
 __version__ = "0.1.0"
 
 # Core environment
-from .environment import SaaSBenchEnv, Action, StepResult, build_weekly_dashboard
+from .environment import SaaSBenchEnv, Action, StepResult
+from .public_week_snapshot import (
+    build_public_week_snapshot,
+    render_weekly_dashboard,
+)
 
 # Agent base class
 from .agents import BaseAgent
@@ -31,5 +35,6 @@ __all__ = [
     'StepResult',
     'BaseAgent',
     'BenchmarkConfig',
-    'build_weekly_dashboard',
+    'build_public_week_snapshot',
+    'render_weekly_dashboard',
 ]

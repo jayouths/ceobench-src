@@ -84,6 +84,29 @@ def test_api_server_serves_and_cleans_up_unix_socket():
 
     assert not socket_path.exists()
 
+
+def test_dashboard_api_returns_text_and_public_snapshot(make_initialized_sim):
+    conn, _, _ = make_initialized_sim()
+    server = NovaMindAPIServer(
+        tools=SimpleNamespace(current_day=0),
+        conn=conn,
+    )
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_dashboard_get()
+
+    payload, status = responses[0]
+    assert status == 200
+    assert payload["day"] == 0
+    assert payload["dashboard"].startswith("=== Week 0 Dashboard (Day 0) ===")
+    assert payload["public_week_snapshot"]["current_state"]["cash"] == 1_000_000
+    assert payload["public_week_snapshot"] == (
+        server._last_public_week_snapshot.to_dict()
+    )
+
 def test_public_cli_and_sdk_prefer_unix_socket(monkeypatch):
     socket_dir = Path(tempfile.mkdtemp(prefix="ceobench-test-"))
     socket_path = socket_dir / "api.sock"

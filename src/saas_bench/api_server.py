@@ -27,7 +27,11 @@ _ORACLE_MODE: bool = os.environ.get("ORACLE_MODE") == "1"
 
 from .tools import AgentTools, ToolResult
 from .database import TABLE_DOCS
-from .environment import build_weekly_dashboard
+from .public_week_snapshot import (
+    PublicWeekSnapshot,
+    build_public_week_snapshot,
+    render_weekly_dashboard,
+)
 
 
 class _ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -669,13 +673,19 @@ class _APIHandler(BaseHTTPRequestHandler):
         a fresh one for the current day if none exists yet.
         """
         server: NovaMindAPIServer = self.server._api_server
+        snapshot = server._last_public_week_snapshot
         dashboard = server._last_dashboard
-        if not dashboard and server.conn:
+        if snapshot is None and server.conn:
             day = server.tools.current_day
-            dashboard = build_weekly_dashboard(server.conn, day)
+            snapshot = build_public_week_snapshot(server.conn, day)
+            server._last_public_week_snapshot = snapshot
+        if not dashboard and snapshot is not None:
+            dashboard = render_weekly_dashboard(snapshot)
+            server._last_dashboard = dashboard
         self._send_json({
             "dashboard": dashboard or f"=== Day {server.tools.current_day} ===\n(No data)",
             "day": server.tools.current_day,
+            "public_week_snapshot": snapshot.to_dict() if snapshot else None,
         })
 
     def _handle_game_status(self):
@@ -793,6 +803,7 @@ class NovaMindAPIServer:
         self.port: int = 0
         self._lock = threading.RLock()
         self._last_dashboard: str = ""
+        self._last_public_week_snapshot: Optional[PublicWeekSnapshot] = None
         self._last_day_result = None
         self._step_week_timed_out: bool = False
         self._week_advance_in_progress: bool = False
@@ -1123,18 +1134,22 @@ class NovaMindAPIServer:
             week_start = old_day + 1
             inbox.extend(get_thread_inbox_items(self.conn, new_day, week_start_day=week_start))
 
-        # Dashboard generation stays outside the lock because it performs
-        # database analysis and may be comparatively expensive.
+        # Dashboard 与 Analysis 复用同一份公开快照，避免同一指标出现两套口径。
+        public_week_snapshot = (
+            build_public_week_snapshot(self.conn, new_day, week_result, None, inbox)
+            if self.conn else None
+        )
         if self.dashboard_callback:
             dashboard = self.dashboard_callback(new_day, week_result)
-        elif self.conn:
-            dashboard = build_weekly_dashboard(self.conn, new_day, week_result, None, inbox)
+        elif public_week_snapshot is not None:
+            dashboard = render_weekly_dashboard(public_week_snapshot)
         else:
             week = (new_day + 6) // 7
             dashboard = f"=== Week {week} Dashboard (Day {new_day}) ===\n(No dashboard data available)"
 
         with self._lock:
             self._last_dashboard = dashboard
+            self._last_public_week_snapshot = public_week_snapshot
 
         if self.day_callback:
             self.day_callback(new_day, dashboard)
