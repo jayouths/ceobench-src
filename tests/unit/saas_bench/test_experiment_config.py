@@ -212,6 +212,24 @@ def test_autodl_models_map_to_official_deepseek_pricing():
     assert config.analysis.tasks["role_report"]["max_output_tokens"] == 3000
     assert config.analysis.tasks["state_reconstruction"]["max_output_tokens"] == 4000
 
+
+def test_autodl_analysis_smoke_only_changes_the_experiment_group():
+    baseline = load_experiment_config(
+        PROJECT_ROOT / "experiments/smoke-autodl.toml"
+    )
+    analysis = load_experiment_config(
+        PROJECT_ROOT / "experiments/smoke-autodl-analysis.toml"
+    )
+
+    assert baseline.modules.analysis.enabled is False
+    assert analysis.modules.analysis.enabled is True
+    assert analysis.experiment.seed == baseline.experiment.seed == 42
+    assert analysis.experiment.days == baseline.experiment.days == 7
+    assert analysis.experiment.initial_cash == baseline.experiment.initial_cash
+    assert analysis.decision_agent == baseline.decision_agent
+    assert analysis.social_llm == baseline.social_llm
+    assert analysis.analysis == baseline.analysis
+
 def test_full_config_uses_benchmark_horizon():
     config = load_experiment_config(PROJECT_ROOT / "experiments/full.toml")
 
