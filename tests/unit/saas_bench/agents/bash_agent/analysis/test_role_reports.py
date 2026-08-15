@@ -105,6 +105,8 @@ def test_role_prompts_only_include_the_selected_role(day_zero_signals):
     assert "finance" not in payload
     assert "不得输出行动建议" in system_prompt
     assert "metric 必须从输入 JSON 的 market 顶层键开始" in system_prompt
+    assert "windows 只用于判断数据完整性" in system_prompt
+    assert "必须描述同一个信号" in system_prompt
 
 
 def test_generator_repairs_invalid_json_with_self_contained_context(day_zero_signals):
@@ -169,6 +171,7 @@ def test_generator_repairs_unknown_metric_path(day_zero_signals):
 
     assert len(artifact.calls) == 5
     assert "unknown metric path" in observed[1]
+    assert "不得只替换路径" in observed[1]
 
 
 def test_generator_reports_all_invalid_metric_paths_in_one_repair(day_zero_signals):
