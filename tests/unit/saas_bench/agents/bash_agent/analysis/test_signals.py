@@ -163,6 +163,61 @@ def test_week_boundary_actions_are_included_in_finance_and_product_signals(
     )
 
 
+def test_consecutive_boundaries_do_not_duplicate_costs_and_keep_final_config(
+    make_initialized_sim,
+    make_agent_tools,
+):
+    conn, simulator, config = make_initialized_sim(seed=42)
+    collector = SignalCollector(_direct_query(conn))
+    day_0 = collector.collect(build_public_week_snapshot(conn, 0))
+
+    day_0_tools = make_agent_tools(conn, config, day=0, seed=42)
+    first_research = day_0_tools.start_research_project(1)
+    assert first_research.success
+    assert day_0_tools.set_model_tiers({"A": 2}).success
+
+    first_week = simulator.step_week()
+    day_7 = collector.collect(
+        build_public_week_snapshot(conn, first_week.day, first_week),
+        {0: day_0},
+    )
+
+    day_7_tools = make_agent_tools(conn, config, day=7, seed=42)
+    second_research = day_7_tools.start_research_project(2)
+    assert second_research.success
+    assert day_7_tools.set_model_tiers({"A": 3}).success
+    assert day_7_tools.set_model_tiers({"A": 4}).success
+    assert day_7_tools.set_capacity_tier(1).success
+
+    second_week = simulator.step_week()
+    # 从 JSON 恢复上周信号，覆盖真实断点恢复使用的数据路径。
+    restored_day_7 = AnalysisSignals.model_validate_json(day_7.model_dump_json())
+    day_14 = collector.collect(
+        build_public_week_snapshot(conn, second_week.day, second_week),
+        {0: day_0, 7: restored_day_7},
+    )
+
+    assert day_7.finance.costs.one_time_investment.current.value == pytest.approx(
+        first_research.data["cost"]
+    )
+    assert day_14.finance.costs.one_time_investment.current.value == pytest.approx(
+        second_research.data["cost"]
+    )
+    assert day_14.finance.costs.one_time_investment.previous.value == pytest.approx(
+        first_research.data["cost"]
+    )
+    assert day_14.product.configuration.previous_week == day_7.product.configuration.current
+    assert day_14.product.configuration.current.tier_a == 4
+    assert day_14.product.configuration.current.capacity_tier == 1
+    assert [
+        (change.field, change.previous, change.current)
+        for change in day_14.product.configuration.changes
+    ] == [
+        ("tier_a", 2, 4),
+        ("capacity_tier", 0, 1),
+    ]
+
+
 def test_signal_catalog_covers_each_role():
     assert {key.split(".", 1)[0] for key in SIGNAL_CATALOG} == {
         "market", "finance", "product", "customer",

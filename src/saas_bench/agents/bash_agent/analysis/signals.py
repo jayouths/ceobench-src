@@ -10,6 +10,7 @@ from pydantic import TypeAdapter
 
 from saas_bench.public_week_snapshot import PublicWeekSnapshot
 
+from . import signal_queries
 from .signal_models import (
     AcquisitionMix,
     AcquisitionSourceSignal,
@@ -195,41 +196,46 @@ class SignalCollector:
         history = history or {}
         day = snapshot.day
         windows = build_analysis_windows(day)
-        lead_rows = self._query_leads(max(1, day - 13), day) if day else []
-        ad_rows = self._query_ad_channels(max(1, day - 13), day) if day else []
-        social_rows = self._query_social(max(1, day - 13), day) if day else []
-        macro_rows = self.query(
-            "SELECT day, pmi_value, pmi_trend, pmi_change, cycle_phase, description "
-            "FROM macroeconomic_conditions ORDER BY day DESC LIMIT 1"
+        start_14d = max(1, day - 13)
+
+        # SQL 集中定义在 signal_queries；这里一次读取四个角色需要的公开事实，
+        # 后续构建阶段只做确定性计算，不再访问数据库。
+        lead_rows = (
+            self.query(signal_queries.effective_leads(start_14d, day))
+            if day else []
         )
-        ledger_max_rows = self.query(
-            "SELECT COALESCE(MAX(id), 0) AS ledger_max_id FROM ledger"
+        ad_rows = self.query(signal_queries.ad_channels(start_14d, day)) if day else []
+        social_rows = (
+            self.query(signal_queries.social_posts(start_14d, day))
+            if day else []
         )
+        macro_rows = self.query(signal_queries.LATEST_MACRO_CONDITION)
+        ledger_max_rows = self.query(signal_queries.LEDGER_MAX_ID)
         ledger_max_id = int(ledger_max_rows[0]["ledger_max_id"])
         previous_artifact = history.get(day - 7)
         previous_ledger_max_id = (
             previous_artifact.finance.ledger_max_id if previous_artifact else None
         )
         ledger_rows = (
-            self._query_ledger_after(previous_ledger_max_id)
+            self.query(signal_queries.ledger_after(previous_ledger_max_id))
             if previous_ledger_max_id is not None else []
         )
-        service_rows = self._query_service(max(1, day - 13), day) if day else []
-        config_rows = self._query_config(day) if day else self._query_config(0)
-        research_rows = self.query(
-            "SELECT project_id, tier, status, started_day, expected_completion_day, "
-            "expected_quality_boost, quality_boost_applied "
-            "FROM research_projects ORDER BY started_day, project_id"
+        service_rows = (
+            self.query(signal_queries.service_days(start_14d, day))
+            if day else []
         )
-        customer_base_rows = self._query_customer_base()
+        config_rows = self.query(signal_queries.configuration_history(day))
+        research_rows = self.query(signal_queries.RESEARCH_PROJECTS)
+        customer_base_rows = self.query(signal_queries.CUSTOMER_BASE)
         paid_subscription_rows = (
-            self._query_paid_subscriptions(max(1, day - 13), day) if day else []
+            self.query(signal_queries.paid_subscriptions(start_14d, day)) if day else []
         )
-        issue_rows = self._query_issues(windows, day)
+        issue_rows = self._query_issues(windows)
         negotiation_summary = self._query_negotiation_summary(day)
         negotiation_details = self._query_negotiation_details(day)
         negotiation_outcomes = (
-            self._query_negotiation_outcomes(max(1, day - 13), day) if day else []
+            self.query(signal_queries.negotiation_outcomes(start_14d, day))
+            if day else []
         )
 
         market = self._build_market(
@@ -263,180 +269,21 @@ class SignalCollector:
             customer=customer,
         )
 
-    def _query_leads(self, start: int, end: int) -> list[dict[str, Any]]:
-        return self.query(f"""
-            SELECT s.start_day AS day, c.group_id,
-                   'individual' AS customer_type,
-                   COALESCE(c.acquisition_source, 'organic') AS acquisition_source,
-                   COUNT(DISTINCT c.customer_id) AS lead_count
-            FROM subscriptions s
-            JOIN customers c ON c.customer_id = s.customer_id
-            WHERE c.customer_type = 'small' AND s.start_day BETWEEN {start} AND {end}
-            GROUP BY s.start_day, c.group_id, c.acquisition_source
-            UNION ALL
-            SELECT et.day AS day, c.group_id,
-                   'enterprise' AS customer_type,
-                   COALESCE(c.acquisition_source, 'organic') AS acquisition_source,
-                   COUNT(*) AS lead_count
-            FROM enterprise_turns et
-            JOIN customers c ON c.customer_id = et.customer_id
-            WHERE et.thread_type = 'new_lead' AND et.turn_number = 0
-              AND et.day BETWEEN {start} AND {end}
-            GROUP BY et.day, c.group_id, c.acquisition_source
-            ORDER BY day, group_id, acquisition_source
-        """)
-
-    def _query_ad_channels(self, start: int, end: int) -> list[dict[str, Any]]:
-        return self.query(f"""
-            SELECT day, channel_id, group_id,
-                   SUM(leads_generated) AS raw_leads,
-                   SUM(spend) AS spend
-            FROM ad_channel_leads
-            WHERE day BETWEEN {start} AND {end}
-            GROUP BY day, channel_id, group_id
-            ORDER BY day, channel_id, group_id
-        """)
-
-    def _query_social(self, start: int, end: int) -> list[dict[str, Any]]:
-        return self.query(f"""
-            SELECT post_id, day, content
-            FROM social_media_posts
-            WHERE day BETWEEN {start} AND {end}
-            ORDER BY day, post_id
-        """)
-
-    def _query_ledger_after(self, previous_max_id: int) -> list[dict[str, Any]]:
-        return self.query(f"""
-            SELECT category, SUM(amount) AS amount
-            FROM ledger
-            WHERE id > {previous_max_id}
-              AND category != 'initial_funding'
-            GROUP BY category
-            ORDER BY category
-        """)
-
-    def _query_service(self, start: int, end: int) -> list[dict[str, Any]]:
-        return self.query(f"""
-            SELECT day, total_usage_units, p95_ms, error_rate,
-                   downtime_minutes, capacity_units
-            FROM service_day
-            WHERE day BETWEEN {start} AND {end}
-            ORDER BY day
-        """)
-
-    def _query_config(self, day: int) -> list[dict[str, Any]]:
-        return self.query(f"""
-            SELECT day, tier_A, tier_B, tier_C, quota_A, quota_B, quota_C,
-                   capacity_tier, spend_operations, spend_development
-            FROM config_history
-            WHERE day <= {day}
-            ORDER BY day
-        """)
-
-    def _query_customer_base(self) -> list[dict[str, Any]]:
-        return self.query("""
-            SELECT s.plan, c.customer_type,
-                   COUNT(DISTINCT c.customer_id) AS accounts,
-                   SUM(CASE WHEN c.customer_type = 'large' THEN s.seat_count ELSE 0 END) AS seats
-            FROM subscriptions s
-            JOIN customers c ON c.customer_id = s.customer_id
-            WHERE s.status = 'subscribed' AND s.end_day IS NULL
-            GROUP BY s.plan, c.customer_type
-            ORDER BY s.plan, c.customer_type
-        """)
-
-    def _query_paid_subscriptions(self, start: int, end: int) -> list[dict[str, Any]]:
-        return self.query(f"""
-            SELECT s.start_day AS day, c.customer_type,
-                   COUNT(DISTINCT c.customer_id) AS accounts,
-                   SUM(CASE WHEN c.customer_type = 'large' THEN s.seat_count ELSE 0 END) AS seats
-            FROM subscriptions s
-            JOIN customers c ON c.customer_id = s.customer_id
-            WHERE s.status IN ('subscribed', 'cancelled')
-              AND s.start_day BETWEEN {start} AND {end}
-            GROUP BY s.start_day, c.customer_type
-            ORDER BY s.start_day, c.customer_type
-        """)
-
-    def _query_issues(self, windows: AnalysisWindows, day: int) -> dict[str, Any]:
+    def _query_issues(self, windows: AnalysisWindows) -> dict[str, Any]:
         current = windows.current_7d
         previous = windows.previous_7d
         cs, ce = current.start_day or 1, current.end_day or 0
         ps, pe = previous.start_day or 1, previous.end_day or 0
-        rows = self.query(f"""
-            SELECT
-              COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0) AS open_count,
-              AVG(CASE WHEN status = 'open' THEN days_open END) AS avg_open_age,
-              MAX(CASE WHEN status = 'open' THEN days_open END) AS max_open_age,
-              COALESCE(SUM(CASE WHEN status = 'open' AND days_open > 7 THEN 1 ELSE 0 END), 0) AS over_7,
-              COALESCE(SUM(CASE WHEN status = 'open' AND days_open > 14 THEN 1 ELSE 0 END), 0) AS over_14,
-              COALESCE(SUM(CASE WHEN open_day BETWEEN {cs} AND {ce} THEN 1 ELSE 0 END), 0) AS current_opened,
-              COALESCE(SUM(CASE WHEN open_day BETWEEN {ps} AND {pe} THEN 1 ELSE 0 END), 0) AS previous_opened,
-              COALESCE(SUM(CASE WHEN resolved_day BETWEEN {cs} AND {ce} THEN 1 ELSE 0 END), 0) AS current_resolved,
-              COALESCE(SUM(CASE WHEN resolved_day BETWEEN {ps} AND {pe} THEN 1 ELSE 0 END), 0) AS previous_resolved,
-              AVG(CASE WHEN resolved_day BETWEEN {cs} AND {ce} THEN resolved_day - open_day END) AS current_resolution_days,
-              AVG(CASE WHEN resolved_day BETWEEN {ps} AND {pe} THEN resolved_day - open_day END) AS previous_resolution_days
-            FROM issues
-        """)
+        rows = self.query(signal_queries.issue_summary(cs, ce, ps, pe))
         return rows[0] if rows else {}
 
-    @staticmethod
-    def _active_thread_cte(day: int) -> str:
-        return f"""
-            WITH latest AS (
-              SELECT et.*
-              FROM enterprise_turns et
-              WHERE et.message_id = (
-                SELECT MAX(et2.message_id) FROM enterprise_turns et2
-                WHERE et2.thread_id = et.thread_id
-              )
-            ), active AS (
-              SELECT latest.*, c.group_id, CAST(c.seat_count AS INTEGER) AS seat_count
-              FROM latest
-              JOIN customers c ON c.customer_id = latest.customer_id
-              JOIN subscriptions s ON s.customer_id = latest.customer_id
-              WHERE latest.closed = 0 AND (
-                (latest.thread_type = 'new_lead' AND s.status = 'lead') OR
-                (latest.thread_type != 'new_lead' AND s.status = 'subscribed' AND s.end_day IS NULL)
-              )
-            )
-        """
-
     def _query_negotiation_summary(self, day: int) -> dict[str, Any]:
-        rows = self.query(self._active_thread_cte(day) + f"""
-            SELECT COUNT(*) AS open_threads,
-                   COALESCE(SUM(seat_count), 0) AS open_seats,
-                   SUM(CASE WHEN sender = 'customer' THEN 1 ELSE 0 END) AS awaiting_agent,
-                   AVG({day} - day) AS avg_waiting_days,
-                   MAX({day} - day) AS max_waiting_days
-            FROM active
-        """)
+        rows = self.query(signal_queries.negotiation_summary(day))
         return rows[0] if rows else {}
 
     def _query_negotiation_details(self, day: int) -> list[dict[str, Any]]:
         limit = self.max_enterprise_threads + 1
-        return self.query(self._active_thread_cte(day) + f"""
-            SELECT thread_id, customer_id, thread_type, group_id, seat_count,
-                   {day} - day AS waiting_days, day AS latest_day,
-                   sender AS latest_sender, message_text AS latest_message
-            FROM active
-            ORDER BY waiting_days DESC, thread_id
-            LIMIT {limit}
-        """)
-
-    def _query_negotiation_outcomes(self, start: int, end: int) -> list[dict[str, Any]]:
-        return self.query(f"""
-            SELECT et.day, et.close_reason, COUNT(*) AS outcome_count
-            FROM enterprise_turns et
-            WHERE et.message_id = (
-                SELECT MAX(et2.message_id) FROM enterprise_turns et2
-                WHERE et2.thread_id = et.thread_id
-            )
-              AND et.close_reason IN ('accepted', 'agent_rejected')
-              AND et.day BETWEEN {start} AND {end}
-            GROUP BY et.day, et.close_reason
-            ORDER BY et.day, et.close_reason
-        """)
+        return self.query(signal_queries.negotiation_details(day, limit))
 
     def _period_rows(
         self, rows: Sequence[Mapping[str, Any]], window: ObservationWindow

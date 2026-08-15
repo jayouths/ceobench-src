@@ -149,7 +149,7 @@ Dashboard 文本      Analysis 统计信号
 
 ### 3.6 `signals.json` 数据契约
 
-确定性信号层已实现于 `analysis/signal_models.py`、`analysis/signals.py` 和 `analysis/signal_catalog.py`。每周产物的顶层结构固定为：
+确定性信号层已实现于 `analysis/signal_models.py`、`analysis/signal_queries.py`、`analysis/signals.py` 和 `analysis/signal_catalog.py`。其中查询文件只定义公开只读 SQL，信号计算文件不包含 SQL 正文。每周产物的顶层结构固定为：
 
 ```json
 {
