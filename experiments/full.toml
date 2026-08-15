@@ -17,6 +17,7 @@ max_invalid_responses_per_turn = 3      # 单次行动允许的连续无效模�
 [modules.analysis]
 enabled = false
 max_schema_retries = 1                  # JSON Schema 校验失败后的最大修复次数
+max_enterprise_threads = 50             # signals.json 最多保留的开放企业谈判明细数
 
 # 决策 Agent：读取经营信息、调用工具并做出每周经营决策。
 [models.decision_agent]

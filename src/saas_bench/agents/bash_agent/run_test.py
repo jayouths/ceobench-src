@@ -25,7 +25,7 @@ import urllib.request
 import urllib.error
 import uuid
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -35,13 +35,14 @@ if str(package_root) not in sys.path:
     sys.path.insert(0, str(package_root))
 
 DEFAULT_EXPERIMENT_CONFIG = package_root.parent / "experiments" / "experiment.toml"
-RUN_CONFIG_FORMAT_VERSION = 5
+RUN_CONFIG_FORMAT_VERSION = 6
 RUN_CONFIG_FIELDS = {
     "format_version", "run_id", "agent_type", "model", "provider", "api_type",
     "base_url", "reasoning_effort", "temperature", "top_p", "max_output_tokens",
     "timeout_seconds", "request_options", "pricing", "pricing_model_map", "api_key_env",
     "api_key_required", "seed", "scenario", "total_days", "initial_cash",
     "max_decision_turns_per_batch", "max_invalid_responses_per_turn", "label", "simulator_llm",
+    "analysis_module", "analysis_model",
     "public_bundle_sha256", "harness_git_commit", "harness_git_dirty",
     "harness_source_sha256",
 }
@@ -56,6 +57,11 @@ from saas_bench.llm_provider import (
 
 from saas_bench.environment import Action
 from saas_bench.agents.bash_agent.agent import BashAgent
+from saas_bench.agents.bash_agent.analysis.signal_models import AnalysisSignals
+from saas_bench.agents.bash_agent.analysis.signals import (
+    SignalCollector,
+    parse_public_week_snapshot,
+)
 from saas_bench.json_io import write_json_atomic
 
 
@@ -117,6 +123,8 @@ class BashAgentRunner:
         api_key_env: Optional[str] = None,
         api_key_required: bool = True,
         simulator_llm_config: Optional[Dict[str, Any]] = None,
+        analysis_module_config: Optional[Dict[str, Any]] = None,
+        analysis_model_config: Optional[Dict[str, Any]] = None,
         public_bundle_sha256: Optional[str] = None,
         harness_git_commit: Optional[str] = None,
         harness_git_dirty: Optional[bool] = None,
@@ -188,6 +196,20 @@ class BashAgentRunner:
         self.api_key_env = api_key_env
         self.api_key_required = api_key_required
         self.simulator_llm_config = dict(simulator_llm_config or {})
+        self.analysis_module_config = dict(analysis_module_config or {
+            "enabled": False,
+            "max_schema_retries": 0,
+            "max_enterprise_threads": 50,
+        })
+        self.analysis_enabled = self.analysis_module_config.get("enabled") is True
+        max_threads = self.analysis_module_config.get("max_enterprise_threads")
+        if not isinstance(max_threads, int) or isinstance(max_threads, bool) or max_threads <= 0:
+            raise ValueError("analysis max_enterprise_threads must be a positive integer")
+        self.analysis_model_config = (
+            dict(analysis_model_config) if analysis_model_config is not None else None
+        )
+        if self.analysis_enabled and self.analysis_model_config is None:
+            raise ValueError("analysis model config is required when analysis is enabled")
         if public_bundle_sha256 is not None and (
             not isinstance(public_bundle_sha256, str)
             or len(public_bundle_sha256) != 64
@@ -359,11 +381,89 @@ class BashAgentRunner:
 
     def _get_dashboard(self) -> str:
         """Get current dashboard via HTTP."""
+        result = self._get_dashboard_payload()
+        return result['dashboard']
+
+    def _get_dashboard_payload(self) -> Dict[str, Any]:
+        """读取 Dashboard 及其同源结构化经营快照。"""
         result = self._http_get('/dashboard')
         dashboard = result.get('dashboard')
         if not isinstance(dashboard, str) or not dashboard.strip():
             raise RuntimeError(f"Invalid simulator dashboard: {result!r}")
-        return dashboard
+        if self.analysis_enabled:
+            snapshot = parse_public_week_snapshot(result.get('public_week_snapshot'))
+            if snapshot.day != result.get('day'):
+                raise RuntimeError("Dashboard day does not match public week snapshot")
+        return result
+
+    def _query_public_rows(self, sql: str) -> list[dict[str, Any]]:
+        """通过与 Baseline 相同的受限 `/query` 接口读取公开数据。"""
+        result = self._http_post('/query', {'sql': sql}, timeout=180)
+        if not result.get('success'):
+            raise RuntimeError(f"Analysis public query failed: {result}")
+        if result.get('truncated'):
+            raise RuntimeError("Analysis public query was truncated")
+        rows = result.get('rows')
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise RuntimeError(f"Analysis public query returned invalid rows: {result!r}")
+        return rows
+
+    def _analysis_signal_path(self, day: int) -> Path:
+        return self.workspace_dir / "analysis" / f"day_{day:03d}" / "signals.json"
+
+    def _load_analysis_history(self, before_or_at_day: int) -> Dict[int, AnalysisSignals]:
+        """读取已完成周的确定性产物，供环比和 Dashboard 独有指标使用。"""
+        history = {}
+        analysis_dir = self.workspace_dir / "analysis"
+        if not analysis_dir.is_dir():
+            return history
+        for path in sorted(analysis_dir.glob("day_*/signals.json")):
+            try:
+                signals = AnalysisSignals.model_validate_json(path.read_text())
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"Invalid Analysis signals artifact: {path}") from exc
+            if signals.day <= before_or_at_day:
+                history[signals.day] = signals
+        return history
+
+    def _ensure_analysis_signals(self, dashboard_payload: Dict[str, Any]) -> AnalysisSignals | None:
+        """同一模拟日只生成一次信号；恢复同周时复用原产物。"""
+        if not self.analysis_enabled:
+            return None
+        snapshot = parse_public_week_snapshot(
+            dashboard_payload.get("public_week_snapshot")
+        )
+        path = self._analysis_signal_path(snapshot.day)
+        if path.is_file():
+            signals = AnalysisSignals.model_validate_json(path.read_text())
+            if signals.day != snapshot.day:
+                raise ValueError(f"Analysis artifact day mismatch: {path}")
+            return signals
+
+        history = self._load_analysis_history(snapshot.day - 1)
+        collector = SignalCollector(
+            self._query_public_rows,
+            max_enterprise_threads=self.analysis_module_config[
+                "max_enterprise_threads"
+            ],
+        )
+        signals = collector.collect(snapshot, history)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(path, signals.model_dump(mode="json"))
+        return signals
+
+    def _prune_analysis_artifacts_after(self, day: int) -> None:
+        """恢复断点时删除更晚日期的孤立产物，保留当前周已生成的信号。"""
+        analysis_dir = self.workspace_dir / "analysis"
+        if not analysis_dir.is_dir():
+            return
+        for directory in analysis_dir.glob("day_*"):
+            try:
+                artifact_day = int(directory.name.removeprefix("day_"))
+            except ValueError:
+                continue
+            if artifact_day > day:
+                shutil.rmtree(directory)
 
     def _terminal_outcome(self, status: Dict[str, Any]) -> Optional[str]:
         """Classify one validated simulator status, with failure states first."""
@@ -1458,6 +1558,7 @@ __pycache__/
             self._restore_logs_to_offsets(runtime['runner_log_offsets'])
             # EventLogger 启动后会以 append 模式打开文件，必须在启动前回退。
             self._restore_server_logs_before_server(runtime['server_log_offsets'])
+            self._prune_analysis_artifacts_after(self._resume_checkpoint['day'])
         self._launch_server()
         if self._resume_checkpoint:
             expected_day = self._resume_checkpoint['day']
@@ -1606,6 +1707,8 @@ __pycache__/
             'max_invalid_responses_per_turn': self.max_invalid_responses_per_turn,
             'label': self.label,
             'simulator_llm': self.simulator_llm_config,
+            'analysis_module': self.analysis_module_config,
+            'analysis_model': self.analysis_model_config,
             'public_bundle_sha256': self._current_public_bundle_sha256(),
             'harness_git_commit': self.harness_git_commit,
             'harness_git_dirty': self.harness_git_dirty,
@@ -1950,9 +2053,11 @@ __pycache__/
                 print(f"DECISION BATCH {decision_batch} (sim day {sim_day})")
                 print(f"{'='*40}")
 
-            # 构建 DashBoard
+            # Dashboard 文本和 Analysis 使用同一个公开结构化快照。
             _t0 = _time.monotonic()
-            dashboard = self._get_dashboard()
+            dashboard_payload = self._get_dashboard_payload()
+            dashboard = dashboard_payload['dashboard']
+            self._ensure_analysis_signals(dashboard_payload)
             _dashboard_elapsed = _time.monotonic() - _t0
             self._log_tool_result(0, sim_day, '_dashboard', {}, dashboard)
             self._log_timing("dashboard", sim_day, elapsed_s=round(_dashboard_elapsed, 3))
@@ -2189,6 +2294,8 @@ __pycache__/
             # incomplete 已保存带完整对话的断点；终态需要补存最终环境状态。
             if game_outcome in {'completed', 'bankrupt'}:
                 self._save_checkpoint(sim_day)
+                # 最后一周没有下一轮决策，但仍保存期末信号用于实验分析。
+                self._ensure_analysis_signals(self._get_dashboard_payload())
                 stable_checkpoint = self._load_checkpoint()
             if not stable_checkpoint:
                 raise RuntimeError("Experiment ended without a stable checkpoint")
@@ -2264,6 +2371,10 @@ def _new_experiment_runner(config_path: Path) -> BashAgentRunner:
         pricing=decision.pricing,
         pricing_model_map=decision.pricing_model_map,
         simulator_llm_config=file_config.simulator_overrides(),
+        analysis_module_config=asdict(file_config.modules.analysis),
+        analysis_model_config=(
+            file_config.analysis.as_dict() if file_config.analysis else None
+        ),
         label=experiment.label,
     )
 
@@ -2357,6 +2468,8 @@ def _resume_runner(value: str) -> BashAgentRunner:
         pricing=saved["pricing"],
         pricing_model_map=saved["pricing_model_map"],
         simulator_llm_config=saved["simulator_llm"],
+        analysis_module_config=saved["analysis_module"],
+        analysis_model_config=saved["analysis_model"],
         public_bundle_sha256=saved["public_bundle_sha256"],
         harness_git_commit=saved["harness_git_commit"],
         harness_git_dirty=saved["harness_git_dirty"],

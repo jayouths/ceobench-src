@@ -17,11 +17,12 @@ from tests.support.harness import (
     make_checkpoint_runner as _checkpoint_runner,
 )
 
+
 def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_path):
     run_dir = tmp_path / "run_existing"
     run_dir.mkdir()
     (run_dir / "config.json").write_text(json.dumps({
-        "format_version": 5,
+        "format_version": 6,
         "run_id": "existing",
         "agent_type": "bash_agent",
         "model": "original-model",
@@ -51,6 +52,12 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_pat
         "max_invalid_responses_per_turn": 3,
         "label": "saved",
         "simulator_llm": {},
+        "analysis_module": {
+            "enabled": False,
+            "max_schema_retries": 1,
+            "max_enterprise_threads": 50,
+        },
+        "analysis_model": None,
         "public_bundle_sha256": "0" * 64,
         "harness_git_commit": "test-commit",
         "harness_git_dirty": False,
@@ -64,6 +71,7 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_pat
     assert runner.temperature == pytest.approx(0.7)
     assert runner.pricing["original-model"]["uncached_input_cost_per_million"] == pytest.approx(1.0)
     assert runner.workspace_dir == run_dir.resolve()
+
 
 def test_resume_warns_when_current_harness_differs(tmp_path, capsys):
     run_dir = tmp_path / "run_existing"
@@ -204,6 +212,7 @@ def test_resume_rejects_checkpoint_database_hash_mismatch(tmp_path):
 
 def test_resume_stops_server_when_restored_day_does_not_match(tmp_path):
     runner = BashAgentRunner.__new__(BashAgentRunner)
+    runner.workspace_dir = tmp_path
     runner._resume_checkpoint = {
         "day": 35,
         "runtime": {

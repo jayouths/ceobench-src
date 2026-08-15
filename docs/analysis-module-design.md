@@ -66,12 +66,12 @@ Dashboard 文本      Analysis 统计信号
 
 每个正式信号都要进入信号字典，至少记录：信号名称、业务含义、来源表和字段、计算公式、时间窗口、方向解释、对应状态维度、反馈滞后、缺失值处理、与 Dashboard 的关系，以及最终保留理由。
 
-| 角色 | 评估状态 | 公开原始数据 | 当前信号设计 |
+| 角色 | 实现状态 | 公开原始数据 | 当前信号设计 |
 | --- | --- | --- | --- |
-| 市场 | 已完成数据源审计 | `subscriptions`、`customers`、`enterprise_turns`、`ad_channel_leads`、`social_media_posts`、`macroeconomic_conditions` | 有效线索、来源结构、付费获客效率、外部反馈和宏观环境 |
-| 财务 | 已完成数据源审计 | `ledger`、`ads_revenue` | 现金、收入、支出、净现金流、成本结构、交付利润率和现金跑道 |
-| 产品 | 已完成数据源审计 | `service_day`、`config_history`、`research_projects`、`public_week_snapshot` | 使用量、容量压力、可靠性、产品配置和研发管线 |
-| 客户 | 已完成数据源审计 | `subscriptions`、`customers`、`issues`、`enterprise_turns`、`public_week_snapshot`、历史公开统计快照 | 客户基础、新增、流失、工单压力和企业谈判状态 |
+| 市场 | 已实现并测试 | `subscriptions`、`customers`、`enterprise_turns`、`ad_channel_leads`、`social_media_posts`、`macroeconomic_conditions` | 有效线索、来源结构、付费获客效率、外部反馈和宏观环境 |
+| 财务 | 已实现并测试 | `ledger`、`public_week_snapshot`、历史 `signals.json` | 现金、收入、支出、净现金流、成本结构、交付利润率和现金跑道 |
+| 产品 | 已实现并测试 | `service_day`、`config_history`、`research_projects`、`public_week_snapshot`、历史 `signals.json` | 使用量、容量压力、可靠性、产品配置和研发管线 |
+| 客户 | 已实现并测试 | `subscriptions`、`customers`、`issues`、`enterprise_turns`、`public_week_snapshot`、历史 `signals.json` | 客户基础、新增、流失、工单压力和企业谈判状态 |
 
 ### 3.1 市场信号设计
 
@@ -93,15 +93,17 @@ Dashboard 文本      Analysis 统计信号
 
 | 信号组 | 来源或公式 | 设计说明 |
 | --- | --- | --- |
-| 当前现金 | 全部 `ledger.amount` 累计 | 这是时点存量。`initial_funding` 计入现金，但不计入经营收入。 |
-| 经营收入 | `ledger.subscription_payment + ads_revenue.revenue` | 分项保留订阅收入和广告收入。广告收入使用公开明细表，避免依赖 Ledger 文档尚未列出的类别说明。 |
-| 净现金流 | 窗口内除 `initial_funding` 外的全部流水之和 | 反映现金真实增减，包含一次性研究投入。 |
+| 当前现金 | `public_week_snapshot.current_state.cash` | 这是与 Dashboard 同源的时点存量。`initial_funding` 计入现金，但不计入经营收入。 |
+| 经营收入 | `ledger.subscription_payment + ledger.ad_revenue` | 分项保留订阅收入和广告收入，并与成本共用相邻决策周的 Ledger ID 边界。 |
+| 净现金流 | 当前现金快照减去上周现金快照 | 反映相邻决策周之间的真实现金增减，包含周边界发生的一次性研究投入。 |
 | 成本结构 | 按经济用途重新归类 | Ledger 中成本是负数；展示时转换为正的绝对成本。服务交付为 `compute + capacity`；获客为 `advertising + lead_acquisition_cost`；运营、开发分别保留；市场研究、客群研究和研发项目归为一次性投资。 |
 | 服务交付利润率 | `(经营收入 + compute + capacity) / 经营收入` | `compute` 和 `capacity` 使用 Ledger 中的负值。等价写法是收入减去两项绝对成本。收入为零时不计算。 |
 | 经常性现金消耗 | `max(0, -(经营收入 + 各项经常性负向流水))` | 包含服务交付、获客、运营和开发，排除 `market_research`、`group_research` 和 `research_project`，避免一次性投资扭曲持续经营速度。 |
 | 现金跑道 | `当前现金 / 最近 28 天平均每日经常性净消耗` | 仅在经常性现金流为负且覆盖完整 28 天时计算；否则标记为不适用或数据不足。 |
 
 模型调用成本不属于模拟企业经营流水。Bash Agent、Analysis 以及环境 LLM 的 Token 和金额继续独立记录，不进入现金、利润率或现金跑道。
+
+财务流水不能只按 `ledger.day BETWEEN ...` 划分。Agent 会在周边界日完成 Analysis 后立即决策，该日产生的研究投入等流水应属于接下来的一周。为避免遗漏，`signals.json` 保存当时公开的 `ledger_max_id`；下一周读取 `id > 上周 ledger_max_id` 的流水。该 ID 只用于确定增量边界，不作为经营证据交给 LLM。经营收入、成本和利润率使用这批增量流水，净现金流使用相邻现金快照差做权威口径。
 
 ### 3.3 产品信号设计
 
@@ -117,6 +119,8 @@ Dashboard 文本      Analysis 统计信号
 | 当前交付质量 | `public_week_snapshot.delivered_quality` | 这是 Baseline 已通过 Dashboard 公开给 Agent 的当前能力信息，可以作为证据；Analysis 不查询隐藏质量状态。 |
 
 `config_history` 实际保存配置变更后的快照，不能当作连续的逐日观测求平均。延迟、错误率和宕机包含随机波动，产品角色可以提出原因假设，但不得仅凭时间先后认定某次配置修改造成了指标变化。
+
+同一天多次配置操作会覆盖为该日最终快照，因此产品配置不能仅查询自然日 `1..7`。实现以上周 `signals.json` 中的公开配置为基线，并比较包含周初边界日的 `config_history`；这样 day 0 或 day 7 在 Analysis 之后发生的修改，会进入下一周信号。无法还原同一天内被覆盖的中间步骤，只记录最终有效配置变化。
 
 ### 3.4 客户信号设计
 
@@ -142,6 +146,29 @@ Dashboard 文本      Analysis 统计信号
 该机制只形成统计时间序列，不读取或复用历史 `role_reports.json`、`state_portrait.json`、`STRATEGY_BRIEF.md`，因此不承担模块三的策略复盘和经验记忆功能。历史快照缺失时，对应比较必须标记为 `insufficient_data`，不得改用含义不一致的字段近似补齐。
 
 可比较的流量信号必须保留原始值、时间窗口、最近窗口值、对照窗口值和派生变化；现金等时点存量则明确记录观察日。day 0 等数据不足的时点必须标注实际覆盖天数或 `insufficient_data`，不得伪造完整的两周对比。
+
+### 3.6 `signals.json` 数据契约
+
+确定性信号层已实现于 `analysis/signal_models.py`、`analysis/signals.py` 和 `analysis/signal_catalog.py`。每周产物的顶层结构固定为：
+
+```json
+{
+  "schema_version": "1.0",
+  "signal_catalog_version": "1.0",
+  "day": 7,
+  "week": 1,
+  "windows": {},
+  "public_week_snapshot": {},
+  "market": {},
+  "finance": {},
+  "product": {},
+  "customer": {}
+}
+```
+
+每个可比较数值分别保存 `current`、`previous`、绝对变化、相对变化、方向和比较状态。`current` 与 `previous` 各自携带 `available / insufficient_data / not_applicable` 状态，避免把“数据不足”和“零值”混淆。最近 7 天为 day 1 至 day 7 这类完整模拟日窗口，前 7 天为其前一个完整窗口；现金和配置等周边界状态按上文的相邻公开快照规则处理。
+
+Runner 在 `modules.analysis.enabled = true` 时生成 `analysis/day_XXX/signals.json`，同一日期已有合法产物则直接复用。断点恢复会保留断点日及以前的产物并删除更晚的孤立目录。当前提交只完成确定性信号层，四角色 LLM、经营画像和 `STRATEGY_BRIEF.md` 仍按后续步骤实现。
 
 ## 4. 角色报告
 

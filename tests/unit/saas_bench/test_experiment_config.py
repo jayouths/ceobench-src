@@ -21,6 +21,7 @@ def test_experiment_config_loads_all_experiment_and_model_fields():
     assert config.experiment.max_invalid_responses_per_turn == 3
     assert config.modules.analysis.enabled is False
     assert config.modules.analysis.max_schema_retries == 1
+    assert config.modules.analysis.max_enterprise_threads == 50
     assert config.analysis is None
     assert config.decision_agent.model == "qwen3-coder:30b"
     assert config.decision_agent.reasoning_effort is None
@@ -91,7 +92,7 @@ def test_analysis_settings_must_be_explicitly_configured(tmp_path):
     missing_modules_path = tmp_path / "missing-modules.toml"
     missing_modules_path.write_text(
         text.replace(
-            "[modules.analysis]\nenabled = false\nmax_schema_retries = 1                  # JSON Schema 校验失败后的最大修复次数\n\n",
+            "[modules.analysis]\nenabled = false\nmax_schema_retries = 1                  # JSON Schema 校验失败后的最大修复次数\nmax_enterprise_threads = 50             # signals.json 最多保留的开放企业谈判明细数\n\n",
             "",
             1,
         )
@@ -139,6 +140,18 @@ def test_analysis_schema_retries_must_be_non_negative_integer(tmp_path, value):
     )
 
     with pytest.raises(ValueError, match="must be a non-negative integer"):
+        load_experiment_config(path)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "true"])
+def test_analysis_enterprise_thread_limit_must_be_positive_integer(tmp_path, value):
+    text = (PROJECT_ROOT / "experiments/smoke.toml").read_text()
+    path = tmp_path / "invalid-analysis-thread-limit.toml"
+    path.write_text(
+        text.replace("max_enterprise_threads = 50", f"max_enterprise_threads = {value}", 1)
+    )
+
+    with pytest.raises(ValueError, match="max_enterprise_threads must be a positive integer"):
         load_experiment_config(path)
 
 def test_experiment_config_path_is_required():

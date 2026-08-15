@@ -184,7 +184,9 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
         "timed_out": False,
     }
     runner._get_cash = lambda: 1_000_000.0
-    runner._get_dashboard = lambda: "dashboard"
+    runner.analysis_enabled = False
+    runner._get_dashboard_payload = lambda: {"dashboard": "dashboard", "day": 0}
+    runner._ensure_analysis_signals = lambda payload: None
     runner._log_tool_result = lambda *args, **kwargs: None
     runner._log_timing = lambda *args, **kwargs: None
     runner._commit_weeks_up_to = lambda day: None

@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 from saas_bench.api_server import NovaMindAPIServer, _APIHandler
+from saas_bench.agents.bash_agent.analysis.signals import SignalCollector
+from saas_bench.public_week_snapshot import build_public_week_snapshot
 
 from saas_bench import _public_cli
 
@@ -105,6 +107,41 @@ def test_dashboard_api_returns_text_and_public_snapshot(make_initialized_sim):
     assert payload["public_week_snapshot"]["current_state"]["cash"] == 1_000_000
     assert payload["public_week_snapshot"] == (
         server._last_public_week_snapshot.to_dict()
+    )
+
+
+def test_analysis_signal_queries_pass_public_query_policy(
+    make_initialized_sim,
+    make_agent_tools,
+):
+    conn, simulator, config = make_initialized_sim(seed=42)
+    tools = make_agent_tools(conn, config, seed=42)
+    server = NovaMindAPIServer(tools=tools, conn=conn)
+
+    def public_query(sql):
+        responses = []
+        handler = _APIHandler.__new__(_APIHandler)
+        handler.server = SimpleNamespace(_api_server=server)
+        handler._read_body = lambda: {"sql": sql}
+        handler._send_json = lambda data, status=200: responses.append((data, status))
+        handler._handle_query()
+        payload, status = responses[0]
+        assert status == 200, payload
+        assert payload["success"] is True
+        assert payload.get("truncated") is not True
+        return payload["rows"]
+
+    collector = SignalCollector(public_query)
+    day_0 = collector.collect(build_public_week_snapshot(conn, 0))
+    result = simulator.step_week()
+    day_7 = collector.collect(
+        build_public_week_snapshot(conn, 7, result),
+        {0: day_0},
+    )
+
+    assert day_7.day == 7
+    assert day_7.market.effective_leads.individual.current.value == (
+        result.new_individual_leads
     )
 
 def test_public_cli_and_sdk_prefer_unix_socket(monkeypatch):

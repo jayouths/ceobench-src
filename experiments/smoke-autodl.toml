@@ -15,6 +15,7 @@ max_invalid_responses_per_turn = 3
 [modules.analysis]
 enabled = false
 max_schema_retries = 1                  # JSON Schema 校验失败后的最大修复次数
+max_enterprise_threads = 50             # signals.json 最多保留的开放企业谈判明细数
 
 # Pro 使用已验证可访问的固定版本请求名；实际服务模型由响应的 model 字段记录。
 [models.decision_agent]

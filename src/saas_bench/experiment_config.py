@@ -28,7 +28,9 @@ _EXPERIMENT_KEYS = {
     "seed", "days", "scenario", "initial_cash", "workspace", "label",
     "max_decision_turns_per_batch", "max_invalid_responses_per_turn",
 }
-_ANALYSIS_MODULE_KEYS = {"enabled", "max_schema_retries"}
+_ANALYSIS_MODULE_KEYS = {
+    "enabled", "max_schema_retries", "max_enterprise_threads",
+}
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,7 @@ class AnalysisModuleSettings:
 
     enabled: bool
     max_schema_retries: int
+    max_enterprise_threads: int
 
 
 @dataclass(frozen=True)
@@ -167,9 +170,19 @@ def _load_analysis_module(raw: Mapping[str, Any]) -> AnalysisModuleSettings:
         raise ValueError(
             "modules.analysis.max_schema_retries must be a non-negative integer"
         )
+    max_enterprise_threads = raw["max_enterprise_threads"]
+    if (
+        not isinstance(max_enterprise_threads, int)
+        or isinstance(max_enterprise_threads, bool)
+        or max_enterprise_threads <= 0
+    ):
+        raise ValueError(
+            "modules.analysis.max_enterprise_threads must be a positive integer"
+        )
     return AnalysisModuleSettings(
         enabled=enabled,
         max_schema_retries=max_schema_retries,
+        max_enterprise_threads=max_enterprise_threads,
     )
 
 
