@@ -304,6 +304,7 @@ def test_resume_prunes_llm_artifacts_at_their_independent_checkpoint_boundaries(
         (directory / "signals.json").write_text("signals")
         (directory / "role_reports.json").write_text("reports")
         (directory / "state_portrait.json").write_text("portrait")
+        (directory / "STRATEGY_BRIEF.md").write_text("brief")
 
     runner._prune_analysis_artifacts_after(7, {0, 7}, {0})
 
@@ -311,5 +312,6 @@ def test_resume_prunes_llm_artifacts_at_their_independent_checkpoint_boundaries(
     assert (tmp_path / "analysis" / "day_000" / "state_portrait.json").is_file()
     assert (tmp_path / "analysis" / "day_007" / "role_reports.json").is_file()
     assert not (tmp_path / "analysis" / "day_007" / "state_portrait.json").exists()
+    assert not (tmp_path / "analysis" / "day_007" / "STRATEGY_BRIEF.md").exists()
     assert (tmp_path / "analysis" / "day_007" / "signals.json").is_file()
     assert not (tmp_path / "analysis" / "day_014").exists()

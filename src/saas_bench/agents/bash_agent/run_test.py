@@ -75,11 +75,12 @@ from saas_bench.agents.bash_agent.analysis.state_reconstruction import (
     StateCallOutcome,
     StateReconstructor,
 )
+from saas_bench.agents.bash_agent.analysis.brief import render_strategy_brief
 from saas_bench.agents.bash_agent.analysis.signals import (
     SignalCollector,
     parse_public_week_snapshot,
 )
-from saas_bench.json_io import write_json_atomic
+from saas_bench.json_io import write_json_atomic, write_text_atomic
 
 
 def now() -> str:
@@ -499,6 +500,14 @@ class BashAgentRunner:
             / "state_portrait.json"
         )
 
+    def _analysis_brief_path(self, day: int) -> Path:
+        return (
+            self.workspace_dir
+            / "analysis"
+            / f"day_{day:03d}"
+            / "STRATEGY_BRIEF.md"
+        )
+
     def _load_analysis_history(self, before_or_at_day: int) -> Dict[int, AnalysisSignals]:
         """读取已完成周的确定性产物，供环比和 Dashboard 独有指标使用。"""
         history = {}
@@ -768,6 +777,31 @@ class BashAgentRunner:
         write_json_atomic(path, artifact.model_dump(mode="json"))
         return artifact, True
 
+    def _ensure_analysis_brief(
+        self,
+        role_reports: RoleReportsArtifact,
+        portrait: StatePortraitArtifact,
+    ) -> tuple[str | None, bool]:
+        """生成确定性状态简报；关闭 Analysis 时保持 Baseline 不变。"""
+
+        if not self.analysis_enabled:
+            return None, False
+        path = self._analysis_brief_path(portrait.day)
+        if path.is_file():
+            return path.read_text(), False
+        brief = render_strategy_brief(role_reports, portrait)
+        write_text_atomic(path, brief)
+        return brief, True
+
+    def _decision_observation(self, dashboard: str, brief: str | None) -> str:
+        """只在 Analysis 开启时向原始 Dashboard 追加状态简报。"""
+
+        if not self.analysis_enabled:
+            return dashboard
+        if not brief:
+            raise RuntimeError("Analysis brief is required when Analysis is enabled")
+        return f"{dashboard}\n\n---\n\n{brief}"
+
     def _analysis_usage_summary(self, before_or_at_day: int) -> Dict[str, Any]:
         """从已落盘周产物重建 Analysis 累计用量，避免维护第二份可变计数器。"""
 
@@ -850,8 +884,10 @@ class BashAgentRunner:
             elif artifact_day not in role_report_days:
                 (directory / "role_reports.json").unlink(missing_ok=True)
                 (directory / "state_portrait.json").unlink(missing_ok=True)
+                (directory / "STRATEGY_BRIEF.md").unlink(missing_ok=True)
             elif artifact_day not in state_portrait_days:
                 (directory / "state_portrait.json").unlink(missing_ok=True)
+                (directory / "STRATEGY_BRIEF.md").unlink(missing_ok=True)
 
     def _terminal_outcome(self, status: Dict[str, Any]) -> Optional[str]:
         """Classify one validated simulator status, with failure states first."""
@@ -2588,6 +2624,8 @@ __pycache__/
             signals = self._ensure_analysis_signals(dashboard_payload)
             role_reports_generated = False
             state_portrait_generated = False
+            brief_generated = False
+            analysis_brief = None
             if signals is not None:
                 role_reports, role_reports_generated = (
                     self._ensure_analysis_role_reports(signals)
@@ -2597,8 +2635,14 @@ __pycache__/
                 if role_reports_generated:
                     # 四个角色调用完成后先提交断点；状态重构失败时无需重复付费。
                     stable_checkpoint = self._save_checkpoint(sim_day)
-                _, state_portrait_generated = (
+                state_portrait, state_portrait_generated = (
                     self._ensure_analysis_state_portrait(role_reports)
+                )
+                if state_portrait is None:
+                    raise RuntimeError("Analysis state portrait was not generated")
+                analysis_brief, brief_generated = self._ensure_analysis_brief(
+                    role_reports,
+                    state_portrait,
                 )
             if self.analysis_enabled:
                 self._log_timing(
@@ -2607,13 +2651,14 @@ __pycache__/
                     elapsed_s=round(_time.monotonic() - _analysis_started, 3),
                     role_reports_generated=role_reports_generated,
                     state_portrait_generated=state_portrait_generated,
+                    brief_generated=brief_generated,
                 )
             if state_portrait_generated:
                 # 状态画像和本周汇总日志完成后再次提交，形成完整 Analysis 断点。
                 stable_checkpoint = self._save_checkpoint(sim_day)
 
             # Agent Loop：只要本周的决策尚未结束，就持续执行
-            observation = dashboard
+            observation = self._decision_observation(dashboard, analysis_brief)
             info = {'day': sim_day, 'cash': status['cash']}
             turns_in_batch = 0
             week_advanced = False
@@ -2858,8 +2903,14 @@ __pycache__/
                     if final_reports_generated:
                         # 终态重构失败时，四角色调用仍可从这个断点恢复。
                         self._save_checkpoint(sim_day)
-                    _, final_portrait_generated = (
+                    final_portrait, final_portrait_generated = (
                         self._ensure_analysis_state_portrait(final_reports)
+                    )
+                    if final_portrait is None:
+                        raise RuntimeError("Analysis state portrait was not generated")
+                    _, final_brief_generated = self._ensure_analysis_brief(
+                        final_reports,
+                        final_portrait,
                     )
                     self._log_timing(
                         "analysis_week",
@@ -2869,6 +2920,7 @@ __pycache__/
                         ),
                         role_reports_generated=final_reports_generated,
                         state_portrait_generated=final_portrait_generated,
+                        brief_generated=final_brief_generated,
                         terminal=True,
                     )
                 self._save_checkpoint(sim_day)

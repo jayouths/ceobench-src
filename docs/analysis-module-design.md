@@ -168,7 +168,7 @@ Dashboard 文本      Analysis 统计信号
 
 每个可比较数值分别保存 `current`、`previous`、绝对变化、相对变化、方向和比较状态。`current` 与 `previous` 各自携带 `available / insufficient_data / not_applicable` 状态，避免把“数据不足”和“零值”混淆。最近 7 天为 day 1 至 day 7 这类完整模拟日窗口，前 7 天为其前一个完整窗口；现金和配置等周边界状态按上文的相邻公开快照规则处理。
 
-Runner 在 `modules.analysis.enabled = true` 时生成 `analysis/day_XXX/signals.json`，同一日期已有合法产物则直接复用。断点恢复会保留断点日及以前的确定性信号，并删除更晚的孤立目录。确定性信号层、四角色报告层和经营画像已经实现；`STRATEGY_BRIEF.md` 与决策上下文注入仍按后续步骤实现。
+Runner 在 `modules.analysis.enabled = true` 时生成 `analysis/day_XXX/signals.json`，同一日期已有合法产物则直接复用。断点恢复会保留断点日及以前的确定性信号，并删除更晚的孤立目录。确定性信号层、四角色报告层、经营画像、简报格式化和决策上下文注入均已实现。
 
 ## 4. 角色报告
 
@@ -242,7 +242,9 @@ run_<run_id>/analysis/day_007/
 - `state_portrait.json`：统一经营状态画像。
 - `STRATEGY_BRIEF.md`：由程序格式化、实际注入本周 ReAct Agent 上下文的内容。
 
-当前已经生成 `signals.json`、`role_reports.json` 和 `state_portrait.json`；`STRATEGY_BRIEF.md` 将在后续确定性格式化与注入步骤实现。已实现产物使用原子写入，防止中途崩溃留下外观完整但内容截断的文件。Analysis LLM 的每次调用同时进入现有原始响应和耗时日志，并标记 `component=analysis` 和任务；角色报告调用额外标记角色。
+四份周产物均已生成并使用原子写入，防止中途崩溃留下外观完整但内容截断的文件。Analysis LLM 的每次调用同时进入现有原始响应和耗时日志，并标记 `component=analysis` 和任务；角色报告调用额外标记角色。
+
+`STRATEGY_BRIEF.md` 不再调用 LLM，而是由程序根据 `role_reports.json` 和 `state_portrait.json` 确定性格式化。内容包含核心诊断、五维经营状态、已确认事实、待验证假设、潜在风险、因果链和完整证据索引。决策 Agent 每周第一次调用时接收 `原始 Dashboard + STRATEGY_BRIEF.md`；后续工具结果仍按 Baseline 原样进入 ReAct 循环。
 
 ## 8. Token、成本与断点恢复
 

@@ -13,6 +13,7 @@ from .models import (
 from .signal_models import AnalysisSignals
 from .signal_catalog import SIGNAL_CATALOG, SIGNAL_CATALOG_VERSION
 from .signals import SignalCollector, parse_public_week_snapshot
+from .brief import render_strategy_brief
 
 __all__ = [
     "Role",
@@ -28,4 +29,5 @@ __all__ = [
     "parse_public_week_snapshot",
     "SIGNAL_CATALOG",
     "SIGNAL_CATALOG_VERSION",
+    "render_strategy_brief",
 ]

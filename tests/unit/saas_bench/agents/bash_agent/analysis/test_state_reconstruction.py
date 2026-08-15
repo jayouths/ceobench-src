@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from saas_bench.agents.bash_agent.analysis.brief import render_strategy_brief
 from saas_bench.agents.bash_agent.analysis.models import (
     Role,
     AnalysisCallKind,
@@ -227,3 +228,84 @@ def test_runner_writes_reuses_and_summarizes_state_portrait(tmp_path):
     assert usage["state_reconstruction"]["call_count"] == 1
     assert usage["state_reconstruction"]["reasoning_tokens"] == 5
     assert usage["cost_by_currency"]["USD"] == pytest.approx(0.006)
+
+
+def test_strategy_brief_is_deterministic_and_includes_evidence_index():
+    reports = _role_reports()
+
+    def call_model(day, attempt, call_kind, system_prompt, user_prompt):
+        return StateCallOutcome(
+            text=_valid_assessment(),
+            usage=_usage(attempt, call_kind),
+        )
+
+    portrait = StateReconstructor(
+        call_model,
+        max_schema_retries=0,
+    ).generate(reports)
+
+    first = render_strategy_brief(reports, portrait)
+    second = render_strategy_brief(reports, portrait)
+
+    assert first == second
+    assert "# 本周经营状态简报" in first
+    assert "## 五维经营状态" in first
+    assert "## 已确认事实" in first
+    assert "## 待验证假设" in first
+    assert "## 潜在风险" in first
+    assert "## 因果链" in first
+    assert "## 证据索引" in first
+    assert "**FIN-1** [finance.metric; flat; 强度 0.80]" in first
+    assert "不包含行动指令" in first
+
+
+def test_strategy_brief_rejects_mismatched_days():
+    reports = _role_reports()
+
+    def call_model(day, attempt, call_kind, system_prompt, user_prompt):
+        return StateCallOutcome(
+            text=_valid_assessment(),
+            usage=_usage(attempt, call_kind),
+        )
+
+    portrait = StateReconstructor(
+        call_model,
+        max_schema_retries=0,
+    ).generate(reports).model_copy(update={"day": 14})
+
+    with pytest.raises(ValueError, match="same day"):
+        render_strategy_brief(reports, portrait)
+
+
+def test_runner_persists_reuses_and_injects_brief_only_when_enabled(tmp_path):
+    reports = _role_reports()
+
+    def call_model(day, attempt, call_kind, system_prompt, user_prompt):
+        return StateCallOutcome(
+            text=_valid_assessment(),
+            usage=_usage(attempt, call_kind),
+        )
+
+    portrait = StateReconstructor(
+        call_model,
+        max_schema_retries=0,
+    ).generate(reports)
+    runner = BashAgentRunner.__new__(BashAgentRunner)
+    runner.workspace_dir = tmp_path
+    runner.analysis_enabled = True
+
+    brief, generated = runner._ensure_analysis_brief(reports, portrait)
+    path = tmp_path / "analysis/day_007/STRATEGY_BRIEF.md"
+
+    assert generated is True
+    assert path.read_text() == brief
+    reused, generated = runner._ensure_analysis_brief(reports, portrait)
+    assert generated is False
+    assert reused == brief
+    assert runner._decision_observation("dashboard", brief) == (
+        f"dashboard\n\n---\n\n{brief}"
+    )
+
+    runner.analysis_enabled = False
+    assert runner._decision_observation("dashboard", None) == "dashboard"
+    assert runner._ensure_analysis_brief(reports, portrait) == (None, False)
