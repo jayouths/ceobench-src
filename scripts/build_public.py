@@ -56,6 +56,7 @@ _ENGINE_MODULES = [
     "llm_provider",
     "llm_replay",
     "personas",
+    "public_week_snapshot",
     "server_entry",
     "shocks",
     "simulation",
@@ -86,7 +87,13 @@ def build():
     # ── Step 1: Run assertion checks FIRST (fail fast) ──
     step("1. Running docs coverage checks")
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "tests/test_docs_coverage.py", "-v"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/component/docs/test_coverage.py",
+            "-v",
+        ],
         cwd=PROJECT_ROOT,
         capture_output=True, text=True,
     )
