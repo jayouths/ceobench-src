@@ -112,7 +112,7 @@ class RoleReport(RoleAnalysis):
         })
 
 
-class RoleCallKind(StrEnum):
+class AnalysisCallKind(StrEnum):
     INITIAL = "initial"
     REPAIR = "repair"
 
@@ -122,7 +122,30 @@ class RoleCallUsage(AnalysisModel):
 
     role: Role
     attempt: PositiveInt
-    call_kind: RoleCallKind
+    call_kind: AnalysisCallKind
+    requested_model: str = Field(min_length=1)
+    served_model: str = Field(min_length=1)
+    pricing_model: str = Field(min_length=1)
+    input_tokens: NonNegativeInt
+    output_tokens: NonNegativeInt
+    cached_tokens: NonNegativeInt
+    reasoning_tokens: NonNegativeInt
+    elapsed_seconds: NonNegativeFloat
+    cost_amount: NonNegativeFloat
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+
+    @model_validator(mode="after")
+    def validate_cached_tokens(self) -> Self:
+        if self.cached_tokens > self.input_tokens:
+            raise ValueError("cached tokens cannot exceed input tokens")
+        return self
+
+
+class StateCallUsage(AnalysisModel):
+    """一次状态重构 LLM 调用的可复现用量和计价结果。"""
+
+    attempt: PositiveInt
+    call_kind: AnalysisCallKind
     requested_model: str = Field(min_length=1)
     served_model: str = Field(min_length=1)
     pricing_model: str = Field(min_length=1)
@@ -165,10 +188,10 @@ class RoleReportsArtifact(AnalysisModel):
             attempts = [call.attempt for call in role_calls]
             if attempts != list(range(1, len(role_calls) + 1)):
                 raise ValueError(f"{role.value} call attempts must be consecutive")
-            if role_calls[0].call_kind is not RoleCallKind.INITIAL:
+            if role_calls[0].call_kind is not AnalysisCallKind.INITIAL:
                 raise ValueError(f"{role.value} first call must be initial")
             if any(
-                call.call_kind is not RoleCallKind.REPAIR
+                call.call_kind is not AnalysisCallKind.REPAIR
                 for call in role_calls[1:]
             ):
                 raise ValueError(f"{role.value} later calls must be repairs")
@@ -281,4 +304,38 @@ class StatePortrait(StateAssessment):
         return cls.model_validate({
             "day": day,
             **assessment.model_dump(),
+        })
+
+
+class StatePortraitArtifact(StatePortrait):
+    """一个模拟周的经营画像及其全部状态重构调用成本。"""
+
+    schema_version: Literal["1.0"] = "1.0"
+    calls: list[StateCallUsage] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_calls(self) -> Self:
+        attempts = [call.attempt for call in self.calls]
+        if attempts != list(range(1, len(self.calls) + 1)):
+            raise ValueError("state reconstruction attempts must be consecutive")
+        if self.calls[0].call_kind is not AnalysisCallKind.INITIAL:
+            raise ValueError("state reconstruction first call must be initial")
+        if any(
+            call.call_kind is not AnalysisCallKind.REPAIR
+            for call in self.calls[1:]
+        ):
+            raise ValueError("state reconstruction later calls must be repairs")
+        return self
+
+    @classmethod
+    def from_assessment(
+        cls,
+        day: int,
+        assessment: StateAssessment,
+        calls: list[StateCallUsage],
+    ) -> Self:
+        return cls.model_validate({
+            "day": day,
+            **assessment.model_dump(),
+            "calls": [call.model_dump() for call in calls],
         })

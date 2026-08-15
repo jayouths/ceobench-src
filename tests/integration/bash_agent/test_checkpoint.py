@@ -6,7 +6,7 @@ import pytest
 
 from saas_bench.agents.bash_agent.analysis.models import (
     Role,
-    RoleCallKind,
+    AnalysisCallKind,
     RoleCallUsage,
     RoleReport,
     RoleReportsArtifact,
@@ -69,7 +69,7 @@ def test_checkpoint_persists_role_report_usage_from_artifacts(tmp_path):
         RoleCallUsage(
             role=role,
             attempt=1,
-            call_kind=RoleCallKind.INITIAL,
+            call_kind=AnalysisCallKind.INITIAL,
             requested_model="channel-model",
             served_model="served-model",
             pricing_model="official-model",
@@ -98,7 +98,8 @@ def test_checkpoint_persists_role_report_usage_from_artifacts(tmp_path):
     checkpoint = runner._save_checkpoint(7)
     analysis = checkpoint["runtime"]["analysis"]
 
-    assert analysis["completed_days"] == [7]
+    assert analysis["role_report_days"] == [7]
+    assert analysis["state_portrait_days"] == []
     assert analysis["call_count"] == 4
     assert analysis["input_tokens"] == 40
     assert analysis["reasoning_tokens"] == 4

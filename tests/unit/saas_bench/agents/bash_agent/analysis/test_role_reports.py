@@ -7,7 +7,7 @@ import pytest
 from saas_bench.agents.bash_agent import run_test
 from saas_bench.agents.bash_agent.analysis.models import (
     Role,
-    RoleCallKind,
+    AnalysisCallKind,
     RoleCallUsage,
     RoleReportsArtifact,
 )
@@ -70,7 +70,7 @@ def _valid_response(role: Role) -> str:
     }, ensure_ascii=False)
 
 
-def _usage(role: Role, attempt: int, call_kind: RoleCallKind) -> RoleCallUsage:
+def _usage(role: Role, attempt: int, call_kind: AnalysisCallKind) -> RoleCallUsage:
     return RoleCallUsage(
         role=role,
         attempt=attempt,
@@ -122,7 +122,7 @@ def test_generator_repairs_invalid_json_with_self_contained_context(day_zero_sig
     assert [report.role for report in artifact.reports] == list(Role)
     assert len(artifact.calls) == 5
     market_repair = observed[1]
-    assert market_repair[3] is RoleCallKind.REPAIR
+    assert market_repair[3] is AnalysisCallKind.REPAIR
     assert "not-json" in market_repair[4]
     assert "程序校验错误" in market_repair[4]
     assert '"signals"' in market_repair[4]
@@ -144,8 +144,8 @@ def test_generator_fails_after_configured_repair_limit(day_zero_signals):
         )
 
     assert calls == [
-        (Role.MARKET, 1, RoleCallKind.INITIAL),
-        (Role.MARKET, 2, RoleCallKind.REPAIR),
+        (Role.MARKET, 1, AnalysisCallKind.INITIAL),
+        (Role.MARKET, 2, AnalysisCallKind.REPAIR),
     ]
 
 
@@ -225,10 +225,12 @@ def test_runner_writes_reuses_and_summarizes_role_reports(
 
     assert generated is False
     assert reused == artifact
-    assert usage["completed_days"] == [0]
+    assert usage["role_report_days"] == [0]
+    assert usage["state_portrait_days"] == []
     assert usage["call_count"] == 4
     assert usage["input_tokens"] == 400
     assert usage["by_role"]["market"]["reasoning_tokens"] == 5
+    assert usage["state_reconstruction"]["call_count"] == 0
     assert usage["cost_by_currency"]["USD"] == pytest.approx(0.004)
 
 
@@ -278,7 +280,7 @@ def test_runner_records_raw_response_timing_and_official_cost(tmp_path, monkeypa
         7,
         Role.MARKET,
         1,
-        RoleCallKind.INITIAL,
+        AnalysisCallKind.INITIAL,
         "system",
         "user",
     )
@@ -293,7 +295,7 @@ def test_runner_records_raw_response_timing_and_official_cost(tmp_path, monkeypa
     assert timing["reasoning_tokens"] == 5
 
 
-def test_resume_removes_only_role_reports_not_confirmed_by_checkpoint(tmp_path):
+def test_resume_prunes_llm_artifacts_at_their_independent_checkpoint_boundaries(tmp_path):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.workspace_dir = tmp_path
     for day in (0, 7, 14):
@@ -301,10 +303,13 @@ def test_resume_removes_only_role_reports_not_confirmed_by_checkpoint(tmp_path):
         directory.mkdir(parents=True)
         (directory / "signals.json").write_text("signals")
         (directory / "role_reports.json").write_text("reports")
+        (directory / "state_portrait.json").write_text("portrait")
 
-    runner._prune_analysis_artifacts_after(7, {0})
+    runner._prune_analysis_artifacts_after(7, {0, 7}, {0})
 
     assert (tmp_path / "analysis" / "day_000" / "role_reports.json").is_file()
-    assert not (tmp_path / "analysis" / "day_007" / "role_reports.json").exists()
+    assert (tmp_path / "analysis" / "day_000" / "state_portrait.json").is_file()
+    assert (tmp_path / "analysis" / "day_007" / "role_reports.json").is_file()
+    assert not (tmp_path / "analysis" / "day_007" / "state_portrait.json").exists()
     assert (tmp_path / "analysis" / "day_007" / "signals.json").is_file()
     assert not (tmp_path / "analysis" / "day_014").exists()

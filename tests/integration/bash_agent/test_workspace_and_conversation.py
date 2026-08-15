@@ -253,7 +253,8 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
     assert result["environment_llm_output_tokens"] == 0
     assert result["environment_llm_cost_by_currency"] == {}
     assert result["environment_llm_usage_by_purpose"] == {}
-    assert result["analysis_completed_days"] == []
+    assert result["analysis_role_report_days"] == []
+    assert result["analysis_state_portrait_days"] == []
     assert result["analysis_llm_calls"] == 0
     assert result["analysis_cost_by_currency"] == {}
     assert checkpoint_calls == [

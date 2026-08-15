@@ -168,7 +168,7 @@ Dashboard 文本      Analysis 统计信号
 
 每个可比较数值分别保存 `current`、`previous`、绝对变化、相对变化、方向和比较状态。`current` 与 `previous` 各自携带 `available / insufficient_data / not_applicable` 状态，避免把“数据不足”和“零值”混淆。最近 7 天为 day 1 至 day 7 这类完整模拟日窗口，前 7 天为其前一个完整窗口；现金和配置等周边界状态按上文的相邻公开快照规则处理。
 
-Runner 在 `modules.analysis.enabled = true` 时生成 `analysis/day_XXX/signals.json`，同一日期已有合法产物则直接复用。断点恢复会保留断点日及以前的确定性信号，并删除更晚的孤立目录。确定性信号层和四角色报告层已经实现；经营画像与 `STRATEGY_BRIEF.md` 仍按后续步骤实现。
+Runner 在 `modules.analysis.enabled = true` 时生成 `analysis/day_XXX/signals.json`，同一日期已有合法产物则直接复用。断点恢复会保留断点日及以前的确定性信号，并删除更晚的孤立目录。确定性信号层、四角色报告层和经营画像已经实现；`STRATEGY_BRIEF.md` 与决策上下文注入仍按后续步骤实现。
 
 ## 4. 角色报告
 
@@ -207,6 +207,10 @@ Prompt 必须包含字段语义、枚举范围、数量上限和最小合法输�
 - `latent_risks`：尚未体现在头部指标中的滞后风险。
 - `causal_chain`：结构化的因果步骤，每步包含原因、结果、证据 ID 和置信度，不使用无结构字符串列表。
 
+状态重构 Prompt 位于 `analysis/state_prompts.py`，执行和校验位于 `analysis/state_reconstruction.py`。模型只接收四份角色报告，不接收角色调用成本、原始 SQL、隐藏状态或历史策略。程序除校验固定维度和标签 Schema 外，还会汇总四份报告中的合法证据编号，并拒绝画像中新造、改写或不存在的证据引用。
+
+状态重构与角色报告使用相同的 Analysis 模型，但通过独立的 `state_reconstruction` 任务配置输出上限。非法回答的修复调用同样携带完整四角色报告、上一份回答和程序校验错误，不依赖聊天历史。成功产出的 `state_portrait.json` 同时保存经营画像以及初始、修复调用的模型、Token、成本和耗时。
+
 ## 6. 输出校验与失败处理
 
 工程层使用 Pydantic 校验角色报告和经营画像的 JSON 结构。第一次输出不合法时，将原始回答、校验错误和目标 Schema 一起交给模型修复。修复次数由实验配置显式声明：
@@ -238,7 +242,7 @@ run_<run_id>/analysis/day_007/
 - `state_portrait.json`：统一经营状态画像。
 - `STRATEGY_BRIEF.md`：由程序格式化、实际注入本周 ReAct Agent 上下文的内容。
 
-当前已经生成 `signals.json` 和 `role_reports.json`；`state_portrait.json` 与 `STRATEGY_BRIEF.md` 将在后续状态重构步骤实现。已实现产物使用原子写入，防止中途崩溃留下外观完整但内容截断的文件。Analysis LLM 的每次调用同时进入现有原始响应和耗时日志，并标记 `component=analysis`、角色和任务。
+当前已经生成 `signals.json`、`role_reports.json` 和 `state_portrait.json`；`STRATEGY_BRIEF.md` 将在后续确定性格式化与注入步骤实现。已实现产物使用原子写入，防止中途崩溃留下外观完整但内容截断的文件。Analysis LLM 的每次调用同时进入现有原始响应和耗时日志，并标记 `component=analysis` 和任务；角色报告调用额外标记角色。
 
 ## 8. Token、成本与断点恢复
 
@@ -251,9 +255,9 @@ Analysis 必须独立统计：
 
 Analysis 用量不得与 Bash Agent 或社交环境 LLM 混合。推理 Token 只作为观测指标；如果供应商已将其包含在 `output_tokens` 中，不重复计费。
 
-Analysis 模型配置和模块开关已经进入 `config.json`；累计用量和已完成角色报告的模拟周已经进入 Checkpoint 与 `result.json`。角色报告完成后、ReAct Agent 开始本周决策前，Runner 生成一个同日稳定断点。因此，恢复同一模拟周时只复用该断点确认的角色报告，不重复调用 Analysis LLM，不重复计费；断点未确认的同日报告会被删除并重新生成，确定性 `signals.json` 可以保留复用。
+Analysis 模型配置和模块开关已经进入 `config.json`；累计用量、已完成角色报告的周和已完成状态画像的周已经进入 Checkpoint 与 `result.json`。角色报告和状态画像分别完成后，Runner 各生成一个同日稳定断点。这样即使状态重构失败，恢复时也不必重复四个角色调用；只有断点确认的产物可以复用，未确认的同日产物会被删除并重新生成，确定性 `signals.json` 可以保留复用。
 
-状态重构的独立用量将在该步骤实现时加入同一 Analysis 汇总，目前按角色拆分只包含市场、财务、产品和客户四类调用。
+Analysis 汇总同时包含总用量、市场/财务/产品/客户四角色用量和状态重构用量。模型调用成本只作为实验成本记录，不进入模拟企业现金。
 
 ## 9. 消融边界
 

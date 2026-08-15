@@ -94,3 +94,6 @@ output_cost_per_million = 1.32
 
 [models.analysis.tasks.role_report]
 max_output_tokens = 3000
+
+[models.analysis.tasks.state_reconstruction]
+max_output_tokens = 4000

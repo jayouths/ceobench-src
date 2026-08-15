@@ -61,13 +61,19 @@ from saas_bench.agents.bash_agent.agent import BashAgent
 from saas_bench.agents.bash_agent.analysis.signal_models import AnalysisSignals
 from saas_bench.agents.bash_agent.analysis.models import (
     Role,
-    RoleCallKind,
+    AnalysisCallKind,
     RoleCallUsage,
     RoleReportsArtifact,
+    StateCallUsage,
+    StatePortraitArtifact,
 )
 from saas_bench.agents.bash_agent.analysis.role_reports import (
     RoleCallOutcome,
     RoleReportGenerator,
+)
+from saas_bench.agents.bash_agent.analysis.state_reconstruction import (
+    StateCallOutcome,
+    StateReconstructor,
 )
 from saas_bench.agents.bash_agent.analysis.signals import (
     SignalCollector,
@@ -108,7 +114,7 @@ class BashAgentRunner:
     checkpoint management. All simulation state is queried via HTTP.
     """
 
-    CHECKPOINT_FORMAT_VERSION = 5
+    CHECKPOINT_FORMAT_VERSION = 6
 
     def __init__(
         self,
@@ -485,6 +491,14 @@ class BashAgentRunner:
             / "role_reports.json"
         )
 
+    def _analysis_state_portrait_path(self, day: int) -> Path:
+        return (
+            self.workspace_dir
+            / "analysis"
+            / f"day_{day:03d}"
+            / "state_portrait.json"
+        )
+
     def _load_analysis_history(self, before_or_at_day: int) -> Dict[int, AnalysisSignals]:
         """读取已完成周的确定性产物，供环比和 Dashboard 独有指标使用。"""
         history = {}
@@ -561,21 +575,22 @@ class BashAgentRunner:
             return raw_response
         return str(raw_response)
 
-    def _call_analysis_role_model(
+    def _call_analysis_model(
         self,
+        *,
+        task: str,
         day: int,
-        role: Role,
         attempt: int,
-        call_kind: RoleCallKind,
+        call_kind: AnalysisCallKind,
         system_prompt: str,
         user_prompt: str,
-    ) -> RoleCallOutcome:
-        """执行并完整记录一次角色报告或修复调用。"""
+        role: Role | None = None,
+    ):
+        """统一执行 Analysis 调用，确保所有任务使用相同计费和日志口径。"""
 
         if self.analysis_client is None or self.analysis_model_config is None:
             raise RuntimeError("analysis client is not initialized")
         config = self.analysis_model_config
-        parameters = self._analysis_task_parameters("role_report")
         started = _time.monotonic()
         response = call_text_model(
             client=self.analysis_client,
@@ -583,7 +598,7 @@ class BashAgentRunner:
             model=config["model"],
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            **parameters,
+            **self._analysis_task_parameters(task),
         )
         elapsed = _time.monotonic() - started
         cost = model_token_cost(
@@ -594,11 +609,73 @@ class BashAgentRunner:
             config["pricing"],
             config.get("pricing_model_map"),
         )
+
+        identity = {
+            "component": "analysis",
+            "analysis_task": task,
+            "attempt": attempt,
+            "call_kind": call_kind.value,
+            "day": day,
+        }
+        if role is not None:
+            identity["role"] = role.value
+        usage_fields = {
+            "requested_model": config["model"],
+            "served_model": response.model,
+            "pricing_model": cost.pricing_model,
+            "input_tokens": response.input_tokens,
+            "output_tokens": response.output_tokens,
+            "cached_tokens": response.cached_tokens,
+            "reasoning_tokens": response.reasoning_tokens,
+            "cost_amount": cost.amount,
+            "currency": cost.currency,
+        }
+        raw_entry = {
+            "timestamp": now(),
+            **identity,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "response_text": response.text,
+            "raw_response": self._jsonable_llm_response(response.raw_response),
+            "elapsed_seconds": elapsed,
+            **usage_fields,
+        }
+        with open(self.response_log_file, "a") as file:
+            file.write(json.dumps(raw_entry, ensure_ascii=False) + "\n")
+        self._log_timing(
+            "analysis_llm_call",
+            day,
+            **{key: value for key, value in identity.items() if key != "day"},
+            elapsed_s=round(elapsed, 3),
+            **usage_fields,
+        )
+        return response, cost, elapsed
+
+    def _call_analysis_role_model(
+        self,
+        day: int,
+        role: Role,
+        attempt: int,
+        call_kind: AnalysisCallKind,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> RoleCallOutcome:
+        """执行并完整记录一次角色报告或修复调用。"""
+
+        response, cost, elapsed = self._call_analysis_model(
+            task="role_report",
+            day=day,
+            attempt=attempt,
+            call_kind=call_kind,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            role=role,
+        )
         usage = RoleCallUsage(
             role=role,
             attempt=attempt,
             call_kind=call_kind,
-            requested_model=config["model"],
+            requested_model=self.analysis_model_config["model"],
             served_model=response.model,
             pricing_model=cost.pricing_model,
             input_tokens=response.input_tokens,
@@ -609,44 +686,41 @@ class BashAgentRunner:
             cost_amount=cost.amount,
             currency=cost.currency,
         )
+        return RoleCallOutcome(text=response.text, usage=usage)
 
-        # 原始回答和完整 Prompt 用于复现；统计日志保留轻量指标供批量分析。
-        raw_entry = {
-            "timestamp": now(),
-            "component": "analysis",
-            "analysis_task": "role_report",
-            "role": role.value,
-            "attempt": attempt,
-            "call_kind": call_kind.value,
-            "day": day,
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
-            "response_text": response.text,
-            "raw_response": self._jsonable_llm_response(response.raw_response),
-            **usage.model_dump(mode="json"),
-        }
-        with open(self.response_log_file, "a") as file:
-            file.write(json.dumps(raw_entry, ensure_ascii=False) + "\n")
-        self._log_timing(
-            "analysis_llm_call",
-            raw_entry["day"],
-            component="analysis",
-            analysis_task="role_report",
-            role=role.value,
+    def _call_analysis_state_model(
+        self,
+        day: int,
+        attempt: int,
+        call_kind: AnalysisCallKind,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> StateCallOutcome:
+        """执行一次状态重构或修复调用。"""
+
+        response, cost, elapsed = self._call_analysis_model(
+            task="state_reconstruction",
+            day=day,
             attempt=attempt,
-            call_kind=call_kind.value,
-            elapsed_s=round(elapsed, 3),
+            call_kind=call_kind,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        usage = StateCallUsage(
+            attempt=attempt,
+            call_kind=call_kind,
+            requested_model=self.analysis_model_config["model"],
+            served_model=response.model,
+            pricing_model=cost.pricing_model,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
             cached_tokens=response.cached_tokens,
             reasoning_tokens=response.reasoning_tokens,
+            elapsed_seconds=elapsed,
             cost_amount=cost.amount,
             currency=cost.currency,
-            requested_model=config["model"],
-            served_model=response.model,
-            pricing_model=cost.pricing_model,
         )
-        return RoleCallOutcome(text=response.text, usage=usage)
+        return StateCallOutcome(text=response.text, usage=usage)
 
     def _ensure_analysis_role_reports(
         self,
@@ -671,19 +745,34 @@ class BashAgentRunner:
         write_json_atomic(path, artifact.model_dump(mode="json"))
         return artifact, True
 
+    def _ensure_analysis_state_portrait(
+        self,
+        role_reports: RoleReportsArtifact,
+    ) -> tuple[StatePortraitArtifact | None, bool]:
+        """返回周度经营画像；布尔值表示本次是否产生了新的 LLM 调用。"""
+
+        if not self.analysis_enabled:
+            return None, False
+        path = self._analysis_state_portrait_path(role_reports.day)
+        if path.is_file():
+            artifact = StatePortraitArtifact.model_validate_json(path.read_text())
+            if artifact.day != role_reports.day:
+                raise ValueError(f"Analysis state portrait day mismatch: {path}")
+            return artifact, False
+
+        reconstructor = StateReconstructor(
+            self._call_analysis_state_model,
+            max_schema_retries=self.analysis_module_config["max_schema_retries"],
+        )
+        artifact = reconstructor.generate(role_reports)
+        write_json_atomic(path, artifact.model_dump(mode="json"))
+        return artifact, True
+
     def _analysis_usage_summary(self, before_or_at_day: int) -> Dict[str, Any]:
         """从已落盘周产物重建 Analysis 累计用量，避免维护第二份可变计数器。"""
 
-        totals = {
-            "call_count": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cached_tokens": 0,
-            "reasoning_tokens": 0,
-            "cost_by_currency": {},
-        }
-        by_role = {
-            role.value: {
+        def empty_usage() -> Dict[str, Any]:
+            return {
                 "call_count": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
@@ -691,50 +780,63 @@ class BashAgentRunner:
                 "reasoning_tokens": 0,
                 "cost_by_currency": {},
             }
+
+        def add_call(target: Dict[str, Any], call: Any) -> None:
+            target["call_count"] += 1
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cached_tokens",
+                "reasoning_tokens",
+            ):
+                target[field] += getattr(call, field)
+            costs = target["cost_by_currency"]
+            costs[call.currency] = costs.get(call.currency, 0.0) + call.cost_amount
+
+        totals = empty_usage()
+        by_role = {
+            role.value: empty_usage()
             for role in Role
         }
-        completed_days: list[int] = []
+        state_reconstruction = empty_usage()
+        role_report_days: list[int] = []
+        state_portrait_days: list[int] = []
         analysis_dir = self.workspace_dir / "analysis"
         if analysis_dir.is_dir():
             for path in sorted(analysis_dir.glob("day_*/role_reports.json")):
                 artifact = RoleReportsArtifact.model_validate_json(path.read_text())
                 if artifact.day > before_or_at_day:
                     continue
-                completed_days.append(artifact.day)
+                role_report_days.append(artifact.day)
                 for call in artifact.calls:
-                    role_usage = by_role[call.role.value]
-                    for field in (
-                        "input_tokens",
-                        "output_tokens",
-                        "cached_tokens",
-                        "reasoning_tokens",
-                    ):
-                        totals[field] += getattr(call, field)
-                        role_usage[field] += getattr(call, field)
-                    totals["call_count"] += 1
-                    role_usage["call_count"] += 1
-                    total_costs = totals["cost_by_currency"]
-                    total_costs[call.currency] = (
-                        total_costs.get(call.currency, 0.0) + call.cost_amount
-                    )
-                    role_costs = role_usage["cost_by_currency"]
-                    role_costs[call.currency] = (
-                        role_costs.get(call.currency, 0.0) + call.cost_amount
-                    )
+                    add_call(totals, call)
+                    add_call(by_role[call.role.value], call)
+            for path in sorted(analysis_dir.glob("day_*/state_portrait.json")):
+                artifact = StatePortraitArtifact.model_validate_json(path.read_text())
+                if artifact.day > before_or_at_day:
+                    continue
+                state_portrait_days.append(artifact.day)
+                for call in artifact.calls:
+                    add_call(totals, call)
+                    add_call(state_reconstruction, call)
         return {
-            "completed_days": completed_days,
+            "role_report_days": role_report_days,
+            "state_portrait_days": state_portrait_days,
             **totals,
             "by_role": by_role,
+            "state_reconstruction": state_reconstruction,
         }
 
     def _prune_analysis_artifacts_after(
         self,
         day: int,
-        completed_role_report_days: set[int] | None = None,
+        role_report_days: set[int] | None = None,
+        state_portrait_days: set[int] | None = None,
     ) -> None:
-        """恢复时删除断点未确认的角色报告，并保留可重算的确定性信号。"""
+        """恢复时按断点确认范围清理 LLM 产物，保留确定性信号。"""
 
-        completed_role_report_days = completed_role_report_days or set()
+        role_report_days = role_report_days or set()
+        state_portrait_days = state_portrait_days or set()
         analysis_dir = self.workspace_dir / "analysis"
         if not analysis_dir.is_dir():
             return
@@ -745,8 +847,11 @@ class BashAgentRunner:
                 continue
             if artifact_day > day:
                 shutil.rmtree(directory)
-            elif artifact_day not in completed_role_report_days:
+            elif artifact_day not in role_report_days:
                 (directory / "role_reports.json").unlink(missing_ok=True)
+                (directory / "state_portrait.json").unlink(missing_ok=True)
+            elif artifact_day not in state_portrait_days:
+                (directory / "state_portrait.json").unlink(missing_ok=True)
 
     def _terminal_outcome(self, status: Dict[str, Any]) -> Optional[str]:
         """Classify one validated simulator status, with failure states first."""
@@ -1704,25 +1809,32 @@ __pycache__/
             "reasoning_tokens",
         }
         expected = scalar_fields | {
-            "completed_days",
+            "role_report_days",
+            "state_portrait_days",
             "cost_by_currency",
             "by_role",
+            "state_reconstruction",
         }
         if not isinstance(usage, dict) or set(usage) != expected:
             raise ValueError("Invalid Analysis usage summary")
-        completed_days = usage["completed_days"]
-        if (
-            not isinstance(completed_days, list)
-            or any(
-                not isinstance(day, int)
-                or isinstance(day, bool)
-                or day < 0
-                or day > max_day
-                for day in completed_days
-            )
-            or completed_days != sorted(set(completed_days))
+        for field in ("role_report_days", "state_portrait_days"):
+            days = usage[field]
+            if (
+                not isinstance(days, list)
+                or any(
+                    not isinstance(day, int)
+                    or isinstance(day, bool)
+                    or day < 0
+                    or day > max_day
+                    for day in days
+                )
+                or days != sorted(set(days))
+            ):
+                raise ValueError(f"Invalid Analysis {field}")
+        if not set(usage["state_portrait_days"]).issubset(
+            usage["role_report_days"]
         ):
-            raise ValueError("Invalid Analysis completed days")
+            raise ValueError("Analysis state portraits require role reports")
         for field in scalar_fields:
             cls._require_non_negative_integer(usage[field], f"analysis.{field}")
         if usage["cached_tokens"] > usage["input_tokens"]:
@@ -1735,9 +1847,9 @@ __pycache__/
         expected_roles = {role.value for role in Role}
         if not isinstance(by_role, dict) or set(by_role) != expected_roles:
             raise ValueError("Invalid Analysis usage by_role")
-        role_expected = scalar_fields | {"cost_by_currency"}
+        bucket_fields = scalar_fields | {"cost_by_currency"}
         for role, values in by_role.items():
-            if not isinstance(values, dict) or set(values) != role_expected:
+            if not isinstance(values, dict) or set(values) != bucket_fields:
                 raise ValueError(f"Invalid Analysis usage for role {role!r}")
             for field in scalar_fields:
                 cls._require_non_negative_integer(
@@ -1752,11 +1864,26 @@ __pycache__/
                 f"analysis.{role}.cost_by_currency",
             )
 
+        state_usage = usage["state_reconstruction"]
+        if not isinstance(state_usage, dict) or set(state_usage) != bucket_fields:
+            raise ValueError("Invalid Analysis state_reconstruction usage")
         for field in scalar_fields:
-            if usage[field] != sum(values[field] for values in by_role.values()):
-                raise ValueError(f"Analysis {field} total does not match by_role")
+            cls._require_non_negative_integer(
+                state_usage[field], f"analysis.state_reconstruction.{field}"
+            )
+        if state_usage["cached_tokens"] > state_usage["input_tokens"]:
+            raise ValueError("Analysis state reconstruction cached tokens exceed input tokens")
+        cls._validate_cost_by_currency(
+            state_usage["cost_by_currency"],
+            "analysis.state_reconstruction.cost_by_currency",
+        )
+
+        usage_buckets = [*by_role.values(), state_usage]
+        for field in scalar_fields:
+            if usage[field] != sum(values[field] for values in usage_buckets):
+                raise ValueError(f"Analysis {field} total does not match task breakdown")
         expected_costs: Dict[str, float] = {}
-        for values in by_role.values():
+        for values in usage_buckets:
             for currency, amount in values["cost_by_currency"].items():
                 expected_costs[currency] = expected_costs.get(currency, 0.0) + amount
         if set(usage["cost_by_currency"]) != set(expected_costs) or any(
@@ -1768,7 +1895,7 @@ __pycache__/
             )
             for currency, amount in expected_costs.items()
         ):
-            raise ValueError("Analysis cost total does not match by_role")
+            raise ValueError("Analysis cost total does not match task breakdown")
         return usage
 
     @classmethod
@@ -1933,7 +2060,12 @@ __pycache__/
                 self._resume_checkpoint['day'],
                 set(
                     self._resume_checkpoint['runtime']['analysis'][
-                        'completed_days'
+                        'role_report_days'
+                    ]
+                ),
+                set(
+                    self._resume_checkpoint['runtime']['analysis'][
+                        'state_portrait_days'
                     ]
                 ),
             )
@@ -2238,7 +2370,8 @@ __pycache__/
             'environment_llm_cached_tokens': environment_state['cached_tokens'],
             'environment_llm_cost_by_currency': environment_state['cost_by_currency'],
             'environment_llm_usage_by_purpose': environment_state['by_purpose'],
-            'analysis_completed_days': analysis_state['completed_days'],
+            'analysis_role_report_days': analysis_state['role_report_days'],
+            'analysis_state_portrait_days': analysis_state['state_portrait_days'],
             'analysis_llm_calls': analysis_state['call_count'],
             'analysis_input_tokens': analysis_state['input_tokens'],
             'analysis_output_tokens': analysis_state['output_tokens'],
@@ -2246,6 +2379,9 @@ __pycache__/
             'analysis_reasoning_tokens': analysis_state['reasoning_tokens'],
             'analysis_cost_by_currency': analysis_state['cost_by_currency'],
             'analysis_usage_by_role': analysis_state['by_role'],
+            'analysis_state_reconstruction_usage': analysis_state[
+                'state_reconstruction'
+            ],
             'resumable': outcome in {'timeout', 'incomplete'},
             'workspace_dir': str(self.workspace_dir),
             **self._harness_result_fields(),
@@ -2451,18 +2587,29 @@ __pycache__/
             _analysis_started = _time.monotonic()
             signals = self._ensure_analysis_signals(dashboard_payload)
             role_reports_generated = False
+            state_portrait_generated = False
             if signals is not None:
-                _, role_reports_generated = self._ensure_analysis_role_reports(signals)
+                role_reports, role_reports_generated = (
+                    self._ensure_analysis_role_reports(signals)
+                )
+                if role_reports is None:
+                    raise RuntimeError("Analysis role reports were not generated")
+                if role_reports_generated:
+                    # 四个角色调用完成后先提交断点；状态重构失败时无需重复付费。
+                    stable_checkpoint = self._save_checkpoint(sim_day)
+                _, state_portrait_generated = (
+                    self._ensure_analysis_state_portrait(role_reports)
+                )
             if self.analysis_enabled:
                 self._log_timing(
                     "analysis_week",
                     sim_day,
                     elapsed_s=round(_time.monotonic() - _analysis_started, 3),
                     role_reports_generated=role_reports_generated,
+                    state_portrait_generated=state_portrait_generated,
                 )
-            if role_reports_generated:
-                # 角色报告及其日志完成后立即建立同日稳定断点。恢复时可复用产物，
-                # 不会重复调用模型或重复计费。
+            if state_portrait_generated:
+                # 状态画像和本周汇总日志完成后再次提交，形成完整 Analysis 断点。
                 stable_checkpoint = self._save_checkpoint(sim_day)
 
             # Agent Loop：只要本周的决策尚未结束，就持续执行
@@ -2703,8 +2850,16 @@ __pycache__/
                     final_signals = self._ensure_analysis_signals(final_payload)
                     if final_signals is None:
                         raise RuntimeError("Analysis signals were not generated")
-                    _, final_reports_generated = self._ensure_analysis_role_reports(
-                        final_signals
+                    final_reports, final_reports_generated = (
+                        self._ensure_analysis_role_reports(final_signals)
+                    )
+                    if final_reports is None:
+                        raise RuntimeError("Analysis role reports were not generated")
+                    if final_reports_generated:
+                        # 终态重构失败时，四角色调用仍可从这个断点恢复。
+                        self._save_checkpoint(sim_day)
+                    _, final_portrait_generated = (
+                        self._ensure_analysis_state_portrait(final_reports)
                     )
                     self._log_timing(
                         "analysis_week",
@@ -2713,6 +2868,7 @@ __pycache__/
                             _time.monotonic() - final_analysis_started, 3
                         ),
                         role_reports_generated=final_reports_generated,
+                        state_portrait_generated=final_portrait_generated,
                         terminal=True,
                     )
                 self._save_checkpoint(sim_day)

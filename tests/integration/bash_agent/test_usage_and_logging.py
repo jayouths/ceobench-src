@@ -75,16 +75,17 @@ def test_environment_llm_usage_rejects_inconsistent_totals():
         BashAgentRunner._validate_environment_llm_usage(usage)
 
 
-def test_analysis_usage_is_validated_against_role_totals():
+def test_analysis_usage_is_validated_against_role_and_state_totals():
     usage = {
         **EMPTY_ANALYSIS_USAGE,
-        "completed_days": [0],
-        "call_count": 4,
-        "input_tokens": 40,
-        "output_tokens": 20,
-        "cached_tokens": 8,
-        "reasoning_tokens": 4,
-        "cost_by_currency": {"USD": 0.04},
+        "role_report_days": [0],
+        "state_portrait_days": [0],
+        "call_count": 5,
+        "input_tokens": 140,
+        "output_tokens": 50,
+        "cached_tokens": 18,
+        "reasoning_tokens": 9,
+        "cost_by_currency": {"USD": 0.06},
         "by_role": {
             role: {
                 "call_count": 1,
@@ -96,11 +97,19 @@ def test_analysis_usage_is_validated_against_role_totals():
             }
             for role in ("market", "finance", "product", "customer")
         },
+        "state_reconstruction": {
+            "call_count": 1,
+            "input_tokens": 100,
+            "output_tokens": 30,
+            "cached_tokens": 10,
+            "reasoning_tokens": 5,
+            "cost_by_currency": {"USD": 0.02},
+        },
     }
 
     assert BashAgentRunner._validate_analysis_usage(usage, max_day=0) == usage
 
-    usage["input_tokens"] = 39
+    usage["input_tokens"] = 139
     with pytest.raises(ValueError, match="input_tokens total"):
         BashAgentRunner._validate_analysis_usage(usage, max_day=0)
 

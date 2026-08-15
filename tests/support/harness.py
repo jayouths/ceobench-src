@@ -18,7 +18,8 @@ EMPTY_ENVIRONMENT_LLM_USAGE = {
 }
 
 EMPTY_ANALYSIS_USAGE = {
-    "completed_days": [],
+    "role_report_days": [],
+    "state_portrait_days": [],
     "call_count": 0,
     "input_tokens": 0,
     "output_tokens": 0,
@@ -35,6 +36,14 @@ EMPTY_ANALYSIS_USAGE = {
             "cost_by_currency": {},
         }
         for role in ("market", "finance", "product", "customer")
+    },
+    "state_reconstruction": {
+        "call_count": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_by_currency": {},
     },
 }
 

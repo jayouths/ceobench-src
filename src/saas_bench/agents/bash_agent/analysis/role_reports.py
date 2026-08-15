@@ -12,7 +12,7 @@ from .models import (
     Direction,
     Role,
     RoleAnalysis,
-    RoleCallKind,
+    AnalysisCallKind,
     RoleCallUsage,
     RoleReport,
     RoleReportsArtifact,
@@ -28,7 +28,7 @@ class RoleCallOutcome:
 
 
 RoleModelCall = Callable[
-    [int, Role, int, RoleCallKind, str, str],
+    [int, Role, int, AnalysisCallKind, str, str],
     RoleCallOutcome,
 ]
 
@@ -67,9 +67,9 @@ class RoleReportGenerator:
 
         for attempt in range(1, self.max_schema_retries + 2):
             call_kind = (
-                RoleCallKind.INITIAL if attempt == 1 else RoleCallKind.REPAIR
+                AnalysisCallKind.INITIAL if attempt == 1 else AnalysisCallKind.REPAIR
             )
-            if call_kind is RoleCallKind.REPAIR:
+            if call_kind is AnalysisCallKind.REPAIR:
                 system_prompt, user_prompt = build_repair_prompt(
                     signals,
                     role,

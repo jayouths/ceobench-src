@@ -5,8 +5,10 @@ from .models import (
     RoleAnalysis,
     RoleReportsArtifact,
     RoleReport,
+    StateCallUsage,
     StateAssessment,
     StatePortrait,
+    StatePortraitArtifact,
 )
 from .signal_models import AnalysisSignals
 from .signal_catalog import SIGNAL_CATALOG, SIGNAL_CATALOG_VERSION
@@ -17,8 +19,10 @@ __all__ = [
     "RoleAnalysis",
     "RoleReportsArtifact",
     "RoleReport",
+    "StateCallUsage",
     "StateAssessment",
     "StatePortrait",
+    "StatePortraitArtifact",
     "AnalysisSignals",
     "SignalCollector",
     "parse_public_week_snapshot",

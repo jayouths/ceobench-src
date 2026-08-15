@@ -190,6 +190,7 @@ def test_deepseek_smoke_config_uses_official_peak_prices():
     assert config.analysis is not None
     assert config.analysis.model == "deepseek-v4-flash"
     assert config.analysis.tasks["role_report"]["max_output_tokens"] == 3000
+    assert config.analysis.tasks["state_reconstruction"]["max_output_tokens"] == 4000
 
 def test_autodl_models_map_to_official_deepseek_pricing():
     config = load_experiment_config(
@@ -209,6 +210,7 @@ def test_autodl_models_map_to_official_deepseek_pricing():
     assert config.analysis is not None
     assert config.analysis.model == "DeepSeek-V4-Flash"
     assert config.analysis.tasks["role_report"]["max_output_tokens"] == 3000
+    assert config.analysis.tasks["state_reconstruction"]["max_output_tokens"] == 4000
 
 def test_full_config_uses_benchmark_horizon():
     config = load_experiment_config(PROJECT_ROOT / "experiments/full.toml")
