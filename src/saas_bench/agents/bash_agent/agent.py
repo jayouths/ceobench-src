@@ -15,7 +15,11 @@ from dataclasses import dataclass, field, asdict
 
 from ..base import BaseAgent
 from ...environment import Action
-from ...llm_provider import openai_chat_cached_tokens
+from ...llm_provider import (
+    api_tool_choice,
+    openai_chat_cached_tokens,
+    validate_tool_choice,
+)
 
 
 @dataclass
@@ -61,6 +65,7 @@ class BashAgent(BaseAgent):
         reasoning_effort: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        tool_choice: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
         timeout_seconds: float = 600.0,
         request_options: Optional[Dict[str, Any]] = None,
@@ -93,6 +98,8 @@ class BashAgent(BaseAgent):
         self.reasoning_effort = reasoning_effort
         self.temperature = temperature
         self.top_p = top_p
+        validate_tool_choice(tool_choice, "decision-agent")
+        self.tool_choice = tool_choice
         self.max_output_tokens = max_output_tokens
         self.timeout_seconds = timeout_seconds
         self.request_options = dict(request_options or {})
@@ -512,7 +519,7 @@ class BashAgent(BaseAgent):
             'model': self.model,
             'messages': messages,
             'tools': tools,
-            'tool_choice': 'auto',
+            'tool_choice': api_tool_choice(self.api_type, self.tool_choice),
             'max_completion_tokens': self.max_output_tokens,
         }
         if self.temperature is not None:
@@ -529,7 +536,7 @@ class BashAgent(BaseAgent):
             'model': self.model,
             'input': input_items,
             'tools': tools,
-            'tool_choice': 'auto',
+            'tool_choice': api_tool_choice(self.api_type, self.tool_choice),
             'max_output_tokens': self.max_output_tokens,
             'instructions': self._get_system_prompt_with_memory(),
         }
@@ -996,6 +1003,7 @@ class BashAgent(BaseAgent):
                 'system': system_content,
                 'messages': messages,
                 'tools': tools,
+                'tool_choice': api_tool_choice(self.api_type, self.tool_choice),
             }
             if self.temperature is not None:
                 api_kwargs['temperature'] = self.temperature

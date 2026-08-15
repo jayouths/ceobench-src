@@ -7,11 +7,25 @@ from saas_bench.llm_provider import (
     API_OPENAI_CHAT,
     API_OPENAI_RESPONSES,
     MissingModelPricingError,
+    api_tool_choice,
     call_text_model,
     model_token_cost,
     openai_chat_cached_tokens,
     token_cost,
 )
+
+
+@pytest.mark.parametrize(
+    ("api_type", "policy", "expected"),
+    [
+        (API_OPENAI_CHAT, "required", "required"),
+        (API_OPENAI_RESPONSES, "required", "required"),
+        (API_ANTHROPIC_MESSAGES, "required", {"type": "any"}),
+        (API_ANTHROPIC_MESSAGES, "auto", {"type": "auto"}),
+    ],
+)
+def test_tool_choice_is_mapped_to_each_api_protocol(api_type, policy, expected):
+    assert api_tool_choice(api_type, policy) == expected
 
 
 class Recorder:

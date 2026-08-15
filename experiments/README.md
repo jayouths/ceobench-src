@@ -23,7 +23,7 @@ max_schema_retries = 1
 
 当 `modules.analysis.enabled = true` 时，还必须显式配置 `[models.analysis]`；关闭模块时不要求配置该模型。
 
-代码不提供模型、Provider 或输出上限的兜底值。两类模型都必须显式填写 `max_output_tokens`，缺少时程序会在实验启动前直接报错。任务级 `max_output_tokens` 可以省略，此时继承所属模型的上限。
+代码不提供模型、Provider 或输出上限的兜底值。两类模型都必须显式填写 `max_output_tokens`，缺少时程序会在实验启动前直接报错。决策 Agent 还必须显式填写 `tool_choice = "auto" | "required"`：Provider 支持时使用 `required`；DeepSeek Thinking 模式必须使用 `auto`，并继续由 Harness 校验工具调用。任务级 `max_output_tokens` 可以省略，此时继承所属模型的上限。
 
 初步消融实验（70 天，10 周）：
 
@@ -81,6 +81,6 @@ cached_input_cost_per_million = 0.0
 output_cost_per_million = 0.0
 ```
 
-模型级标准参数包括 `reasoning_effort`、`temperature`、`top_p`、`max_output_tokens` 和 `timeout_seconds`。社交 LLM 可在 `[models.social_llm.tasks.<task>]` 中覆盖前四项。供应商私有参数放入 `request_options`；OpenAI 兼容协议可使用 `extra_body`、`extra_headers` 和 `extra_query`，Anthropic Messages 可使用原生 `thinking` 和 `output_config`。
+模型级标准参数包括 `reasoning_effort`、`temperature`、`top_p`、`max_output_tokens` 和 `timeout_seconds`。决策 Agent 的 `tool_choice` 使用统一语义：OpenAI 协议直接发送 `auto|required`，Anthropic Messages 映射为 `auto|any`。社交 LLM 可在 `[models.social_llm.tasks.<task>]` 中覆盖前四项。供应商私有参数放入 `request_options`；OpenAI 兼容协议可使用 `extra_body`、`extra_headers` 和 `extra_query`，Anthropic Messages 可使用原生 `thinking` 和 `output_config`。
 
 `reasoning_effort` 省略时不发送对应参数；显式配置时按 OpenAI Responses 或 Chat Completions 协议映射。Anthropic Messages 不使用该抽象字段；如需 thinking，必须在 `request_options` 中显式填写原生参数。

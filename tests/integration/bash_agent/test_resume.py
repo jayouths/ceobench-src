@@ -23,7 +23,7 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_pat
     run_dir = tmp_path / "run_existing"
     run_dir.mkdir()
     (run_dir / "config.json").write_text(json.dumps({
-        "format_version": 6,
+        "format_version": 7,
         "run_id": "existing",
         "agent_type": "bash_agent",
         "model": "original-model",
@@ -33,6 +33,7 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_pat
         "reasoning_effort": None,
         "temperature": 0.7,
         "top_p": 0.8,
+        "tool_choice": "required",
         "max_output_tokens": 100,
         "timeout_seconds": 30.0,
         "pricing": {"original-model": {
@@ -69,6 +70,7 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(tmp_pat
 
     assert runner.model == "original-model"
     assert runner.api_type == "openai_responses"
+    assert runner.tool_choice == "required"
     assert runner.temperature == pytest.approx(0.7)
     assert runner.pricing["original-model"]["uncached_input_cost_per_million"] == pytest.approx(1.0)
     assert runner.workspace_dir == run_dir.resolve()

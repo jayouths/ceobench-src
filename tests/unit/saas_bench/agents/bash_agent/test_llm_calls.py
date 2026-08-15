@@ -140,10 +140,12 @@ def test_response_callback_consumes_initial_observation_once():
 def test_decision_agent_request_builder_uses_config_without_hidden_defaults():
     agent = BashAgent.__new__(BashAgent)
     agent.model = "decision-test"
+    agent.api_type = "openai_responses"
     agent.max_output_tokens = 345
     agent.temperature = 0.51
     agent.top_p = 0.92
     agent.reasoning_effort = "none"
+    agent.tool_choice = "required"
     agent.request_options = {}
     agent._get_system_prompt_with_memory = lambda: "system"
 
@@ -153,6 +155,7 @@ def test_decision_agent_request_builder_uses_config_without_hidden_defaults():
     assert params["temperature"] == pytest.approx(0.51)
     assert params["top_p"] == pytest.approx(0.92)
     assert params["reasoning"] == {"effort": "none", "summary": "auto"}
+    assert params["tool_choice"] == "required"
 
     agent.temperature = None
     agent.top_p = None
@@ -342,6 +345,7 @@ def test_anthropic_agent_does_not_create_unpriced_prompt_cache():
         client=SimpleNamespace(messages=SimpleNamespace(create=create)),
         model="test-model",
         api_type="anthropic_messages",
+        tool_choice="required",
         max_invalid_responses_per_turn=2,
         max_output_tokens=100,
     )
@@ -363,6 +367,7 @@ def test_anthropic_agent_does_not_create_unpriced_prompt_cache():
 
     assert action == run_test.Action(tool="bash", arguments={"command": "pwd"})
     assert len(calls) == 1
+    assert calls[0]["tool_choice"] == {"type": "any"}
     assert "cache_control" not in json.dumps(calls[0])
     assert agent.last_input_tokens == 11
     assert agent.last_output_tokens == 7
@@ -386,6 +391,8 @@ def test_anthropic_agent_does_not_retry_bad_requests():
     agent.conversation = []
     agent._get_system_prompt_with_memory = lambda: "system"
     agent.model = "test-model"
+    agent.api_type = "anthropic_messages"
+    agent.tool_choice = "required"
     agent.max_output_tokens = 100
     agent.temperature = None
     agent.top_p = None

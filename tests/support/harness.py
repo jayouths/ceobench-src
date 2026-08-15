@@ -90,6 +90,7 @@ def make_checkpoint_runner(tmp_path):
     runner.api_type = "openai_responses"
     runner.base_url = None
     runner.reasoning_effort = None
+    runner.tool_choice = "required"
     runner.seed = 42
     runner.scenario = "default"
     runner.agent = None

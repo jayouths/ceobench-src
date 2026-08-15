@@ -24,6 +24,7 @@ def test_experiment_config_loads_all_experiment_and_model_fields():
     assert config.modules.analysis.max_enterprise_threads == 50
     assert config.analysis is None
     assert config.decision_agent.model == "qwen3-coder:30b"
+    assert config.decision_agent.tool_choice == "required"
     assert config.decision_agent.reasoning_effort is None
     assert config.decision_agent.temperature == pytest.approx(0.7)
     assert config.decision_agent.pricing["qwen3-coder:30b"] == {
@@ -163,6 +164,7 @@ def test_smoke_config_is_limited_to_one_week():
 
     assert config.experiment.days == 7
     assert config.experiment.label == "smoke-qwen-coder"
+    assert config.decision_agent.tool_choice == "required"
 
 def test_deepseek_smoke_config_uses_official_peak_prices():
     config = load_experiment_config(
@@ -172,6 +174,7 @@ def test_deepseek_smoke_config_uses_official_peak_prices():
     assert config.experiment.days == 7
     assert config.decision_agent.model == "deepseek-v4-pro"
     assert config.decision_agent.reasoning_effort == "low"
+    assert config.decision_agent.tool_choice == "auto"
     assert config.decision_agent.api_key_env == "DEEPSEEK_API_KEY"
     assert config.decision_agent.pricing["deepseek-v4-pro"] == {
         "currency": "USD",
@@ -198,6 +201,7 @@ def test_autodl_models_map_to_official_deepseek_pricing():
     )
 
     assert config.decision_agent.model == "deepseek-v4-pro-202606"
+    assert config.decision_agent.tool_choice == "auto"
     assert config.decision_agent.pricing_model_map == {
         "deepseek-v4-pro-202606": "deepseek-v4-pro",
         "DeepSeek-V4-Pro": "deepseek-v4-pro",
@@ -245,7 +249,7 @@ def test_full_config_uses_benchmark_horizon():
         ),
         (
             "[experiment]\nmax_decision_turns_per_batch = 100\nmax_invalid_responses_per_turn = 3\n"
-            "[models.decision_agent]\nprovider = 'openai'\napi_type = 'openai_responses'\nmodel = 'decision'\nmax_output_tokens = 100\napi_key_required = false\n[models.decision_agent.pricing.decision]\ncurrency = 'USD'\nuncached_input_cost_per_million = 0\ncached_input_cost_per_million = 0\noutput_cost_per_million = 0\n",
+            "[models.decision_agent]\nprovider = 'openai'\napi_type = 'openai_responses'\ntool_choice = 'required'\nmodel = 'decision'\nmax_output_tokens = 100\napi_key_required = false\n[models.decision_agent.pricing.decision]\ncurrency = 'USD'\nuncached_input_cost_per_million = 0\ncached_input_cost_per_million = 0\noutput_cost_per_million = 0\n",
             "models.social_llm must be explicitly configured",
         ),
     ],
@@ -268,6 +272,29 @@ def test_decision_turn_limit_must_be_explicit(tmp_path):
         ValueError, match="max_decision_turns_per_batch"
     ):
         load_experiment_config(path)
+
+
+def test_decision_tool_choice_must_be_explicit_and_valid(tmp_path):
+    text = (PROJECT_ROOT / "experiments/smoke.toml").read_text()
+    missing_path = tmp_path / "missing-tool-choice.toml"
+    missing_path.write_text(
+        re.sub(r"^tool_choice\s*=.*\n", "", text, count=1, flags=re.MULTILINE)
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"models\.decision_agent must explicitly configure: tool_choice",
+    ):
+        load_experiment_config(missing_path)
+
+    invalid_path = tmp_path / "invalid-tool-choice.toml"
+    invalid_path.write_text(text.replace('tool_choice = "required"', 'tool_choice = "always"', 1))
+
+    with pytest.raises(
+        ValueError,
+        match=r"models\.decision_agent\.tool_choice must be one of: auto, required",
+    ):
+        load_experiment_config(invalid_path)
 
 def test_invalid_response_limit_must_be_explicit(tmp_path):
     path = tmp_path / "missing-invalid-response-limit.toml"

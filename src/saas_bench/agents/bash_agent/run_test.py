@@ -35,10 +35,10 @@ if str(package_root) not in sys.path:
     sys.path.insert(0, str(package_root))
 
 DEFAULT_EXPERIMENT_CONFIG = package_root.parent / "experiments" / "experiment.toml"
-RUN_CONFIG_FORMAT_VERSION = 6
+RUN_CONFIG_FORMAT_VERSION = 7
 RUN_CONFIG_FIELDS = {
     "format_version", "run_id", "agent_type", "model", "provider", "api_type",
-    "base_url", "reasoning_effort", "temperature", "top_p", "max_output_tokens",
+    "base_url", "reasoning_effort", "temperature", "top_p", "tool_choice", "max_output_tokens",
     "timeout_seconds", "request_options", "pricing", "pricing_model_map", "api_key_env",
     "api_key_required", "seed", "scenario", "total_days", "initial_cash",
     "max_decision_turns_per_batch", "max_invalid_responses_per_turn", "label", "simulator_llm",
@@ -54,6 +54,7 @@ from saas_bench.llm_provider import (
     model_token_cost,
     validate_provider_api_type,
     validate_reasoning_effort,
+    validate_tool_choice,
 )
 
 from saas_bench.environment import Action
@@ -133,6 +134,7 @@ class BashAgentRunner:
         reasoning_effort: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        tool_choice: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
         timeout_seconds: float = 600.0,
         request_options: Optional[Dict[str, Any]] = None,
@@ -158,6 +160,7 @@ class BashAgentRunner:
             raise ValueError("decision-agent api_type must be explicitly configured")
         validate_provider_api_type(provider, api_type, "models.decision_agent")
         validate_reasoning_effort(api_type, reasoning_effort, "models.decision_agent")
+        validate_tool_choice(tool_choice, "models.decision_agent")
         self.model = model
         self.provider = provider
         self.api_type = api_type
@@ -199,6 +202,7 @@ class BashAgentRunner:
             raise ValueError("timeout_seconds must be positive")
         self.temperature = temperature
         self.top_p = top_p
+        self.tool_choice = tool_choice
         self.max_output_tokens = max_output_tokens
         self.timeout_seconds = float(timeout_seconds)
         self.request_options = dict(request_options or {})
@@ -2219,6 +2223,7 @@ __pycache__/
                 reasoning_effort=self.reasoning_effort,
                 temperature=self.temperature,
                 top_p=self.top_p,
+                tool_choice=self.tool_choice,
                 max_output_tokens=self.max_output_tokens,
                 timeout_seconds=self.timeout_seconds,
                 request_options=self.request_options,
@@ -2263,6 +2268,7 @@ __pycache__/
             'reasoning_effort': self.reasoning_effort,
             'temperature': self.temperature,
             'top_p': self.top_p,
+            'tool_choice': self.tool_choice,
             'max_output_tokens': self.max_output_tokens,
             'timeout_seconds': self.timeout_seconds,
             'request_options': self.request_options,
@@ -3018,6 +3024,7 @@ def _new_experiment_runner(config_path: Path) -> BashAgentRunner:
         reasoning_effort=decision.reasoning_effort,
         temperature=decision.temperature,
         top_p=decision.top_p,
+        tool_choice=decision.tool_choice,
         max_output_tokens=decision.max_output_tokens,
         timeout_seconds=decision.timeout_seconds,
         request_options=decision.request_options,
@@ -3115,6 +3122,7 @@ def _resume_runner(value: str) -> BashAgentRunner:
         reasoning_effort=saved["reasoning_effort"],
         temperature=saved["temperature"],
         top_p=saved["top_p"],
+        tool_choice=saved["tool_choice"],
         max_output_tokens=saved["max_output_tokens"],
         timeout_seconds=saved["timeout_seconds"],
         request_options=saved["request_options"],

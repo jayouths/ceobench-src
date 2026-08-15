@@ -15,6 +15,7 @@ SUPPORTED_API_TYPES = {
     API_OPENAI_CHAT,
 }
 _REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
+_TOOL_CHOICES = {"auto", "required"}
 
 
 class MissingModelPricingError(ValueError):
@@ -93,6 +94,23 @@ def validate_reasoning_effort(
             f"{section}.reasoning_effort is not supported for Anthropic Messages; "
             "configure native thinking parameters in request_options"
         )
+
+
+def validate_tool_choice(tool_choice: Optional[str], section: str) -> None:
+    """Validate the provider-independent decision-agent tool policy."""
+    if tool_choice not in _TOOL_CHOICES:
+        allowed = ", ".join(sorted(_TOOL_CHOICES))
+        raise ValueError(f"{section}.tool_choice must be one of: {allowed}")
+
+
+def api_tool_choice(api_type: str, tool_choice: str) -> Any:
+    """Translate one decision-agent tool policy to the selected API protocol."""
+    validate_tool_choice(tool_choice, "model")
+    if api_type == API_ANTHROPIC_MESSAGES:
+        return {"type": "any" if tool_choice == "required" else "auto"}
+    if api_type in {API_OPENAI_RESPONSES, API_OPENAI_CHAT}:
+        return tool_choice
+    raise ValueError(f"Unsupported api_type: {api_type!r}")
 
 
 def create_llm_client(

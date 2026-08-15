@@ -12,7 +12,7 @@ _SIMULATOR_PROVIDERS = set(_DECISION_PROVIDERS)
 _REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 _MODEL_KEYS = {
     "provider", "api_type", "model", "base_url", "api_key_env", "api_key_required", "reasoning_effort",
-    "temperature", "top_p", "max_output_tokens", "timeout_seconds",
+    "temperature", "top_p", "tool_choice", "max_output_tokens", "timeout_seconds",
     "pricing", "pricing_model_map", "request_options", "tasks",
 }
 _TASK_KEYS = {
@@ -57,6 +57,7 @@ class ModelSettings:
     reasoning_effort: Optional[str] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
+    tool_choice: Optional[str] = None
     timeout_seconds: float = 600.0
     pricing: dict[str, dict[str, Any]] = field(default_factory=dict)
     pricing_model_map: dict[str, str] = field(default_factory=dict)
@@ -112,6 +113,7 @@ def load_experiment_config(path: Optional[Path]) -> ExperimentConfig:
         _DECISION_PROVIDERS,
         "models.decision_agent",
         valid_tasks=set(),
+        require_tool_choice=True,
     )
     social_llm = _load_model(
         _required_table(models_raw.get("social_llm"), "models.social_llm"),
@@ -231,9 +233,13 @@ def _load_model(
     valid_providers: set[str],
     section: str,
     valid_tasks: set[str],
+    require_tool_choice: bool = False,
 ) -> ModelSettings:
     _reject_unknown(raw, _MODEL_KEYS, section)
-    missing = sorted({"provider", "api_type", "model", "max_output_tokens"} - set(raw))
+    required = {"provider", "api_type", "model", "max_output_tokens"}
+    if require_tool_choice:
+        required.add("tool_choice")
+    missing = sorted(required - set(raw))
     if missing:
         raise ValueError(
             f"{section} must explicitly configure: {', '.join(missing)}"
@@ -248,7 +254,11 @@ def _load_model(
     api_type = raw["api_type"]
     if not isinstance(api_type, str):
         raise ValueError(f"{section}.api_type must be a string")
-    from .llm_provider import validate_provider_api_type, validate_reasoning_effort
+    from .llm_provider import (
+        validate_provider_api_type,
+        validate_reasoning_effort,
+        validate_tool_choice,
+    )
     validate_provider_api_type(provider, api_type, section)
 
     pricing = _load_pricing(raw.get("pricing"), section)
@@ -272,6 +282,7 @@ def _load_model(
         "reasoning_effort": raw.get("reasoning_effort"),
         "temperature": raw.get("temperature"),
         "top_p": raw.get("top_p"),
+        "tool_choice": raw.get("tool_choice"),
         "max_output_tokens": raw["max_output_tokens"],
         "timeout_seconds": raw.get("timeout_seconds", 600.0),
         "pricing": pricing,
@@ -313,6 +324,10 @@ def _load_model(
         )
     reasoning = values["reasoning_effort"]
     validate_reasoning_effort(api_type, reasoning, section)
+    if require_tool_choice:
+        validate_tool_choice(values["tool_choice"], section)
+    elif values["tool_choice"] is not None:
+        raise ValueError(f"{section}.tool_choice is only valid for models.decision_agent")
 
     for task_name, task_values in values["tasks"].items():
         validate_reasoning_effort(

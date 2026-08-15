@@ -22,6 +22,7 @@ max_enterprise_threads = 50             # signals.json 最多保留的开放企�
 [models.decision_agent]
 provider = "openai_compatible"           # 客户端类型；Ollama 使用 openai_compatible
 api_type = "openai_responses"            # API 协议，不根据 URL 或模型名推断
+tool_choice = "required"                  # 决策模型每次响应必须包含工具调用
 model = "qwen3-coder:30b"                # 请求模型名
 base_url = "http://localhost:11434/v1"   # OpenAI 兼容接口地址
 api_key_env = "OPENAI_API_KEY"           # API Key 环境变量名，不在此写入密钥

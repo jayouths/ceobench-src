@@ -21,6 +21,7 @@ max_enterprise_threads = 50             # signals.json 最多保留的开放企�
 [models.decision_agent]
 provider = "openai_compatible"
 api_type = "openai_responses"
+tool_choice = "auto"                  # DeepSeek Thinking 模式不支持 required
 model = "deepseek-v4-pro"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"

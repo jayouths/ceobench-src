@@ -21,6 +21,7 @@ max_enterprise_threads = 50             # signals.json 最多保留的开放企�
 [models.decision_agent]
 provider = "openai_compatible"
 api_type = "openai_chat_completions"
+tool_choice = "auto"                  # AutoDL DeepSeek Thinking 模式不支持 required
 model = "deepseek-v4-pro-202606"
 base_url = "https://www.autodl.art/api/v1"
 api_key_env = "AUTODL_API_KEY"
