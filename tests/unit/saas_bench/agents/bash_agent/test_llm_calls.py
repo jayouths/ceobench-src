@@ -1,6 +1,5 @@
 """Bash Agent 对应逻辑的快速单元测试。"""
 
-import hashlib
 import json
 
 from types import SimpleNamespace
@@ -102,13 +101,7 @@ def test_analysis_initial_observation_is_auditable_without_repeated_context(tmp_
         json.loads(line) for line in runner.response_log_file.read_text().splitlines()
     ]
     assert first["initial_observation"] == observation
-    assert first["initial_observation_sha256"] == hashlib.sha256(
-        observation.encode("utf-8")
-    ).hexdigest()
     assert first["analysis_brief_injected"] is True
-    assert first["analysis_brief_sha256"] == hashlib.sha256(
-        brief.encode("utf-8")
-    ).hexdigest()
     assert "initial_observation" not in second
     assert "analysis_brief_injected" not in second
 
@@ -126,7 +119,6 @@ def test_baseline_initial_observation_records_original_dashboard(tmp_path):
     entry = json.loads(runner.response_log_file.read_text())
     assert entry["initial_observation"] == "baseline dashboard"
     assert entry["analysis_brief_injected"] is False
-    assert "analysis_brief_sha256" not in entry
 
 
 def test_response_callback_consumes_initial_observation_once():

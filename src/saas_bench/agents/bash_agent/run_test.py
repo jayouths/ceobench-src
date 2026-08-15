@@ -943,11 +943,8 @@ class BashAgentRunner:
             if self.agent else None
         )
         if initial_observation is not None:
-            # 保存实际进入模型请求的周初 observation，并与 Analysis 产物做精确校验。
+            # 保存实际进入模型请求的周初 observation，完整正文已经足够用于实验审计。
             entry["initial_observation"] = initial_observation
-            entry["initial_observation_sha256"] = hashlib.sha256(
-                initial_observation.encode("utf-8")
-            ).hexdigest()
             entry["analysis_brief_injected"] = False
             if self.analysis_enabled:
                 brief_path = self._analysis_brief_path(day)
@@ -956,9 +953,6 @@ class BashAgentRunner:
                     expected_suffix = f"\n\n---\n\n{brief}"
                     if initial_observation.endswith(expected_suffix):
                         entry["analysis_brief_injected"] = True
-                        entry["analysis_brief_sha256"] = hashlib.sha256(
-                            brief.encode("utf-8")
-                        ).hexdigest()
         with open(self.response_log_file, 'a') as f:
             f.write(json.dumps(entry) + "\n")
 
