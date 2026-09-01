@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from saas_bench.config import BenchmarkConfig, compute_quota_quality_factor
+from saas_bench.simulator.config import BenchmarkConfig, compute_quota_quality_factor
 
 
 def test_quality_price_curve_and_acceptance_rule(make_initialized_sim):

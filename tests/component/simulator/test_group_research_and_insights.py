@@ -2,8 +2,8 @@
 
 import pytest
 
-from saas_bench.config import CUSTOMER_GROUPS
-from saas_bench.database import get_cash, get_group_info_level
+from saas_bench.simulator.config import CUSTOMER_GROUPS
+from saas_bench.simulator.database import get_cash, get_group_info_level
 
 
 def test_group_research_is_delayed_and_updates_visibility_on_completion(

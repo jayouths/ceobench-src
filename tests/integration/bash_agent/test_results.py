@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from saas_bench.agents.bash_agent.run_test import BashAgentRunner, _resume_runner
+from saas_bench.agents.bash_agent.runner import BashAgentRunner
 
 
 from tests.support.harness import (
@@ -95,14 +95,11 @@ def test_run_returns_existing_terminal_result_without_starting_resources(tmp_pat
         "days_run": 7,
         "final_cash": 850_000.0,
     }))
-    runner._start_performance_poster = lambda: pytest.fail(
-        "must not start performance poster"
-    )
     runner._run_experiment = lambda verbose: pytest.fail("must not run experiment")
 
     assert runner.run(verbose=False) == result
 
-def test_runner_rejects_terminal_result_that_disagrees_with_checkpoint(tmp_path):
+def test_runner_rebuilds_stale_terminal_result_from_checkpoint(tmp_path):
     runner = _checkpoint_runner(tmp_path)
     runner.continue_from = runner.workspace_dir
     runner.seed = 42
@@ -139,8 +136,10 @@ def test_runner_rejects_terminal_result_that_disagrees_with_checkpoint(tmp_path)
         "final_cash": 850_000.0,
     }))
 
-    with pytest.raises(RuntimeError, match="authoritative artifacts"):
-        runner._load_or_rebuild_terminal_result()
+    rebuilt = runner._load_or_rebuild_terminal_result()
+
+    assert rebuilt["final_cash"] == pytest.approx(850_000.0)
+    assert json.loads((runner.workspace_dir / "result.json").read_text()) == rebuilt
 
 def test_runner_rebuilds_missing_terminal_result_from_consistent_artifacts(tmp_path):
     runner = _checkpoint_runner(tmp_path)
@@ -190,7 +189,7 @@ def test_runner_rebuilds_missing_terminal_result_from_consistent_artifacts(tmp_p
     assert result["resumable"] is False
     assert json.loads((runner.workspace_dir / "result.json").read_text()) == result
 
-def test_runner_rejects_disagreeing_terminal_artifacts(tmp_path):
+def test_runner_ignores_redundant_terminal_artifacts(tmp_path):
     runner = _checkpoint_runner(tmp_path)
     runner.continue_from = runner.workspace_dir
     runner.seed = 42
@@ -219,8 +218,10 @@ def test_runner_rejects_disagreeing_terminal_artifacts(tmp_path):
         "final_cash": 850_000.0,
     }))
 
-    with pytest.raises(RuntimeError, match="artifacts disagree"):
-        runner._load_or_rebuild_terminal_result()
+    result = runner._load_or_rebuild_terminal_result()
+
+    assert result["outcome"] == "completed"
+    assert result["final_cash"] == pytest.approx(850_000.0)
 
 def test_runner_repairs_interrupted_terminal_finalization(tmp_path):
     runner = _checkpoint_runner(tmp_path)
@@ -266,7 +267,7 @@ def test_runner_repairs_interrupted_terminal_finalization(tmp_path):
     assert runner._load_or_rebuild_terminal_result() is None
 
     runner._resume_checkpoint = checkpoint
-    runner._refresh_public_workspace_artifacts = lambda: None
+    runner.workspace_repository.refresh_public_artifacts = lambda public_dir: None
     runner._launch_server = lambda: None
     runner._http_get = lambda path: {"day": 7}
     runner._launch_server_from_prepared_checkpoint()

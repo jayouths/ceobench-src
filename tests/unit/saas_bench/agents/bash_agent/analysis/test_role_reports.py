@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from saas_bench.agents.bash_agent import run_test
+from saas_bench.agents.bash_agent.analysis import pipeline as pipeline_module
 from saas_bench.agents.bash_agent.analysis.models import (
     Role,
     AnalysisCallKind,
@@ -18,9 +18,9 @@ from saas_bench.agents.bash_agent.analysis.role_reports import (
     RoleReportGenerator,
 )
 from saas_bench.agents.bash_agent.analysis.signals import SignalCollector
-from saas_bench.agents.bash_agent.run_test import BashAgentRunner
-from saas_bench.public_week_snapshot import build_public_week_snapshot
-from saas_bench.llm_provider import TextLLMResult
+from saas_bench.simulator.public_week_snapshot import build_public_week_snapshot
+from saas_bench.experiment.llm_provider import TextLLMResult
+from tests.support.harness import make_analysis_pipeline
 
 
 _PREFIX = {
@@ -32,11 +32,11 @@ _PREFIX = {
 
 _METRIC = {
     Role.MARKET: ("market.effective_leads.individual", "insufficient_data"),
-    Role.FINANCE: ("finance.current_cash", "flat"),
-    Role.PRODUCT: ("product.configuration.current.tier_a", "flat"),
+    Role.FINANCE: ("finance.current_cash", "insufficient_data"),
+    Role.PRODUCT: ("product.configuration.current.tier_a", "insufficient_data"),
     Role.CUSTOMER: (
         "customer.customer_base.active_individual_accounts",
-        "flat",
+        "insufficient_data",
     ),
 }
 
@@ -218,14 +218,34 @@ def test_generator_repairs_metric_direction_mismatch(day_zero_signals):
     assert "metric direction mismatch" in observed[1]
 
 
-def test_runner_writes_reuses_and_summarizes_role_reports(
+def test_generator_rejects_invented_direction_for_point_in_time_metric(
+    day_zero_signals,
+):
+    observed = []
+
+    def call_model(day, role, attempt, call_kind, system_prompt, user_prompt):
+        observed.append(user_prompt)
+        text = _valid_response(role)
+        if role is Role.FINANCE and attempt == 1:
+            payload = json.loads(text)
+            payload["evidence"][0]["direction"] = "up"
+            text = json.dumps(payload, ensure_ascii=False)
+        return RoleCallOutcome(text=text, usage=_usage(role, attempt, call_kind))
+
+    artifact = RoleReportGenerator(
+        call_model,
+        max_schema_retries=1,
+    ).generate(day_zero_signals)
+
+    assert len(artifact.calls) == 5
+    assert "expected 'insufficient_data', got 'up'" in observed[2]
+
+
+def test_pipeline_writes_reuses_and_summarizes_role_reports(
     tmp_path,
     day_zero_signals,
 ):
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.workspace_dir = tmp_path
-    runner.analysis_enabled = True
-    runner.analysis_module_config = {"max_schema_retries": 1}
+    pipeline = make_analysis_pipeline(tmp_path)
     calls = []
 
     def call_model(day, role, attempt, call_kind, system_prompt, user_prompt):
@@ -235,8 +255,8 @@ def test_runner_writes_reuses_and_summarizes_role_reports(
             usage=_usage(role, attempt, call_kind),
         )
 
-    runner._call_analysis_role_model = call_model
-    artifact, generated = runner._ensure_analysis_role_reports(day_zero_signals)
+    pipeline.call_role_model = call_model
+    artifact, generated = pipeline.ensure_role_reports(day_zero_signals)
     path = tmp_path / "analysis" / "day_000" / "role_reports.json"
 
     assert generated is True
@@ -244,11 +264,11 @@ def test_runner_writes_reuses_and_summarizes_role_reports(
     assert RoleReportsArtifact.model_validate_json(path.read_text()) == artifact
     assert calls == list(Role)
 
-    runner._call_analysis_role_model = lambda *args: (_ for _ in ()).throw(
+    pipeline.call_role_model = lambda *args: (_ for _ in ()).throw(
         AssertionError("completed report must be reused")
     )
-    reused, generated = runner._ensure_analysis_role_reports(day_zero_signals)
-    usage = runner._analysis_usage_summary(0)
+    reused, generated = pipeline.ensure_role_reports(day_zero_signals)
+    usage = pipeline.usage_summary(0)
 
     assert generated is False
     assert reused == artifact
@@ -261,13 +281,11 @@ def test_runner_writes_reuses_and_summarizes_role_reports(
     assert usage["cost_by_currency"]["USD"] == pytest.approx(0.004)
 
 
-def test_runner_records_analysis_call_in_trajectory_with_official_cost(
+def test_pipeline_records_analysis_call_in_trajectory_with_official_cost(
     tmp_path, monkeypatch
 ):
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.analysis_client = object()
-    runner.analysis_model_config = {
-        "provider": "openai_compatible",
+    model_config = {
+        "provider": "openai",
         "api_type": "openai_chat_completions",
         "model": "channel-model",
         "max_output_tokens": 1000,
@@ -286,15 +304,20 @@ def test_runner_records_analysis_call_in_trajectory_with_official_cost(
             }
         },
     }
-    runner.run_id = "test"
-    runner.trajectory_log_file = tmp_path / "trajectory.jsonl"
-    runner.performance_log_file = tmp_path / "performance.jsonl"
-    runner._experiment_log_writer = None
-    runner._performance_queue = None
-    runner._dashboard_url = ""
+    events = []
+    pipeline = make_analysis_pipeline(
+        tmp_path,
+        model_config=model_config,
+        client=object(),
+        log_trajectory=lambda event_type, day, **fields: events.append({
+            "event_type": event_type,
+            "day": day,
+            **fields,
+        }),
+    )
 
     monkeypatch.setattr(
-        run_test,
+        pipeline_module,
         "call_text_model",
         lambda **kwargs: TextLLMResult(
             text=_valid_response(Role.MARKET),
@@ -307,7 +330,7 @@ def test_runner_records_analysis_call_in_trajectory_with_official_cost(
         ),
     )
 
-    outcome = runner._call_analysis_role_model(
+    outcome = pipeline.call_role_model(
         7,
         Role.MARKET,
         1,
@@ -316,7 +339,7 @@ def test_runner_records_analysis_call_in_trajectory_with_official_cost(
         "user",
     )
 
-    event = json.loads(runner.trajectory_log_file.read_text())
+    event = events[0]
     assert outcome.usage.pricing_model == "official-model"
     assert outcome.usage.cost_amount == pytest.approx(0.000131)
     assert event["event_type"] == "llm_call"
@@ -326,8 +349,7 @@ def test_runner_records_analysis_call_in_trajectory_with_official_cost(
 
 
 def test_resume_prunes_llm_artifacts_at_their_independent_checkpoint_boundaries(tmp_path):
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.workspace_dir = tmp_path
+    pipeline = make_analysis_pipeline(tmp_path)
     for day in (0, 7, 14):
         directory = tmp_path / "analysis" / f"day_{day:03d}"
         directory.mkdir(parents=True)
@@ -336,7 +358,7 @@ def test_resume_prunes_llm_artifacts_at_their_independent_checkpoint_boundaries(
         (directory / "state_portrait.json").write_text("portrait")
         (directory / "STRATEGY_BRIEF.md").write_text("brief")
 
-    runner._prune_analysis_artifacts_after(7, {0, 7}, {0})
+    pipeline.prune_artifacts_after(7, {0, 7}, {0})
 
     assert (tmp_path / "analysis" / "day_000" / "role_reports.json").is_file()
     assert (tmp_path / "analysis" / "day_000" / "state_portrait.json").is_file()

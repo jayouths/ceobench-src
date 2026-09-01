@@ -2,14 +2,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from saas_bench.llm_provider import (
-    API_ANTHROPIC_MESSAGES,
+from saas_bench.experiment.llm_provider import (
     API_OPENAI_CHAT,
     API_OPENAI_RESPONSES,
     MissingModelPricingError,
     api_tool_choice,
     call_text_model,
+    create_llm_client,
     model_token_cost,
+    openai_chat_request_parameters,
     openai_chat_cached_tokens,
     token_cost,
 )
@@ -20,12 +21,22 @@ from saas_bench.llm_provider import (
     [
         (API_OPENAI_CHAT, "required", "required"),
         (API_OPENAI_RESPONSES, "required", "required"),
-        (API_ANTHROPIC_MESSAGES, "required", {"type": "any"}),
-        (API_ANTHROPIC_MESSAGES, "auto", {"type": "auto"}),
+        (API_OPENAI_CHAT, "auto", "auto"),
     ],
 )
-def test_tool_choice_is_mapped_to_each_api_protocol(api_type, policy, expected):
+def test_tool_choice_is_forwarded_to_openai_protocols(api_type, policy, expected):
     assert api_tool_choice(api_type, policy) == expected
+
+
+def test_non_openai_provider_is_rejected():
+    with pytest.raises(ValueError, match="provider must be 'openai'"):
+        create_llm_client(
+            provider="glm",
+            api_type=API_OPENAI_CHAT,
+            api_key="test",
+            base_url=None,
+            timeout_seconds=10,
+        )
 
 
 class Recorder:
@@ -113,7 +124,7 @@ def test_openai_chat_request_and_normalized_result():
     assert result.cached_tokens == 2
     assert result.reasoning_tokens == 1
     assert recorder.calls[0]["reasoning_effort"] == "high"
-    assert recorder.calls[0]["max_completion_tokens"] == 50
+    assert recorder.calls[0]["max_tokens"] == 50
     assert recorder.calls[0]["top_p"] == pytest.approx(0.8)
 
 
@@ -158,68 +169,32 @@ def test_chat_cache_fields_must_not_disagree():
         openai_chat_cached_tokens(usage)
 
 
-def test_anthropic_messages_request_and_normalized_result():
-    recorder = Recorder(SimpleNamespace(
-        model="served-anthropic",
-        content=[SimpleNamespace(text="first"), SimpleNamespace(text="second")],
-        usage=SimpleNamespace(
-            input_tokens=20,
-            cache_read_input_tokens=5,
-            cache_creation_input_tokens=0,
-            output_tokens=9,
-        ),
-    ))
-    client = SimpleNamespace(messages=recorder)
-
-    result = call_text_model(
-        client=client,
-        api_type=API_ANTHROPIC_MESSAGES,
-        model="claude-sonnet-test",
-        system_prompt="system",
-        user_prompt="user",
-        max_output_tokens=200,
+def test_chat_parameters_and_private_options_are_forwarded():
+    params = openai_chat_request_parameters(
+        model="GLM-5.3",
+        max_output_tokens=4096,
         temperature=None,
         top_p=None,
-        reasoning_effort=None,
+        reasoning_effort="low",
+        tool_choice="required",
         request_options={
-            "thinking": {"type": "adaptive"},
-            "output_config": {"effort": "medium"},
+            "extra_body": {
+                "do_sample": False,
+                "stream": False,
+                "thinking": {"type": "enabled", "clear_thinking": True},
+                "response_format": {"type": "text"},
+            }
         },
     )
 
-    assert (result.text, result.model, result.input_tokens, result.output_tokens) == (
-        "first\nsecond", "served-anthropic", 25, 9,
-    )
-    assert result.cached_tokens == 5
-    assert result.reasoning_tokens == 0
-    assert recorder.calls[0]["thinking"] == {"type": "adaptive"}
-    assert recorder.calls[0]["output_config"] == {"effort": "medium"}
-
-
-def test_anthropic_cache_creation_fails_until_its_price_is_supported():
-    recorder = Recorder(SimpleNamespace(
-        model="served-anthropic",
-        content=[SimpleNamespace(text="response")],
-        usage=SimpleNamespace(
-            input_tokens=20,
-            cache_read_input_tokens=0,
-            cache_creation_input_tokens=3,
-            output_tokens=9,
-        ),
-    ))
-
-    with pytest.raises(NotImplementedError, match="cache creation pricing"):
-        call_text_model(
-            client=SimpleNamespace(messages=recorder),
-            api_type=API_ANTHROPIC_MESSAGES,
-            model="claude-sonnet-test",
-            system_prompt="system",
-            user_prompt="user",
-            max_output_tokens=200,
-            temperature=None,
-            top_p=None,
-            reasoning_effort=None,
-        )
+    assert params["max_tokens"] == 4096
+    assert "max_completion_tokens" not in params
+    assert params["reasoning_effort"] == "low"
+    assert params["tool_choice"] == "required"
+    assert params["extra_body"]["thinking"] == {
+        "type": "enabled",
+        "clear_thinking": True,
+    }
 
 
 def test_cost_uses_served_model_and_rejects_unknown_model():

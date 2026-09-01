@@ -2,8 +2,8 @@
 
 import pytest
 
-from saas_bench.config import BenchmarkConfig
-from saas_bench.database import (
+from saas_bench.simulator.config import BenchmarkConfig
+from saas_bench.simulator.database import (
     get_cash,
     get_group_info_level,
     get_undiscovered_groups,

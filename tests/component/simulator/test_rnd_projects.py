@@ -2,8 +2,8 @@
 
 import pytest
 
-from saas_bench.config import RESEARCH_TIERS_BY_ID
-from saas_bench.database import get_cash, get_global_state
+from saas_bench.simulator.config import RESEARCH_TIERS_BY_ID
+from saas_bench.simulator.database import get_cash, get_global_state
 
 
 def test_research_project_completion_applies_sampled_quality_boost(

@@ -3,7 +3,7 @@
 A Claude Code-style agent that uses bash and file tools to interact with the
 NovaMind SaaS simulator via the novamind_api Python library and CLI.
 
-Supports OpenAI-compatible APIs (OpenAI, xAI) and Anthropic APIs (direct, Bedrock).
+Supports OpenAI and OpenAI-compatible APIs through the OpenAI SDK.
 """
 
 import json
@@ -11,12 +11,13 @@ import os
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 
 from ..base import BaseAgent
-from ...environment import Action
-from ...llm_provider import (
+from ...simulator.environment import Action
+from ...experiment.llm_provider import (
     api_tool_choice,
+    openai_chat_request_parameters,
     openai_chat_cached_tokens,
     validate_tool_choice,
 )
@@ -26,7 +27,7 @@ from ...llm_provider import (
 class Message:
     """A message in the conversation."""
     role: str  # 'system', 'user', 'assistant', 'tool'
-    content: Any  # str or list (Anthropic content blocks)
+    content: Any  # str or Responses API output items
     tool_calls: Optional[List[Dict]] = None
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
@@ -44,7 +45,6 @@ class BashAgent(BaseAgent):
     contents + the new dashboard.
     """
 
-    CHECKPOINT_SNAPSHOT_FORMAT_VERSION = 2
     # 推进命令的完整参数只在权威 CLI 文档中维护，避免多处示例过期。
     NO_TOOL_FEEDBACK = (
         "You must call a tool to proceed. If you need context, use read_file, "
@@ -106,8 +106,6 @@ class BashAgent(BaseAgent):
         self.tool_result_callback = tool_result_callback
         self.workspace_path = workspace_path or Path('.')
         self.total_days = total_days
-
-        self.use_anthropic = api_type == "anthropic_messages"
 
         # Build system prompt
         self.system_prompt = system_prompt or self._default_system_prompt()
@@ -247,12 +245,10 @@ class BashAgent(BaseAgent):
         self.conversation = []
         self._pending_tool_calls = []
 
-        if not self.use_anthropic:
-            # OpenAI 协议把系统提示放入对话；Anthropic 在请求参数中单独传递。
-            self.conversation.append(Message(
-                role='system',
-                content=self._get_system_prompt_with_memory(),
-            ))
+        self.conversation.append(Message(
+            role='system',
+            content=self._get_system_prompt_with_memory(),
+        ))
 
     def act(self, observation: str, reward: float, done: bool, info: Dict[str, Any]) -> Optional[Action]:
         """Choose an action based on the observation.
@@ -280,26 +276,13 @@ class BashAgent(BaseAgent):
             # checkpoint 已把最后一次工具结果写入对话，恢复后的首轮不能重复追加 Dashboard。
             self._skip_next_observation = False
         elif self._pending_tool_calls:
-            if self.use_anthropic:
-                partial_results = self._pending_tool_calls[0].get('_partial_results', [])
-                tool_results = [{
-                    'type': 'tool_result',
-                    'tool_use_id': self._pending_tool_calls[0]['id'],
-                    'content': observation,
-                }]
-                tool_results.extend(partial_results)
+            for tc in self._pending_tool_calls:
                 self.conversation.append(Message(
-                    role='user',
-                    content=tool_results,
+                    role='tool',
+                    content=observation,
+                    tool_call_id=tc['id'],
+                    name=tc['name']
                 ))
-            else:
-                for tc in self._pending_tool_calls:
-                    self.conversation.append(Message(
-                        role='tool',
-                        content=observation,
-                        tool_call_id=tc['id'],
-                        name=tc['name']
-                    ))
             self._pending_tool_calls = []
         else:
             # Add observation as user message (e.g., initial dashboard)
@@ -337,9 +320,7 @@ class BashAgent(BaseAgent):
             return item
         if isinstance(item, (str, int, float, bool)) or item is None:
             return item
-        # Anthropic content blocks may be objects without model_dump; fall back
-        # to repr so we never crash. They won't be replay-correct, but the
-        # snapshot is best-effort and Anthropic uses a different code path.
+        # 未知 SDK 对象作为诊断信息保存，不让快照写入中断实验。
         return repr(item)
 
     def _serialize_message(self, m: "Message") -> Dict[str, Any]:
@@ -402,23 +383,13 @@ class BashAgent(BaseAgent):
                     raise ValueError(
                         "pending_observation is required when checkpointing a pending tool result"
                     )
-                if self.use_anthropic:
-                    partial_results = pending[0].get('_partial_results', [])
-                    tool_results = [{
-                        'type': 'tool_result',
-                        'tool_use_id': pending[0]['id'],
-                        'content': pending_observation,
-                    }]
-                    tool_results.extend(partial_results)
-                    conversation.append(Message(role='user', content=tool_results))
-                else:
-                    for tool_call in pending:
-                        conversation.append(Message(
-                            role='tool',
-                            content=pending_observation,
-                            tool_call_id=tool_call['id'],
-                            name=tool_call['name'],
-                        ))
+                for tool_call in pending:
+                    conversation.append(Message(
+                        role='tool',
+                        content=pending_observation,
+                        tool_call_id=tool_call['id'],
+                        name=tool_call['name'],
+                    ))
             current_day = self.current_day
             turns_today = self.turns_today
         else:
@@ -428,15 +399,11 @@ class BashAgent(BaseAgent):
             turns_today = 0
 
         payload = {
-            "format_version": self.CHECKPOINT_SNAPSHOT_FORMAT_VERSION,
             "resume_conversation": resume_conversation,
-            "tool_results_applied": True,
             "conversation": [self._serialize_message(message) for message in conversation],
-            "pending_tool_calls": [],
             "current_day": current_day,
             "turns_today": turns_today,
             "total_turns": self.total_turns,
-            "saved_at": time.time(),
         }
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -446,36 +413,28 @@ class BashAgent(BaseAgent):
 
     @classmethod
     def parse_checkpoint_snapshot(cls, path: Path) -> Dict[str, Any]:
-        """Read one immutable checkpoint snapshot using its strict schema."""
+        """Read the conversation state required to resume one checkpoint."""
         try:
             payload = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError("Checkpoint conversation snapshot is invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Checkpoint conversation snapshot must be an object")
         required = {
-            "format_version", "resume_conversation", "tool_results_applied",
-            "conversation", "pending_tool_calls", "current_day", "turns_today",
-            "total_turns", "saved_at",
+            "resume_conversation", "conversation", "current_day",
+            "turns_today", "total_turns",
         }
-        if not isinstance(payload, dict) or set(payload) != required:
+        missing = required - payload.keys()
+        if missing:
             raise ValueError(
-                f"Checkpoint conversation fields must contain exactly: {sorted(required)}"
+                f"Checkpoint conversation is missing fields: {sorted(missing)}"
             )
-        if payload["format_version"] != cls.CHECKPOINT_SNAPSHOT_FORMAT_VERSION:
-            raise ValueError("Unsupported checkpoint conversation format_version")
         if not isinstance(payload["resume_conversation"], bool):
             raise ValueError("Checkpoint conversation resume_conversation must be boolean")
-        if payload["tool_results_applied"] is not True:
-            raise ValueError("Checkpoint conversation must include applied tool results")
-        if payload["pending_tool_calls"] != []:
-            raise ValueError("Checkpoint conversation cannot contain pending tool calls")
         for field in ("current_day", "turns_today", "total_turns"):
             value = payload[field]
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ValueError(f"Invalid checkpoint conversation {field}: {value!r}")
-        if not isinstance(payload["saved_at"], (int, float)) or isinstance(
-            payload["saved_at"], bool
-        ):
-            raise ValueError("Checkpoint conversation saved_at must be numeric")
         if not isinstance(payload["conversation"], list):
             raise ValueError("Checkpoint conversation messages must be a list")
         allowed_roles = {"system", "user", "assistant", "tool"}
@@ -483,7 +442,10 @@ class BashAgent(BaseAgent):
             "role", "content", "tool_calls", "tool_call_id", "name"
         }
         for index, message in enumerate(payload["conversation"]):
-            if not isinstance(message, dict) or set(message) != required_message_fields:
+            if (
+                not isinstance(message, dict)
+                or not required_message_fields.issubset(message)
+            ):
                 raise ValueError(
                     f"Invalid checkpoint conversation message at index {index}"
                 )
@@ -512,8 +474,6 @@ class BashAgent(BaseAgent):
 
     def _call_llm(self) -> Optional[Action]:
         """Call the LLM and parse the response into an action."""
-        if self.api_type == "anthropic_messages":
-            return self._call_anthropic()
         if self.api_type == "openai_responses":
             return self._call_openai_responses()
         if self.api_type == "openai_chat_completions":
@@ -521,20 +481,17 @@ class BashAgent(BaseAgent):
         raise ValueError(f"Unsupported decision-agent api_type: {self.api_type!r}")
 
     def _build_openai_chat_kwargs(self, messages, tools) -> Dict[str, Any]:
-        params: Dict[str, Any] = {
-            'model': self.model,
-            'messages': messages,
-            'tools': tools,
-            'tool_choice': api_tool_choice(self.api_type, self.tool_choice),
-            'max_completion_tokens': self.max_output_tokens,
-        }
-        if self.temperature is not None:
-            params['temperature'] = self.temperature
-        if self.top_p is not None:
-            params['top_p'] = self.top_p
-        if self.reasoning_effort is not None:
-            params['reasoning_effort'] = self.reasoning_effort
-        params.update(self.request_options)
+        params = openai_chat_request_parameters(
+            model=self.model,
+            max_output_tokens=self.max_output_tokens,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            reasoning_effort=self.reasoning_effort,
+            request_options=self.request_options,
+            tool_choice=self.tool_choice,
+        )
+        params['messages'] = messages
+        params['tools'] = tools
         return params
 
     def _build_openai_responses_kwargs(self, input_items, tools) -> Dict[str, Any]:
@@ -935,235 +892,3 @@ class BashAgent(BaseAgent):
             except (openai.OpenAIError, LLMTimeoutError):
                 # SDK 已完成有限重试；继续外层重试会让本地服务故障时实验永久卡住。
                 raise
-
-    def _anthropic_content_text(self, content: Any) -> str:
-        """Best-effort text extraction from Anthropic content blocks."""
-        if isinstance(content, str):
-            return content
-        if not isinstance(content, list):
-            return ""
-
-        parts = []
-        for block in content:
-            if isinstance(block, dict):
-                text = block.get('text') or block.get('content')
-            else:
-                text = getattr(block, 'text', None)
-            if text:
-                parts.append(str(text))
-        return "\n".join(parts)
-
-    def _anthropic_response_dict(self, response: Any) -> Dict[str, Any]:
-        """Convert an Anthropic response object to a JSON-safe dict."""
-        if hasattr(response, "model_dump"):
-            return response.model_dump(mode="json", exclude_none=False, by_alias=True)
-        if isinstance(response, dict):
-            return response
-        return {}
-
-    def _record_anthropic_response_metadata(self, response: Any) -> None:
-        """Track the model actually returned by Anthropic for logging."""
-        response_dict = self._anthropic_response_dict(response)
-        self.last_serving_model = str(response_dict.get('model') or self.model)
-
-    def _anthropic_no_tool_feedback(self, response: Any, assistant_content: Any) -> str:
-        """Feedback used when Anthropic returns text instead of a tool."""
-        preview = self._anthropic_content_text(assistant_content).strip()
-        if len(preview) > 1200:
-            preview = preview[:1200] + "..."
-
-        return (
-            f"{self.NO_TOOL_FEEDBACK} "
-            f"Previous non-tool response preview: {preview or '(no text)'}"
-        )
-
-    def _call_anthropic(self) -> Optional[Action]:
-        """Call Anthropic/Bedrock API and parse the response."""
-        import anthropic
-        import copy
-
-        no_tool_retries = 0
-
-        while True:
-            messages = []
-            for msg in self.conversation:
-                if msg.role == 'system':
-                    continue
-                messages.append({'role': msg.role, 'content': copy.deepcopy(msg.content)})
-
-            # 价格模型尚未表达 Anthropic 缓存写入及其 TTL 价格，
-            # 因此默认路径不主动创建缓存断点。恢复的历史中若存在
-            # cache_control，也必须移除，避免断点续跑时意外产生未计价写入。
-            def _strip_cache_control(content):
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and 'cache_control' in block:
-                            del block['cache_control']
-
-            for msg in messages:
-                _strip_cache_control(msg.get('content'))
-
-            system_text = self._get_system_prompt_with_memory()
-            system_content = system_text
-
-            from .tools import get_bash_agent_anthropic_tools
-            tools = get_bash_agent_anthropic_tools()
-
-            api_kwargs = {
-                'model': self.model,
-                'max_tokens': self.max_output_tokens,
-                'system': system_content,
-                'messages': messages,
-                'tools': tools,
-                'tool_choice': api_tool_choice(self.api_type, self.tool_choice),
-            }
-            if self.temperature is not None:
-                api_kwargs['temperature'] = self.temperature
-            if self.top_p is not None:
-                api_kwargs['top_p'] = self.top_p
-            api_kwargs.update(self.request_options)
-            anthropic_messages = self.client.messages
-
-            # Anthropic SDK refuses non-streaming when max_tokens implies > 10min
-            # budget (raised in _calculate_nonstreaming_timeout). Always stream
-            # for max_tokens > 64000.
-            use_streaming = api_kwargs['max_tokens'] > 64000
-            if 'thinking' in api_kwargs:
-                use_streaming = True
-
-            try:
-                call_started = time.monotonic()
-                if use_streaming:
-                    with anthropic_messages.stream(**api_kwargs) as stream:
-                        response = stream.get_final_message()
-                else:
-                    response = anthropic_messages.create(**api_kwargs)
-                call_elapsed = time.monotonic() - call_started
-
-                self.total_turns += 1
-                self._consecutive_errors = 0
-                self._record_anthropic_response_metadata(response)
-
-                # Capture token usage (Anthropic format)
-                usage = getattr(response, 'usage', None)
-                if usage:
-                    uncached_input_tokens = getattr(usage, 'input_tokens', 0) or 0
-                    self.last_output_tokens = getattr(usage, 'output_tokens', 0) or 0
-                    # Anthropic 的 input_tokens 不含缓存读写，统一归一为总输入量。
-                    self.last_cached_tokens = getattr(usage, 'cache_read_input_tokens', 0) or 0
-                    cache_creation_tokens = (
-                        getattr(usage, 'cache_creation_input_tokens', 0) or 0
-                    )
-                    # TODO: Anthropic 缓存写入需要独立价格。计价模型支持前直接
-                    # 中止，避免将其误算成普通输入并污染实验成本。
-                    if cache_creation_tokens:
-                        raise NotImplementedError(
-                            "Anthropic cache creation pricing is not configured; "
-                            "disable prompt-cache writes or extend the pricing model"
-                        )
-                    self.last_input_tokens = (
-                        uncached_input_tokens
-                        + self.last_cached_tokens
-                    )
-                    output_details = getattr(usage, 'output_tokens_details', None)
-                    self.last_reasoning_tokens = (
-                        getattr(output_details, 'thinking_tokens', 0) or 0
-                        if output_details else 0
-                    )
-                else:
-                    self.last_input_tokens = 0
-                    self.last_output_tokens = 0
-                    self.last_cached_tokens = 0
-                    self.last_reasoning_tokens = 0
-                self.total_input_tokens += self.last_input_tokens
-                self.total_output_tokens += self.last_output_tokens
-                self.total_cached_tokens += self.last_cached_tokens
-                self.total_reasoning_tokens += self.last_reasoning_tokens
-
-                self._emit_response_callback(
-                    messages,
-                    self._anthropic_response_dict(response) or str(response),
-                    call_elapsed,
-                )
-
-                assistant_content = response.content
-                self.conversation.append(Message(
-                    role='assistant',
-                    content=assistant_content
-                ))
-
-                tool_use_blocks = [block for block in assistant_content if block.type == 'tool_use']
-                if not tool_use_blocks:
-                    no_tool_retries += 1
-                    stop_reason = getattr(response, 'stop_reason', '') or 'no_tool_use'
-                    if self.tool_result_callback:
-                        self.tool_result_callback(
-                            self.total_turns,
-                            self.current_day,
-                            '_anthropic_no_tool',
-                            {'stop_reason': stop_reason, 'attempt': no_tool_retries},
-                            self._anthropic_content_text(assistant_content),
-                        )
-                    if no_tool_retries >= self.max_invalid_responses_per_turn:
-                        raise RuntimeError(
-                            "Anthropic response did not include a tool_use block after "
-                            f"{no_tool_retries} attempts (last stop_reason={stop_reason!r})."
-                        )
-                    print(
-                        f"  Anthropic returned no tool_use "
-                        f"(stop_reason={stop_reason!r}); feeding feedback and regenerating."
-                    )
-                    self.conversation.append(Message(
-                        role='user',
-                        content=self._anthropic_no_tool_feedback(response, assistant_content),
-                    ))
-                    continue
-
-                first_tool = tool_use_blocks[0]
-
-                # Skip extra parallel tool calls
-                partial_results = []
-                for extra in tool_use_blocks[1:]:
-                    partial_results.append({
-                        'type': 'tool_result',
-                        'tool_use_id': extra.id,
-                        'content': f"[Skipped - only one tool per turn. Call {extra.name} again if needed.]",
-                    })
-
-                self._pending_tool_calls = [{'id': first_tool.id, 'name': first_tool.name, '_partial_results': partial_results}]
-                return Action(tool=first_tool.name, arguments=first_tool.input or {})
-
-            except anthropic.APIError as e:
-                # 只重试 Anthropic SDK 明确报告的 Provider 异常。
-                import traceback
-                status = getattr(e, 'status_code', 0) or 0
-                is_retryable = isinstance(
-                    e, (anthropic.APIConnectionError, anthropic.APITimeoutError)
-                ) or (
-                    isinstance(e, anthropic.APIStatusError)
-                    and (status == 429 or status >= 500)
-                )
-                if not is_retryable:
-                    raise
-                if str(e).startswith("Anthropic response did not include a tool_use block"):
-                    raise
-                error_msg = f"Anthropic LLM call error: {e}"
-                tb = traceback.format_exc()
-                print(f"\n{'='*60}")
-                print(f"ERROR in BashAgent._call_anthropic()")
-                print(f"{'='*60}")
-                print(error_msg)
-                print(f"Traceback:\n{tb}")
-                print(f"{'='*60}\n")
-
-                self._consecutive_errors += 1
-                if self._consecutive_errors <= 3:
-                    wait = 2 ** self._consecutive_errors
-                    print(f"  Retrying in {wait}s (attempt {self._consecutive_errors}/3)...")
-                    time.sleep(wait)
-                    return self._call_anthropic()
-
-                raise RuntimeError(
-                    f"LLM failed {self._consecutive_errors} consecutive times. "
-                    f"Last error: {e}"
-                ) from e

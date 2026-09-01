@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Build the public/ directory from source.
 
-After this runs, public/ contains exactly two artifacts:
+After this runs, public/ contains the generated CLI and documentation alongside
+the source-controlled README and dependency list:
 
     novamind-operation    Single-file zipapp — bundles compiled engine + CLI
-    docs/                 Reference material (docs/api, docs/tables, cli.md,
-                          docs/novamind_api source)
+    docs/                 Generated API, table, CLI and SDK reference material
+    README.md             Static agent instructions
+    requirements.txt      Static public runtime dependencies
 
 The zipapp's ``__main__`` dispatches by environment variable:
 
-    NOVAMIND_SERVER_MODE=1  → saas_bench.server_entry.main() (engine)
+    NOVAMIND_SERVER_MODE=1  → saas_bench.runtime.server_entry.main() (engine)
     (unset)                 → _public_cli.main() (user-facing CLI)
 
 The agent's SDK source lives at docs/novamind_api/ — readable reference material
@@ -38,29 +40,32 @@ PUBLIC_DIR = PROJECT_ROOT / "public"
 SRC_DIR = PROJECT_ROOT / "src" / "saas_bench"
 _FIXED_ZIP_MTIME = 315619200  # 1980-01-02 00:00:00 UTC, avoids local TZ underflow.
 
-# All simulator-engine modules (compiled into the zipapp as .pyc)
+# 公开运行包只包含模拟器、服务运行时及其直接依赖的实验公共能力。
 _ENGINE_MODULES = [
     "__init__",
-    "_embedded_key",
-    "_sql_chunk",
-    "api_server",
-    "config",
-    "customer_llm",
-    "database",
-    "db_protection",
-    "docs_generator",
-    "enterprise",
-    "environment",
-    "event_logger",
-    "json_io",
-    "llm_provider",
-    "llm_replay",
-    "personas",
-    "public_week_snapshot",
-    "server_entry",
-    "shocks",
-    "simulation",
-    "tools",
+    "simulator/__init__",
+    "simulator/_sql_chunk",
+    "simulator/config",
+    "simulator/customer_llm",
+    "simulator/database",
+    "simulator/enterprise",
+    "simulator/environment",
+    "simulator/event_logger",
+    "simulator/llm_replay",
+    "simulator/personas",
+    "simulator/public_week_snapshot",
+    "simulator/shocks",
+    "simulator/simulation",
+    "simulator/tools",
+    "runtime/__init__",
+    "runtime/_embedded_key",
+    "runtime/api_server",
+    "runtime/db_protection",
+    "runtime/docs_generator",
+    "runtime/server_entry",
+    "experiment/__init__",
+    "experiment/json_io",
+    "experiment/llm_provider",
 ]
 
 # novamind_api subpackage used by the engine internally. Bundled as bytecode;
@@ -109,7 +114,7 @@ def build():
 
     # Add source to path for imports
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
-    from saas_bench.docs_generator import render_api_docs, render_table_docs, render_cli_docs
+    from saas_bench.runtime.docs_generator import render_api_docs, render_table_docs, render_cli_docs
 
     docs_dir = PUBLIC_DIR / "docs"
     api_dir = docs_dir / "api"
@@ -145,15 +150,6 @@ def build():
     )
     sdk_files = list(dst_api.glob("*.py"))
     print(f"✅ docs/novamind_api: {len(sdk_files)} files — {[f.name for f in sdk_files]}")
-
-    # Copy README.md + requirements.txt to public root (optional, kept for
-    # user-facing install instructions). If those sources are missing, skip
-    # silently — they're not required for the zipapp to function.
-    for fname in ("README.md", "requirements.txt"):
-        src = PROJECT_ROOT / "public_sources" / fname
-        if src.exists():
-            shutil.copy2(src, PUBLIC_DIR / fname)
-            print(f"  Copied {fname}")
 
     api_files = list(api_dir.glob("*.json"))
     table_files = list(tables_dir.glob("*.json"))
@@ -228,7 +224,7 @@ def _build_zipapp():
         (staging / "__main__.py").write_text(_ZIPAPP_MAIN_SOURCE)
 
         # Compile _public_cli.py → _public_cli.pyc at the archive root
-        src_cli = SRC_DIR / "_public_cli.py"
+        src_cli = SRC_DIR / "runtime" / "_public_cli.py"
         _compile_pyc(src_cli, staging / "_public_cli.pyc", "_public_cli.py")
         _compile_pyc(
             SRC_DIR / "novamind_api" / "_transport.py",
@@ -244,16 +240,21 @@ def _build_zipapp():
         init_tmp = Path(tmp) / "saas_bench_init.py"
         init_tmp.write_text('"""NovaMind simulation engine (compiled)."""\n__version__ = "0.1.0"\n')
         compiled = 0
-        for mod_name in _ENGINE_MODULES:
-            if mod_name == "__init__":
+        for module_path in _ENGINE_MODULES:
+            if module_path == "__init__":
                 src_file = init_tmp
             else:
-                src_file = SRC_DIR / f"{mod_name}.py"
+                src_file = SRC_DIR / f"{module_path}.py"
             if not src_file.exists():
                 print(f"  ⚠️  Missing: {src_file}")
                 continue
-            dst_file = engine_dir / f"{mod_name}.pyc"
-            _compile_pyc(src_file, dst_file, f"saas_bench/{mod_name}.py")
+            dst_file = engine_dir / f"{module_path}.pyc"
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            _compile_pyc(
+                src_file,
+                dst_file,
+                f"saas_bench/{module_path}.py",
+            )
             compiled += 1
 
         # saas_bench/novamind_api/*.pyc for engine internal use
@@ -354,7 +355,7 @@ if os.environ.get("PYTHONHASHSEED") != "0":
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 if os.environ.get("NOVAMIND_SERVER_MODE") == "1":
-    from saas_bench.server_entry import main as _run
+    from saas_bench.runtime.server_entry import main as _run
 else:
     from _public_cli import main as _run
 

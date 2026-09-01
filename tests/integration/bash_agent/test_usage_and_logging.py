@@ -6,11 +6,11 @@ import sqlite3
 
 import pytest
 
-from saas_bench.agents.bash_agent.run_test import BashAgentRunner, _resume_runner
+from saas_bench.agents.bash_agent.runner import BashAgentRunner
 
-from saas_bench.database import add_api_cost, get_api_usage_summary
+from saas_bench.simulator.database import add_api_cost, get_api_usage_summary
 
-from saas_bench.event_logger import EventLogger
+from saas_bench.simulator.event_logger import EventLogger
 
 from tests.support.harness import EMPTY_ANALYSIS_USAGE
 
@@ -55,71 +55,13 @@ def test_environment_llm_usage_is_summarized_by_purpose():
         },
     }
 
-def test_environment_llm_usage_rejects_inconsistent_totals():
-    usage = {
-        "input_tokens": 2,
-        "cached_tokens": 0,
-        "output_tokens": 1,
-        "cost_by_currency": {"CNY": 0.01},
-        "by_purpose": {
-            "customer_social_post": {
-                "input_tokens": 1,
-                "cached_tokens": 0,
-                "output_tokens": 1,
-                "cost_by_currency": {"CNY": 0.01},
-            }
-        },
-    }
-
-    with pytest.raises(ValueError, match="input token total"):
-        BashAgentRunner._validate_environment_llm_usage(usage)
-
-
-def test_analysis_usage_is_validated_against_role_and_state_totals():
-    usage = {
-        **EMPTY_ANALYSIS_USAGE,
-        "role_report_days": [0],
-        "state_portrait_days": [0],
-        "call_count": 5,
-        "input_tokens": 140,
-        "output_tokens": 50,
-        "cached_tokens": 18,
-        "reasoning_tokens": 9,
-        "cost_by_currency": {"USD": 0.06},
-        "by_role": {
-            role: {
-                "call_count": 1,
-                "input_tokens": 10,
-                "output_tokens": 5,
-                "cached_tokens": 2,
-                "reasoning_tokens": 1,
-                "cost_by_currency": {"USD": 0.01},
-            }
-            for role in ("market", "finance", "product", "customer")
-        },
-        "state_reconstruction": {
-            "call_count": 1,
-            "input_tokens": 100,
-            "output_tokens": 30,
-            "cached_tokens": 10,
-            "reasoning_tokens": 5,
-            "cost_by_currency": {"USD": 0.02},
-        },
-    }
-
-    assert BashAgentRunner._validate_analysis_usage(usage, max_day=0) == usage
-
-    usage["input_tokens"] = 139
-    with pytest.raises(ValueError, match="input_tokens total"):
-        BashAgentRunner._validate_analysis_usage(usage, max_day=0)
-
 def test_result_includes_environment_llm_usage_from_checkpoint(tmp_path):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.run_id = "test"
+    runner.experiment_name = "test"
     runner.seed = 42
     runner.scenario = "default"
     runner.workspace_dir = tmp_path
-    runner._harness_result_fields = lambda: {}
     environment_usage = {
         "input_tokens": 41,
         "cached_tokens": 15,

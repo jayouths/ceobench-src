@@ -1,8 +1,8 @@
 """Regression tests for CEOBench startup state and initial visibility."""
 
 import pytest
-from saas_bench.config import INITIAL_CUSTOMER_GROUPS
-from saas_bench.database import (
+from saas_bench.simulator.config import INITIAL_CUSTOMER_GROUPS
+from saas_bench.simulator.database import (
     get_cash,
     get_global_state,
     get_group_info_level,

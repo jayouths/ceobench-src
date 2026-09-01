@@ -17,9 +17,9 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from saas_bench.tools import TOOL_DOCS, get_tool_summary_table
-from saas_bench.database import TABLE_DOCS
-from saas_bench.docs_generator import (
+from saas_bench.simulator.tools import TOOL_DOCS, get_tool_summary_table
+from saas_bench.simulator.database import TABLE_DOCS
+from saas_bench.runtime.docs_generator import (
     render_api_docs,
     render_table_docs,
     _EXCLUDED_TOOLS,
@@ -181,7 +181,7 @@ def render_tables_reference(output_path: Path):
 
 def render_cli_reference(output_path: Path):
     """Render CLI reference documentation."""
-    from saas_bench._public_cli import get_cli_docs
+    from saas_bench.runtime._public_cli import get_cli_docs
 
     output_path.write_text(get_cli_docs())
 

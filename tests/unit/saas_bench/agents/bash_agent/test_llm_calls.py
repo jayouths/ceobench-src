@@ -6,17 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from saas_bench.agents.bash_agent.agent import BashAgent, Message
+from saas_bench.agents.bash_agent.agent import BashAgent
 
-from saas_bench.agents.bash_agent import run_test
-
-from saas_bench.agents.bash_agent.run_test import BashAgentRunner
+from saas_bench.agents.bash_agent.runner import BashAgentRunner
 
 
 def test_decision_response_cost_uses_the_served_model(tmp_path):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.model = "requested"
-    runner.provider = "openai_compatible"
+    runner.provider = "openai"
     runner.api_type = "openai_responses"
     runner.pricing = {
         "official": {
@@ -35,7 +33,6 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
     runner.trajectory_log_file = tmp_path / "trajectory.jsonl"
     runner.performance_log_file = tmp_path / "performance.jsonl"
     runner._experiment_log_writer = None
-    runner._performance_queue = None
     runner._pending_decision_context = None
     runner.agent = SimpleNamespace(
         last_input_tokens=1_000_000,
@@ -65,7 +62,7 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
 def _make_response_logging_runner(tmp_path, initial_observation, analysis_enabled):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.model = "requested"
-    runner.provider = "openai_compatible"
+    runner.provider = "openai"
     runner.api_type = "openai_responses"
     runner.pricing = {
         "official": {
@@ -82,7 +79,6 @@ def _make_response_logging_runner(tmp_path, initial_observation, analysis_enable
     runner.trajectory_log_file = tmp_path / "trajectory.jsonl"
     runner.performance_log_file = tmp_path / "performance.jsonl"
     runner._experiment_log_writer = None
-    runner._performance_queue = None
     runner.analysis_enabled = analysis_enabled
     runner.agent = SimpleNamespace(
         last_input_tokens=10,
@@ -216,6 +212,7 @@ def test_decision_response_status_matches_harness_tool_validation(
 def test_decision_agent_request_builder_uses_config_without_hidden_defaults():
     agent = BashAgent.__new__(BashAgent)
     agent.model = "decision-test"
+    agent.provider = "openai"
     agent.api_type = "openai_responses"
     agent.max_output_tokens = 345
     agent.temperature = 0.51
@@ -382,98 +379,3 @@ def test_openai_responses_stops_after_configured_invalid_response_limit():
         agent._call_openai_responses()
 
     assert len(calls) == 2
-
-def test_anthropic_agent_does_not_retry_local_errors():
-    agent = BashAgent.__new__(BashAgent)
-    agent.conversation = []
-    agent._get_system_prompt_with_memory = lambda: (
-        _ for _ in ()
-    ).throw(OSError("local failure"))
-
-    with pytest.raises(OSError, match="local failure"):
-        agent._call_anthropic()
-
-def test_anthropic_agent_does_not_create_unpriced_prompt_cache():
-    calls = []
-
-    def create(**kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(
-            model="served-anthropic",
-            usage=SimpleNamespace(
-                input_tokens=11,
-                output_tokens=7,
-                cache_read_input_tokens=0,
-                cache_creation_input_tokens=0,
-            ),
-            content=[
-                SimpleNamespace(
-                    type="tool_use",
-                    id="tool-1",
-                    name="bash",
-                    input={"command": "pwd"},
-                )
-            ],
-        )
-
-    agent = BashAgent(
-        tool_descriptions=[],
-        client=SimpleNamespace(messages=SimpleNamespace(create=create)),
-        model="test-model",
-        api_type="anthropic_messages",
-        tool_choice="required",
-        max_invalid_responses_per_turn=2,
-        max_output_tokens=100,
-    )
-    # 模拟旧 checkpoint 遗留的缓存断点，新请求不应继续携带它。
-    agent.conversation = [
-        Message(
-            role="user",
-            content=[
-                {
-                    "type": "text",
-                    "text": "dashboard",
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-        )
-    ]
-
-    action = agent._call_anthropic()
-
-    assert action == run_test.Action(tool="bash", arguments={"command": "pwd"})
-    assert len(calls) == 1
-    assert calls[0]["tool_choice"] == {"type": "any"}
-    assert "cache_control" not in json.dumps(calls[0])
-    assert agent.last_input_tokens == 11
-    assert agent.last_output_tokens == 7
-
-def test_anthropic_agent_does_not_retry_bad_requests():
-    import anthropic
-    import httpx
-
-    error = anthropic.BadRequestError(
-        "bad request",
-        response=httpx.Response(
-            400,
-            request=httpx.Request("POST", "http://example.test"),
-        ),
-        body={},
-    )
-    messages = SimpleNamespace(
-        create=lambda **kwargs: (_ for _ in ()).throw(error)
-    )
-    agent = BashAgent.__new__(BashAgent)
-    agent.conversation = []
-    agent._get_system_prompt_with_memory = lambda: "system"
-    agent.model = "test-model"
-    agent.api_type = "anthropic_messages"
-    agent.tool_choice = "required"
-    agent.max_output_tokens = 100
-    agent.temperature = None
-    agent.top_p = None
-    agent.request_options = {}
-    agent.client = SimpleNamespace(messages=messages)
-
-    with pytest.raises(anthropic.BadRequestError):
-        agent._call_anthropic()

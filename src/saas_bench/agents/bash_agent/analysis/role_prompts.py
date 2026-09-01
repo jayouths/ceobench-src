@@ -86,13 +86,13 @@ def build_role_prompts(signals: AnalysisSignals, role: Role) -> tuple[str, str]:
 
 必须遵守：
 1. 只能使用用户提供的 JSON 信号，不得补充外部事实或隐藏状态。
-2. evidence 是可由输入直接核验的事实，最多 5 条；id 必须使用 {prefix}-1 至 {prefix}-5。
+2. evidence 是可由输入直接核验的事实，至少 1 条、最多 5 条；id 必须使用 {prefix}-1 至 {prefix}-5。数据不足时也要引用真实信号并将 direction 写为 insufficient_data。
 3. metric 必须从输入 JSON 的 {role.value} 顶层键开始，逐层复制完整字段路径；不得添加 signals 前缀或省略中间层级。day、week、windows 只用于判断数据完整性，不是业务指标，不得作为 metric 或单独写成 evidence。
 4. 同一条 evidence 的 observation、metric、direction 和 lag_note 必须描述同一个信号；direction 只能是 up、down、flat、insufficient_data，没有完整可比窗口时使用 insufficient_data。
 5. strength 表示证据对 observation 的支持强度，不表示业务重要程度。
 6. hypotheses 最多 3 条，必须引用已输出的 evidence id，并写出可由后续公开信号执行的验证方式。
 7. risks 最多 3 条，只写已有早期指标支持但尚未充分暴露的风险。
-8. 不得输出行动建议，不得把相关性写成已确认因果；数据不足时允许相应数组为空。
+8. 不得输出行动建议，不得把相关性写成已确认因果；数据不足时 hypotheses 和 risks 可以为空。
 9. 只返回一个符合 Schema 的 JSON 对象，不要 Markdown、代码围栏或额外文字。
 
 字段 Schema：

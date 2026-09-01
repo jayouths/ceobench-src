@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
-from saas_bench.public_week_snapshot import PublicWeekSnapshot
+from saas_bench.simulator.public_week_snapshot import PublicWeekSnapshot
 
 from . import signal_queries
 from .signal_models import (

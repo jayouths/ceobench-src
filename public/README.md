@@ -36,9 +36,9 @@ pip install -r requirements.txt
 ```
 
 That's it. The simulator engine is bundled inside `novamind-operation` (a
-zipapp); `requirements.txt` only installs the third-party libraries the engine
-imports at runtime (`numpy`, `pandas`, `scikit-learn`, `openai`, `anthropic`,
-`sqlcipher3-binary`, `python-dotenv`).
+zipapp); `requirements.txt` only installs the third-party libraries used by
+the engine and the agent workspace (`numpy`, `pandas`, `scikit-learn`,
+`openai`, and `sqlcipher3-binary`).
 
 Requires Python 3.13+.
 

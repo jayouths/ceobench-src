@@ -8,9 +8,9 @@ import pytest
 
 from saas_bench.agents.bash_agent.agent import BashAgent, Message
 
-from saas_bench.agents.bash_agent import run_test
-
-from saas_bench.agents.bash_agent.run_test import BashAgentRunner, _resume_runner
+from saas_bench.agents.bash_agent import runner as runner_module
+from saas_bench.agents.bash_agent.runner import BashAgentRunner
+from saas_bench.agents.bash_agent.workspace import AgentWorkspaceRepository
 
 
 from tests.support.harness import (
@@ -23,14 +23,14 @@ def test_workspace_restore_removes_changes_after_checkpoint(tmp_path):
     runner = _checkpoint_runner(tmp_path)
     tracked = runner.agent_workspace / "MEMORY.md"
     tracked.write_text("checkpoint memory")
-    checkpoint_commit = runner._capture_workspace_commit(7)
+    checkpoint_commit = runner.workspace_repository.capture_checkpoint_commit(7)
     tracked.write_text("future memory")
     (runner.agent_workspace / "future.txt").write_text("future")
     ignored_session = runner.agent_workspace / "sessions" / "session-1" / "world.nmdb"
     ignored_session.parent.mkdir(parents=True, exist_ok=True)
     ignored_session.write_bytes(b"database")
 
-    runner._restore_workspace_commit(checkpoint_commit)
+    runner.workspace_repository.restore_commit(checkpoint_commit)
 
     assert tracked.read_text() == "checkpoint memory"
     assert not (runner.agent_workspace / "future.txt").exists()
@@ -40,7 +40,7 @@ def test_resume_rebuilds_week_commit_cursor_from_checkpoint_day():
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.agent = None
     runner.total_decision_agent_cost_by_currency = {}
-    runner._last_committed_week = 0
+    runner.workspace_repository = SimpleNamespace(last_committed_week=0)
     checkpoint = {
         "day": 35,
         "runtime": {
@@ -54,30 +54,28 @@ def test_resume_rebuilds_week_commit_cursor_from_checkpoint_day():
             }
         },
     }
-    restore_plan = run_test.CheckpointRestorePlan(
+    restore_plan = runner_module.CheckpointRestorePlan(
         session_id="session-1",
         conversation_payload={},
     )
 
     runner._restore_agent_state_after_launch(checkpoint, restore_plan)
 
-    assert runner._last_committed_week == 5
+    assert runner.workspace_repository.last_committed_week == 5
 
-def test_week_commit_cursor_does_not_advance_when_git_commit_fails():
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner._last_committed_week = 0
-    runner._git_commit_workspace = lambda *args, **kwargs: (
+def test_week_commit_cursor_does_not_advance_when_git_commit_fails(tmp_path):
+    repository = AgentWorkspaceRepository(tmp_path)
+    repository.commit = lambda *args, **kwargs: (
         _ for _ in ()
     ).throw(RuntimeError("git failed"))
 
     with pytest.raises(RuntimeError, match="git failed"):
-        runner._commit_weeks_up_to(7)
+        repository.commit_weeks_up_to(7)
 
-    assert runner._last_committed_week == 0
+    assert repository.last_committed_week == 0
 
 def test_agent_checkpoint_snapshot_applies_pending_tool_result(tmp_path):
     agent = BashAgent.__new__(BashAgent)
-    agent.use_anthropic = False
     agent.conversation = [
         Message(
             role="assistant",
@@ -102,8 +100,6 @@ def test_agent_checkpoint_snapshot_applies_pending_tool_result(tmp_path):
     )
 
     payload = json.loads(snapshot.read_text())
-    assert payload["tool_results_applied"] is True
-    assert payload["pending_tool_calls"] == []
     assert payload["conversation"][-1] == {
         "role": "tool",
         "content": "query result",
@@ -134,7 +130,6 @@ def test_restored_midweek_context_does_not_duplicate_first_observation():
 
 def test_day_zero_initializes_chat_context_with_system_prompt():
     agent = BashAgent.__new__(BashAgent)
-    agent.use_anthropic = False
     agent.conversation = []
     agent._pending_tool_calls = []
     agent.current_day = 0
@@ -172,6 +167,7 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
     runner.max_decision_turns_per_batch = 1
     runner.total_decision_agent_cost_by_currency = {}
     runner.run_id = "turn-limit"
+    runner.experiment_name = "test"
     runner.seed = 42
     runner.scenario = "default"
     runner.model = "test-model"
@@ -180,9 +176,7 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
     runner.trajectory_log_file = tmp_path / "logs/trajectory_turn-limit.jsonl"
     runner.performance_log_file = tmp_path / "logs/performance_turn-limit.jsonl"
     runner._experiment_log_writer = None
-    runner._performance_queue = None
     runner._pending_decision_context = None
-    runner._server_port = 1
     runner.setup = lambda: None
     runner._repair_terminal_checkpoint_after_setup = lambda: None
     runner._get_game_status = lambda: {
@@ -191,11 +185,14 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
         "subscribers": 0,
         "timed_out": False,
     }
-    runner._get_cash = lambda: 1_000_000.0
     runner.analysis_enabled = False
     runner._get_dashboard_payload = lambda: {"dashboard": "dashboard", "day": 0}
-    runner._ensure_analysis_signals = lambda payload: None
-    runner._commit_weeks_up_to = lambda day: None
+    runner.analysis_pipeline = SimpleNamespace(
+        ensure_signals=lambda payload: None,
+        decision_observation=lambda dashboard, brief: dashboard,
+        brief_path=lambda day: tmp_path / f"analysis/day_{day:03d}/STRATEGY_BRIEF.md",
+    )
+    runner.workspace_repository = SimpleNamespace(commit_weeks_up_to=lambda day: None)
     runner._execute_tool = lambda tool, arguments: "query result"
     runner._http_get = lambda path: {
         "day": 0,
@@ -205,7 +202,6 @@ def test_turn_limit_saves_one_resumable_midweek_checkpoint(tmp_path):
     }
     runner._NextWeekTimeoutError = RuntimeError
     runner._write_result = lambda result: None
-    runner._harness_result_fields = lambda: {}
     checkpoint_calls = []
 
     def save_checkpoint(day, **kwargs):

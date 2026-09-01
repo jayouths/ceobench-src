@@ -4,7 +4,6 @@ The bash_agent has a small set of tools: bash (shell commands),
 and file manipulation (read, write, edit, search, glob).
 """
 
-import fnmatch
 import os
 import re
 import subprocess
@@ -177,18 +176,6 @@ def get_bash_agent_tool_descriptions() -> List[Dict[str, Any]]:
             'name': t['name'],
             'description': t['description'],
             'parameters': t['parameters'],
-        }
-        for t in BASH_AGENT_TOOL_DEFS
-    ]
-
-
-def get_bash_agent_anthropic_tools() -> List[Dict[str, Any]]:
-    """Get Anthropic API-compatible tool descriptions for the bash agent."""
-    return [
-        {
-            'name': t['name'],
-            'description': t['description'],
-            'input_schema': t['parameters'],
         }
         for t in BASH_AGENT_TOOL_DEFS
     ]

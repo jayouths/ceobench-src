@@ -19,7 +19,7 @@ from saas_bench.agents.bash_agent.tools import (
     NextWeekExecutionError,
 )
 
-from saas_bench.api_server import NovaMindAPIServer, _APIHandler
+from saas_bench.runtime.api_server import NovaMindAPIServer, _APIHandler
 
 
 from tests.support.harness import (
@@ -158,7 +158,7 @@ def test_real_bwrap_allows_only_unix_socket_api(tmp_path):
         )
         source_result = executor.execute(
             "bash",
-            {"command": f"test -e {PROJECT_ROOT / 'src/saas_bench/simulation.py'}"},
+            {"command": f"test -e {PROJECT_ROOT / 'src/saas_bench/simulator/simulation.py'}"},
         )
     finally:
         server.stop()

@@ -8,11 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from saas_bench.config import BenchmarkConfig
+from saas_bench.simulator.config import BenchmarkConfig
 
-from saas_bench.customer_llm import CustomerSimulator
+from saas_bench.simulator.customer_llm import CustomerSimulator
 
-from saas_bench.server_entry import (
+from saas_bench.runtime.server_entry import (
     _apply_simulator_llm_config,
     _apply_simulator_llm_env_overrides,
     _restore_simulator_llm_config,
@@ -98,7 +98,7 @@ def test_simulator_text_model_rejects_empty_success_response():
     simulator = CustomerSimulator(
         conn=sqlite3.connect(":memory:"),
         config=BenchmarkConfig(
-            social_post_llm_provider="openai_compatible",
+            social_post_llm_provider="openai",
             social_post_llm_api_type="openai_responses",
             social_post_llm_model="social-test",
             social_post_llm_max_tokens=100,
@@ -112,7 +112,7 @@ def test_simulator_text_model_rejects_empty_success_response():
 def test_task_request_options_merge_without_dropping_model_options():
     social = RecordingOpenAI()
     config = BenchmarkConfig(
-        social_post_llm_provider="openai_compatible",
+        social_post_llm_provider="openai",
         social_post_llm_api_type="openai_responses",
         social_post_llm_model="social-test",
         social_post_llm_max_tokens=100,

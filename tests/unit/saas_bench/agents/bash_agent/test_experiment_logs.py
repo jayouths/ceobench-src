@@ -7,12 +7,11 @@ import pytest
 from saas_bench.agents.bash_agent.experiment_logs import ExperimentLogWriter
 
 
-def _writer(tmp_path, callback=None):
+def _writer(tmp_path):
     return ExperimentLogWriter(
         run_id="run-1",
         trajectory_file=tmp_path / "trajectory_run-1.jsonl",
         performance_file=tmp_path / "performance_run-1.jsonl",
-        performance_callback=callback,
     )
 
 
@@ -38,8 +37,7 @@ def test_writer_keeps_one_ordered_trajectory_with_explicit_week_boundaries(tmp_p
 
 
 def test_performance_log_only_receives_explicit_summaries(tmp_path):
-    pushed = []
-    writer = _writer(tmp_path, pushed.append)
+    writer = _writer(tmp_path)
 
     writer.trajectory("llm_call", 0, component="bash_agent")
     writer.performance("decision_batch", 0, elapsed_seconds=1.5)
@@ -50,7 +48,6 @@ def test_performance_log_only_receives_explicit_summaries(tmp_path):
     ]
     assert len(entries) == 1
     assert entries[0]["event_type"] == "decision_batch"
-    assert pushed == entries
     assert writer.has_performance_event("decision_batch", 0) is True
     assert writer.has_performance_event("week_summary", 0) is False
 

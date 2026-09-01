@@ -6,10 +6,10 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
-from saas_bench.tools import TOOL_DOCS
-from saas_bench.database import TABLE_DOCS, init_database
-from saas_bench.docs_generator import _EXCLUDED_TOOLS, _TOOL_TO_MODULE
-from saas_bench._public_cli import _build_parser, get_cli_docs
+from saas_bench.simulator.tools import TOOL_DOCS
+from saas_bench.simulator.database import TABLE_DOCS, init_database
+from saas_bench.runtime.docs_generator import _EXCLUDED_TOOLS, _TOOL_TO_MODULE
+from saas_bench.runtime._public_cli import _build_parser, get_cli_docs
 
 
 # ── Full hidden tables list (must be kept in sync with tools.py _HIDDEN_TABLES) ──

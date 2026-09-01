@@ -63,7 +63,9 @@ class RoleRisk(AnalysisModel):
 class RoleAnalysis(AnalysisModel):
     """LLM 只填写分析内容，角色和日期由程序附加。"""
 
-    evidence: list[Evidence] = Field(default_factory=list, max_length=5)
+    # 每个角色至少要记录一条可核验事实；数据不足时
+    # 也应引用对应信号并标记 insufficient_data，不能用空报告静默降级。
+    evidence: list[Evidence] = Field(min_length=1, max_length=5)
     hypotheses: list[RoleHypothesis] = Field(default_factory=list, max_length=3)
     risks: list[RoleRisk] = Field(default_factory=list, max_length=3)
 

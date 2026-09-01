@@ -12,11 +12,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from saas_bench.api_server import NovaMindAPIServer, _APIHandler
+from saas_bench.runtime.api_server import NovaMindAPIServer, _APIHandler
 from saas_bench.agents.bash_agent.analysis.signals import SignalCollector
-from saas_bench.public_week_snapshot import build_public_week_snapshot
+from saas_bench.simulator.public_week_snapshot import build_public_week_snapshot
 
-from saas_bench import _public_cli
+from saas_bench.runtime import _public_cli
 
 from saas_bench.novamind_api import _client as novamind_client
 
@@ -280,7 +280,7 @@ def test_prediction_persistence_failure_prevents_world_advance(monkeypatch):
         conn=sqlite3.connect(":memory:"),
     )
     monkeypatch.setattr(
-        "saas_bench.database.save_predictions",
+        "saas_bench.simulator.database.save_predictions",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("write failed")),
     )
 

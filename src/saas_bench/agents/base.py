@@ -7,7 +7,7 @@ the required methods.
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any
 
-from ..environment import Action, StepResult
+from ..simulator.environment import Action
 
 
 class BaseAgent(ABC):

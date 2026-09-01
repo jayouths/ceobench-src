@@ -1,0 +1,65 @@
+[experiment]
+name = "test"
+seed = 42
+days = 7
+scenario = "default"
+initial_cash = 1000000.0
+workspace = "outputs/runs"
+max_decision_turns_per_batch = 100
+max_invalid_responses_per_turn = 3
+
+[modules.analysis]
+enabled = false
+max_schema_retries = 1
+max_enterprise_threads = 50
+
+[models.decision_agent]
+provider = "openai"
+api_type = "openai_responses"
+tool_choice = "required"
+model = "test-decision-model"
+base_url = "http://localhost:11434/v1"
+api_key_required = false
+temperature = 0.7
+top_p = 0.8
+max_output_tokens = 16384
+timeout_seconds = 600
+
+[models.decision_agent.pricing."test-decision-model"]
+currency = "USD"
+uncached_input_cost_per_million = 0.0
+cached_input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+
+[models.social_llm]
+provider = "openai"
+api_type = "openai_responses"
+model = "test-social-model"
+base_url = "http://localhost:11434/v1"
+api_key_required = false
+temperature = 0.95
+max_output_tokens = 1000
+timeout_seconds = 600
+
+[models.social_llm.pricing."test-social-model"]
+currency = "USD"
+uncached_input_cost_per_million = 0.0
+cached_input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+
+[models.social_llm.tasks.customer_post]
+max_output_tokens = 1000
+
+[models.social_llm.tasks.macro_post]
+max_output_tokens = 300
+
+[models.social_llm.tasks.competitor_post]
+max_output_tokens = 300
+
+[models.social_llm.tasks.agent_post_judge]
+temperature = 0.3
+max_output_tokens = 100
+
+[models.social_llm.tasks.agent_post_reply]
+temperature = 0.9
+max_output_tokens = 150

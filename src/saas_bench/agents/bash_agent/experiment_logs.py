@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Iterable
 
 
 LOG_FORMAT_VERSION = 1
@@ -24,12 +24,10 @@ class ExperimentLogWriter:
         run_id: str,
         trajectory_file: Path,
         performance_file: Path,
-        performance_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> None:
         self.run_id = run_id
         self.trajectory_file = trajectory_file
         self.performance_file = performance_file
-        self.performance_callback = performance_callback
 
     @staticmethod
     def week_index(sim_day: int) -> int:
@@ -44,8 +42,6 @@ class ExperimentLogWriter:
     def performance(self, event_type: str, sim_day: int, **fields: Any) -> dict[str, Any]:
         entry = self._entry(event_type, sim_day, fields)
         self._append(self.performance_file, entry)
-        if self.performance_callback is not None:
-            self.performance_callback(entry)
         return entry
 
     def has_trajectory_event(self, event_type: str, sim_day: int) -> bool:

@@ -8,10 +8,11 @@ from saas_bench.agents.bash_agent.analysis.models import (
     Role,
     AnalysisCallKind,
     RoleCallUsage,
+    Evidence,
     RoleReport,
     RoleReportsArtifact,
 )
-from saas_bench.agents.bash_agent.run_test import BashAgentRunner
+from saas_bench.agents.bash_agent.runner import BashAgentRunner
 
 
 from tests.support.harness import (
@@ -22,7 +23,7 @@ from tests.support.harness import (
 
 
 
-def test_checkpoint_json_references_the_exact_hashed_database(tmp_path):
+def test_checkpoint_json_references_the_exact_database(tmp_path):
     runner = _checkpoint_runner(tmp_path)
     runner._http_post = lambda path, data, timeout: {
         "success": True,
@@ -36,19 +37,21 @@ def test_checkpoint_json_references_the_exact_hashed_database(tmp_path):
 
     checkpoint = json.loads((runner.workspace_dir / "checkpoint.json").read_text())
     checkpoint_db = runner.workspace_dir / checkpoint["database"]["file"]
-    assert checkpoint["format_version"] == runner.CHECKPOINT_FORMAT_VERSION
-    assert checkpoint["run_config_sha256"] == runner._sha256_file(
-        runner.workspace_dir / "config.json"
-    )
     assert checkpoint["day"] == 7
     assert checkpoint["cash"] == pytest.approx(900_000.0)
     assert checkpoint_db.read_bytes() == b"persisted-database"
-    assert checkpoint["database"]["sha256"] == runner._sha256_file(checkpoint_db)
+    assert checkpoint["database"] == {
+        "file": str(checkpoint_db.relative_to(runner.workspace_dir))
+    }
     assert (runner.workspace_dir / "world.nmdb").read_bytes() == b"persisted-database"
     runtime = checkpoint["runtime"]
     conversation = runner.workspace_dir / runtime["conversation"]["file"]
-    assert runtime["conversation"]["sha256"] == runner._sha256_file(conversation)
-    assert runner._git("rev-parse", "HEAD", check=True).stdout.strip() == runtime["workspace_commit"]
+    assert conversation.is_file()
+    assert set(runtime["conversation"]) == {"file"}
+    assert (
+        runner.workspace_repository.git("rev-parse", "HEAD", check=True).stdout.strip()
+        == runtime["workspace_commit"]
+    )
     assert runtime["runner_log_offsets"] == {
         "trajectory": 0,
         "performance": 0,
@@ -77,8 +80,27 @@ def test_checkpoint_can_be_loaded_before_runner_session_is_initialized(tmp_path)
 
 def test_checkpoint_persists_role_report_usage_from_artifacts(tmp_path):
     runner = _checkpoint_runner(tmp_path)
+    prefixes = {
+        Role.MARKET: "MAR",
+        Role.FINANCE: "FIN",
+        Role.PRODUCT: "PRO",
+        Role.CUSTOMER: "CUS",
+    }
     reports = [
-        RoleReport(role=role, day=7, evidence=[], hypotheses=[], risks=[])
+        RoleReport(
+            role=role,
+            day=7,
+            evidence=[Evidence(
+                id=f"{prefixes[role]}-1",
+                observation="test evidence",
+                metric=f"{role.value}.test_metric",
+                direction="insufficient_data",
+                strength=1.0,
+                lag_note="test fixture",
+            )],
+            hypotheses=[],
+            risks=[],
+        )
         for role in Role
     ]
     calls = [
@@ -158,7 +180,7 @@ def test_runtime_snapshot_failure_keeps_previous_checkpoint_artifacts(tmp_path):
         "environment_llm_usage": EMPTY_ENVIRONMENT_LLM_USAGE,
         "server_log_offsets": {"history": 0, "event_log": 0},
     }
-    runner._capture_workspace_commit = lambda day: (_ for _ in ()).throw(
+    runner.workspace_repository.capture_checkpoint_commit = lambda day: (_ for _ in ()).throw(
         RuntimeError("git failed")
     )
 
@@ -168,20 +190,3 @@ def test_runtime_snapshot_failure_keeps_previous_checkpoint_artifacts(tmp_path):
     assert json.loads(checkpoint_file.read_text())["day"] == 0
     assert old_db.read_bytes() == b"old-database"
     assert old_runtime.read_text() == "old-conversation"
-
-def test_checkpoint_load_rejects_tampered_run_config(tmp_path):
-    runner = _checkpoint_runner(tmp_path)
-    runner._http_post = lambda path, data, timeout: {
-        "success": True,
-        "persisted_day": 7,
-        "checkpoint_cash": 900_000.0,
-        "environment_llm_usage": EMPTY_ENVIRONMENT_LLM_USAGE,
-        "server_log_offsets": {"history": 0, "event_log": 0},
-    }
-    runner._save_checkpoint(7)
-    (runner.workspace_dir / "config.json").write_text(
-        json.dumps({"test_config": False})
-    )
-
-    with pytest.raises(ValueError, match="run config hash mismatch"):
-        runner._load_checkpoint()

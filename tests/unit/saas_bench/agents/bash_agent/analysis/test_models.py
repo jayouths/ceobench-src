@@ -105,6 +105,15 @@ def test_role_report_rejects_invalid_evidence_references_and_role_prefix():
         RoleReport.from_analysis(Role.FINANCE, 7, _role_analysis())
 
 
+def test_role_analysis_rejects_empty_evidence_report():
+    with pytest.raises(ValidationError, match="at least 1 item"):
+        RoleAnalysis.model_validate({
+            "evidence": [],
+            "hypotheses": [],
+            "risks": [],
+        })
+
+
 def test_state_portrait_adds_day_and_preserves_fixed_dimensions():
     assessment = StateAssessment.model_validate(_assessment_payload())
     portrait = StatePortrait.from_assessment(7, assessment)

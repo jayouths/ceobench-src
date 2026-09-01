@@ -19,7 +19,7 @@ from saas_bench.agents.bash_agent.analysis.state_reconstruction import (
     StateReconstructionError,
     StateReconstructor,
 )
-from saas_bench.agents.bash_agent.run_test import BashAgentRunner
+from tests.support.harness import make_analysis_pipeline
 
 
 _PREFIX = {
@@ -206,16 +206,13 @@ def test_reconstructor_fails_after_configured_repair_limit():
     ]
 
 
-def test_runner_writes_reuses_and_summarizes_state_portrait(tmp_path):
+def test_pipeline_writes_reuses_and_summarizes_state_portrait(tmp_path):
     reports = _role_reports()
     reports_path = tmp_path / "analysis/day_007/role_reports.json"
     reports_path.parent.mkdir(parents=True)
     reports_path.write_text(reports.model_dump_json())
 
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.workspace_dir = tmp_path
-    runner.analysis_enabled = True
-    runner.analysis_module_config = {"max_schema_retries": 1}
+    pipeline = make_analysis_pipeline(tmp_path)
     calls = []
 
     def call_model(day, attempt, call_kind, system_prompt, user_prompt):
@@ -225,19 +222,19 @@ def test_runner_writes_reuses_and_summarizes_state_portrait(tmp_path):
             usage=_usage(attempt, call_kind),
         )
 
-    runner._call_analysis_state_model = call_model
-    artifact, generated = runner._ensure_analysis_state_portrait(reports)
+    pipeline.call_state_model = call_model
+    artifact, generated = pipeline.ensure_state_portrait(reports)
     path = tmp_path / "analysis/day_007/state_portrait.json"
 
     assert generated is True
     assert path.is_file()
     assert calls == [1]
 
-    runner._call_analysis_state_model = lambda *args: (_ for _ in ()).throw(
+    pipeline.call_state_model = lambda *args: (_ for _ in ()).throw(
         AssertionError("completed state portrait must be reused")
     )
-    reused, generated = runner._ensure_analysis_state_portrait(reports)
-    usage = runner._analysis_usage_summary(7)
+    reused, generated = pipeline.ensure_state_portrait(reports)
+    usage = pipeline.usage_summary(7)
 
     assert generated is False
     assert reused == artifact
@@ -296,7 +293,7 @@ def test_strategy_brief_rejects_mismatched_days():
         render_strategy_brief(reports, portrait)
 
 
-def test_runner_persists_reuses_and_injects_brief_only_when_enabled(tmp_path):
+def test_pipeline_persists_reuses_and_injects_brief_only_when_enabled(tmp_path):
     reports = _role_reports()
 
     def call_model(day, attempt, call_kind, system_prompt, user_prompt):
@@ -309,22 +306,20 @@ def test_runner_persists_reuses_and_injects_brief_only_when_enabled(tmp_path):
         call_model,
         max_schema_retries=0,
     ).generate(reports)
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.workspace_dir = tmp_path
-    runner.analysis_enabled = True
+    pipeline = make_analysis_pipeline(tmp_path)
 
-    brief, generated = runner._ensure_analysis_brief(reports, portrait)
+    brief, generated = pipeline.ensure_brief(reports, portrait)
     path = tmp_path / "analysis/day_007/STRATEGY_BRIEF.md"
 
     assert generated is True
     assert path.read_text() == brief
-    reused, generated = runner._ensure_analysis_brief(reports, portrait)
+    reused, generated = pipeline.ensure_brief(reports, portrait)
     assert generated is False
     assert reused == brief
-    assert runner._decision_observation("dashboard", brief) == (
+    assert pipeline.decision_observation("dashboard", brief) == (
         f"dashboard\n\n---\n\n{brief}"
     )
 
-    runner.analysis_enabled = False
-    assert runner._decision_observation("dashboard", None) == "dashboard"
-    assert runner._ensure_analysis_brief(reports, portrait) == (None, False)
+    pipeline.enabled = False
+    assert pipeline.decision_observation("dashboard", None) == "dashboard"
+    assert pipeline.ensure_brief(reports, portrait) == (None, False)

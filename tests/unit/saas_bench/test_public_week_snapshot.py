@@ -1,10 +1,10 @@
 """公开周度经营快照及 Dashboard 渲染测试。"""
 
-from saas_bench.public_week_snapshot import (
+from saas_bench.simulator.public_week_snapshot import (
     build_public_week_snapshot,
     render_weekly_dashboard,
 )
-from saas_bench.simulation import DayResult
+from saas_bench.simulator.simulation import DayResult
 
 
 def test_initial_dashboard_is_rendered_from_public_snapshot(make_initialized_sim):

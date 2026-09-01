@@ -1,17 +1,16 @@
 """Bash Agent 对应逻辑的快速单元测试。"""
 
-from pathlib import Path
+import re
 
 import pytest
 
 from saas_bench.agents.bash_agent.agent import BashAgent
 
-from saas_bench.agents.bash_agent.run_test import BashAgentRunner
+from saas_bench.agents.bash_agent.runner import BashAgentRunner
 
-from saas_bench.experiment_config import load_experiment_config
+from saas_bench.experiment.experiment_config import load_experiment_config
+from tests.support.harness import TEST_CONFIG
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 def test_runner_rejects_missing_decision_model_identity():
     with pytest.raises(ValueError, match="model must be explicitly configured"):
@@ -47,12 +46,13 @@ def test_agent_rejects_missing_model_identity():
         BashAgent(tool_descriptions=[], client=object(), api_type="openai_responses")
 
 def test_short_experiment_is_allowed_and_runner_rounds_to_zero(tmp_path):
-    text = (PROJECT_ROOT / "experiments/smoke.toml").read_text()
+    text = TEST_CONFIG.read_text()
     path = tmp_path / "short.toml"
     path.write_text(text.replace("days = 7", "days = 6", 1))
 
     config = load_experiment_config(path)
     runner = BashAgentRunner(
+        experiment_name="test",
         model=config.decision_agent.model,
         provider=config.decision_agent.provider,
         api_type=config.decision_agent.api_type,
@@ -68,11 +68,16 @@ def test_short_experiment_is_allowed_and_runner_rounds_to_zero(tmp_path):
     )
 
     assert runner.total_days == 0
+    assert runner.workspace_dir.parent.name == "test"
+    assert re.fullmatch(
+        r"\d{8}-\d{6}_seed-42_[0-9a-f]{8}", runner.workspace_dir.name
+    )
 
 def test_runner_preserves_reasoning_configuration():
     omitted = BashAgentRunner(
+        experiment_name="test",
         model="test-model",
-        provider="openai_compatible",
+        provider="openai",
         api_type="openai_responses",
         tool_choice="required",
         base_url="http://localhost:11434/v1",
@@ -83,8 +88,9 @@ def test_runner_preserves_reasoning_configuration():
         pricing={"test-model": {"currency": "USD", "uncached_input_cost_per_million": 0.0, "cached_input_cost_per_million": 0.0, "output_cost_per_million": 0.0}},
     )
     disabled = BashAgentRunner(
+        experiment_name="test",
         model="test-model",
-        provider="openai_compatible",
+        provider="openai",
         api_type="openai_responses",
         tool_choice="required",
         base_url="http://localhost:11434/v1",
@@ -103,8 +109,9 @@ def test_runner_preserves_reasoning_configuration():
 
 def test_runner_preserves_sampling_configuration():
     runner = BashAgentRunner(
+        experiment_name="test",
         model="test-model",
-        provider="openai_compatible",
+        provider="openai",
         api_type="openai_responses",
         tool_choice="required",
         base_url="http://localhost:11434/v1",
@@ -122,7 +129,6 @@ def test_runner_preserves_sampling_configuration():
 
 def test_bash_agent_routes_by_explicit_api_type():
     agent = BashAgent.__new__(BashAgent)
-    agent._call_anthropic = lambda: "anthropic"
     agent._call_openai = lambda: "chat"
     agent._call_openai_responses = lambda: "responses"
 
@@ -130,5 +136,6 @@ def test_bash_agent_routes_by_explicit_api_type():
     assert agent._call_llm() == "responses"
     agent.api_type = "openai_chat_completions"
     assert agent._call_llm() == "chat"
-    agent.api_type = "anthropic_messages"
-    assert agent._call_llm() == "anthropic"
+    agent.api_type = "unknown"
+    with pytest.raises(ValueError, match="Unsupported decision-agent api_type"):
+        agent._call_llm()

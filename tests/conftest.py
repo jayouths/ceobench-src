@@ -3,10 +3,10 @@
 import pytest
 from numpy.random import default_rng
 
-from saas_bench.config import BenchmarkConfig
-from saas_bench.database import init_database
-from saas_bench.simulation import Simulator
-from saas_bench.tools import AgentTools
+from saas_bench.simulator.config import BenchmarkConfig
+from saas_bench.simulator.database import init_database
+from saas_bench.simulator.simulation import Simulator
+from saas_bench.simulator.tools import AgentTools
 
 
 @pytest.fixture

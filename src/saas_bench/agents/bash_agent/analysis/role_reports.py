@@ -138,18 +138,13 @@ class RoleReportGenerator:
             if target is None:
                 continue
 
-            expected_direction = None
+            # 只有确定性信号层已经计算出 direction 的环比对象，
+            # 才允许角色报告声称 up/down/flat。单点值、文本和配置值
+            # 都不能自行推断趋势，否则会把当前状态误写成变化方向。
+            expected_direction = Direction.INSUFFICIENT_DATA.value
             if isinstance(target, dict) and "direction" in target:
                 expected_direction = target["direction"]
-            elif (
-                isinstance(target, dict)
-                and target.get("status") in {"insufficient_data", "not_applicable"}
-            ):
-                expected_direction = Direction.INSUFFICIENT_DATA.value
-            if (
-                expected_direction is not None
-                and evidence.direction.value != expected_direction
-            ):
+            if evidence.direction.value != expected_direction:
                 errors.append(
                     f"metric direction mismatch for {evidence.metric!r}: "
                     f"expected {expected_direction!r}, got {evidence.direction.value!r}"

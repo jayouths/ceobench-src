@@ -8,7 +8,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from saas_bench.public_week_snapshot import DeliveredQuality, PublicWeekSnapshot
+from saas_bench.simulator.public_week_snapshot import DeliveredQuality, PublicWeekSnapshot
 
 
 class SignalModel(BaseModel):

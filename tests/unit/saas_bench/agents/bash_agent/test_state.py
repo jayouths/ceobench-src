@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from saas_bench.agents.bash_agent.run_test import BashAgentRunner
+from saas_bench.agents.bash_agent.runner import BashAgentRunner
 
 
 def test_game_status_is_the_authoritative_day_source():

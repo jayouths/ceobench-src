@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from saas_bench.db_protection import unprotect_db
+from saas_bench.runtime.db_protection import unprotect_db
 
 
 def get_all_tables(conn: sqlite3.Connection) -> list:

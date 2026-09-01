@@ -11,8 +11,8 @@ from saas_bench.agents.bash_agent.analysis.signals import (
     SignalCollector,
     build_analysis_windows,
 )
-from saas_bench.agents.bash_agent.run_test import BashAgentRunner
-from saas_bench.public_week_snapshot import build_public_week_snapshot
+from saas_bench.simulator.public_week_snapshot import build_public_week_snapshot
+from tests.support.harness import make_analysis_pipeline
 
 
 def _direct_query(conn):
@@ -224,56 +224,55 @@ def test_signal_catalog_covers_each_role():
     }
 
 
-def test_runner_writes_and_reuses_weekly_signal_artifact(
+def test_pipeline_writes_and_reuses_weekly_signal_artifact(
     tmp_path,
     make_initialized_sim,
 ):
     conn, _, _ = make_initialized_sim(seed=42)
     snapshot = build_public_week_snapshot(conn, 0)
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.workspace_dir = tmp_path
-    runner.analysis_enabled = True
-    runner.analysis_module_config = {"max_enterprise_threads": 50}
-    runner._query_public_rows = _direct_query(conn)
+    pipeline = make_analysis_pipeline(
+        tmp_path,
+        query_public_rows=_direct_query(conn),
+    )
     payload = {
         "day": 0,
         "dashboard": "dashboard",
         "public_week_snapshot": snapshot.to_dict(),
     }
 
-    first = runner._ensure_analysis_signals(payload)
+    first = pipeline.ensure_signals(payload)
     path = tmp_path / "analysis" / "day_000" / "signals.json"
     assert path.is_file()
 
-    runner._query_public_rows = lambda sql: (_ for _ in ()).throw(
+    pipeline.query_public_rows = lambda sql: (_ for _ in ()).throw(
         AssertionError("existing same-day artifact must be reused")
     )
-    second = runner._ensure_analysis_signals(payload)
+    second = pipeline.ensure_signals(payload)
 
     assert second == first
 
 
 def test_disabled_analysis_adds_no_queries_or_artifacts(tmp_path):
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.workspace_dir = tmp_path
-    runner.analysis_enabled = False
-    runner._query_public_rows = lambda sql: (_ for _ in ()).throw(
-        AssertionError("disabled Analysis must not query public data")
+    pipeline = make_analysis_pipeline(
+        tmp_path,
+        enabled=False,
+        query_public_rows=lambda sql: (_ for _ in ()).throw(
+            AssertionError("disabled Analysis must not query public data")
+        ),
     )
 
-    assert runner._ensure_analysis_signals({"dashboard": "baseline"}) is None
+    assert pipeline.ensure_signals({"dashboard": "baseline"}) is None
     assert not (tmp_path / "analysis").exists()
 
 
 def test_resume_prunes_only_analysis_artifacts_after_checkpoint(tmp_path):
-    runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.workspace_dir = tmp_path
+    pipeline = make_analysis_pipeline(tmp_path)
     for day in (0, 7, 14):
         directory = tmp_path / "analysis" / f"day_{day:03d}"
         directory.mkdir(parents=True)
         (directory / "signals.json").write_text("{}")
 
-    runner._prune_analysis_artifacts_after(7)
+    pipeline.prune_artifacts_after(7)
 
     assert (tmp_path / "analysis" / "day_000").is_dir()
     assert (tmp_path / "analysis" / "day_007").is_dir()
