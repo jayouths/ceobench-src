@@ -55,6 +55,7 @@ checkpoint.json.tmp
 Thumbs.db
 
 # Run data (large, per-run state)
+outputs/
 baseline_runs/
 bash_agent_runs/
 opencode_runs/
@@ -73,9 +74,9 @@ simulation.db
 *.pdf
 *.png
 *.zip
-# ...except checked-in repo assets (mascot, teaser, etc.)
-!assets/
-!assets/**
+# ...except checked-in documentation assets (mascot, teaser, etc.)
+!docs/assets/
+!docs/assets/**
 
 # Reports and viz (generated, not source)
 reports/
@@ -108,6 +109,8 @@ dist/
 # user-facing markdown (e.g. docs/analyze_trajectory.md).
 docs/*
 !docs/*.md
+!docs/assets/
+!docs/assets/**
 modal_deploy/
 monitor/
 paper/

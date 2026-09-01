@@ -1,0 +1,131 @@
+# CEO-Bench 实验配置模板
+#
+# 本文件只说明当前支持的配置结构，不代表任何具体实验方案，请勿直接运行。
+# 开始实验前，复制为新的 .toml 文件，替换 REPLACE_* 占位值，再通过 --config 显式传入。
+# 配置只控制实验和 LLM 调用，不修改经营模拟器的底层规则。
+
+[experiment]
+name = "REPLACE_EXPERIMENT_NAME"        # 必填：小写字母、数字和短横线；同时作为 runs 下的实验类型目录
+seed = 42                               # 可选，默认 42：模拟器随机种子；论文实验建议显式填写
+days = 70                               # 可选，默认 3650：计划模拟天数；Runner 按完整周向下取整
+scenario = "default"                    # 可选，默认 default；已注册 default | demand_surges | large_customers
+initial_cash = 1000000.0                # 可选，默认 1000000：企业初始现金，单位为美元
+workspace = "outputs/runs"              # 可选，默认 outputs/runs：实验产物根目录
+max_decision_turns_per_batch = 100      # 必填：单个决策批次的最大 ReAct 轮数
+max_invalid_responses_per_turn = 3      # 必填：单轮允许的连续无效模型响应数
+
+[modules.analysis]
+enabled = false                         # 必填：是否开启 Analysis 创新模块；Baseline 必须为 false
+max_schema_retries = 1                  # 必填：Analysis JSON 校验失败后的最大修复次数
+max_enterprise_threads = 50             # 必填：信号中最多保留的开放企业谈判明细数
+
+# 决策 Agent：读取 Dashboard/战略简报并调用经营工具。
+[models.decision_agent]
+provider = "openai"                     # 必填：当前主实验只支持 OpenAI SDK
+api_type = "openai_chat_completions"    # 必填：openai_chat_completions | openai_responses
+tool_choice = "auto"                    # 必填：auto | required；需与目标端点能力一致
+model = "REPLACE_DECISION_MODEL"        # 必填：发送给 Provider 的模型名
+base_url = "https://provider.example/v1" # 可选：自定义或 OpenAI-compatible 端点
+api_key_env = "REPLACE_API_KEY_ENV"     # 开启鉴权时必填：存放 API Key 的环境变量名
+api_key_required = true                 # 可选，默认 true；仅本地无鉴权端点设为 false
+# reasoning_effort = "low"              # 可选：none | low | medium | high | xhigh | max；未配置时不发送
+# temperature = 0.7                     # 可选：0-2；未配置时不发送
+# top_p = 0.8                           # 可选：0-1；未配置时不发送
+max_output_tokens = 16384               # 必填：单次决策调用的最大输出 Token
+timeout_seconds = 600                   # 可选，默认 600：单次请求超时秒数
+
+# 可选：将渠道请求名和可能的服务端返回名统一映射到论文计价模型。
+[models.decision_agent.pricing_model_map]
+"REPLACE_DECISION_MODEL" = "REPLACE_OFFICIAL_DECISION_MODEL"         # 请求模型名 -> 官方计价模型
+"REPLACE_SERVED_DECISION_MODEL" = "REPLACE_OFFICIAL_DECISION_MODEL"  # 服务端返回名 -> 官方计价模型
+
+# 必填：论文使用的官方单价，金额为每百万 Token。
+# 具体实验配置必须在此记录价格来源、价格生效日期和采用的高峰/低谷口径。
+[models.decision_agent.pricing."REPLACE_OFFICIAL_DECISION_MODEL"]
+currency = "USD"                       # 必填：三位大写币种代码
+uncached_input_cost_per_million = 0.0   # 必填：未命中缓存的输入单价
+cached_input_cost_per_million = 0.0     # 必填：命中缓存的输入单价
+output_cost_per_million = 0.0           # 必填：输出单价；推理 Token 通常已包含在输出中
+
+# 社交环境 LLM：生成客户、宏观和竞争对手帖子，并评估 Agent 帖子。
+[models.social_llm]
+provider = "openai"                     # 必填：当前仅支持 OpenAI SDK
+api_type = "openai_chat_completions"    # 必填：openai_chat_completions | openai_responses
+model = "REPLACE_SOCIAL_MODEL"          # 必填：发送给 Provider 的模型名
+base_url = "https://provider.example/v1" # 可选：模型端点
+api_key_env = "REPLACE_API_KEY_ENV"     # 开启鉴权时必填
+api_key_required = true                 # 可选，默认 true
+# reasoning_effort = "none"             # 可选：none | low | medium | high | xhigh | max；未配置时不发送
+# temperature = 0.95                    # 可选：社交任务的默认温度
+# top_p = 0.9                           # 可选：社交任务的默认核采样阈值
+max_output_tokens = 1000                # 必填：任务未单独覆盖时的输出上限
+timeout_seconds = 600                   # 可选，默认 600
+
+[models.social_llm.pricing_model_map]
+"REPLACE_SOCIAL_MODEL" = "REPLACE_OFFICIAL_SOCIAL_MODEL"         # 请求模型名 -> 官方计价模型
+"REPLACE_SERVED_SOCIAL_MODEL" = "REPLACE_OFFICIAL_SOCIAL_MODEL"  # 服务端返回名 -> 官方计价模型
+
+[models.social_llm.pricing."REPLACE_OFFICIAL_SOCIAL_MODEL"]
+currency = "USD"                       # 必填：三位大写币种代码
+uncached_input_cost_per_million = 0.0   # 必填：未命中缓存的输入单价
+cached_input_cost_per_million = 0.0     # 必填：命中缓存的输入单价
+output_cost_per_million = 0.0           # 必填：输出单价
+
+# 可选：任务级参数会覆盖 social_llm 的同名模型级参数。
+[models.social_llm.tasks.customer_post]  # 普通客户帖子
+max_output_tokens = 1000                # 可选：覆盖普通客户帖子的输出上限
+
+[models.social_llm.tasks.macro_post]     # 宏观市场帖子
+max_output_tokens = 300                 # 可选：覆盖宏观帖子的输出上限
+
+[models.social_llm.tasks.competitor_post] # 竞争对手帖子
+max_output_tokens = 300                 # 可选：覆盖竞争对手帖子的输出上限
+
+[models.social_llm.tasks.agent_post_judge] # 评估 Agent 帖子影响
+temperature = 0.3                      # 可选：覆盖 Agent 帖子评估任务的温度
+max_output_tokens = 100                # 可选：覆盖 Agent 帖子评估任务的输出上限
+
+[models.social_llm.tasks.agent_post_reply] # 客户回复高影响帖子
+temperature = 0.9                      # 可选：覆盖客户回复任务的温度
+max_output_tokens = 150                # 可选：覆盖客户回复任务的输出上限
+
+# Analysis LLM：四角色报告和经营状态重构。
+# modules.analysis.enabled = false 时可删除整个 models.analysis 配置块。
+[models.analysis]
+provider = "openai"                     # 开启 Analysis 时必填
+api_type = "openai_chat_completions"    # 开启 Analysis 时必填
+model = "REPLACE_ANALYSIS_MODEL"        # 开启 Analysis 时必填
+base_url = "https://provider.example/v1" # 可选：模型端点
+api_key_env = "REPLACE_API_KEY_ENV"     # 开启鉴权时必填
+api_key_required = true                 # 可选，默认 true
+# reasoning_effort = "none"             # 可选：none | low | medium | high | xhigh | max；未配置时不发送
+temperature = 0.2                      # 可选：结构化分析建议使用低温度
+max_output_tokens = 5000                # 必填：任务未覆盖时的输出上限
+timeout_seconds = 600                   # 可选，默认 600
+
+[models.analysis.pricing_model_map]
+"REPLACE_ANALYSIS_MODEL" = "REPLACE_OFFICIAL_ANALYSIS_MODEL"         # 请求模型名 -> 官方计价模型
+"REPLACE_SERVED_ANALYSIS_MODEL" = "REPLACE_OFFICIAL_ANALYSIS_MODEL"  # 服务端返回名 -> 官方计价模型
+
+[models.analysis.pricing."REPLACE_OFFICIAL_ANALYSIS_MODEL"]
+currency = "USD"                       # 必填：三位大写币种代码
+uncached_input_cost_per_million = 0.0   # 必填：未命中缓存的输入单价
+cached_input_cost_per_million = 0.0     # 必填：命中缓存的输入单价
+output_cost_per_million = 0.0           # 必填：输出单价
+
+[models.analysis.tasks.role_report]     # 四个职能角色分别生成报告
+max_output_tokens = 3000               # 可选：覆盖角色报告任务的输出上限
+
+[models.analysis.tasks.state_reconstruction] # 整合四份报告并生成统一经营画像
+max_output_tokens = 4000               # 可选：覆盖状态重构任务的输出上限
+
+# 厂商私有参数只能通过 request_options 显式透传，不得依赖端点默认值。
+# 下面仅演示结构，请按目标 Provider 的官方文档填写：
+# [models.decision_agent.request_options.extra_body]
+# vendor_parameter = "REPLACE_VALUE"
+#
+# [models.decision_agent.request_options.extra_headers]
+# X-Provider-Header = "REPLACE_VALUE"
+#
+# [models.decision_agent.request_options.extra_query]
+# vendor_parameter = "REPLACE_VALUE"
