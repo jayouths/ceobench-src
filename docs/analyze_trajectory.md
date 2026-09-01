@@ -16,8 +16,8 @@ the agent played.
 ## 🔑 Decrypt and open
 
 The SQLCipher key is fixed and bundled into the published `novamind-operation`
-zipapp. The value is in `KEYS.md` at the repo root, or import it from the
-compiled `saas_bench._embedded_key` module.
+zipapp. The value is in `docs/database-encryption.md`, or import it from the
+compiled `saas_bench.runtime._embedded_key` module.
 
 **One-shot decrypt to plain SQLite:**
 
@@ -33,7 +33,7 @@ and `--summary`.
 
 ```python
 from pathlib import Path
-from saas_bench.db_protection import load_session_db
+from saas_bench.runtime.db_protection import load_session_db
 
 conn = load_session_db(Path("<run_dir>/world.nmdb"))   # in-memory sqlite3 conn
 tables = conn.execute(
@@ -110,7 +110,7 @@ ORDER BY day;
 
 ```python
 import pandas as pd
-from saas_bench.db_protection import load_session_db
+from saas_bench.runtime.db_protection import load_session_db
 
 conn = load_session_db("<run_dir>/world.nmdb")
 ledger = pd.read_sql_query("SELECT day, category, amount FROM ledger", conn)

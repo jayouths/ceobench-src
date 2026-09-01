@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/mascot.png" alt="CEO-Bench mascot" width="220"/>
+  <img src="docs/assets/mascot.png" alt="CEO-Bench mascot" width="220"/>
 </p>
 
 <h1 align="center">CEO-Bench: Can Agents Play the Long Game?</h1>
@@ -23,7 +23,7 @@
 ## 📊 Overview
 
 <p align="center">
-  <img src="assets/teaser.png" alt="CEO-Bench teaser" width="100%"/>
+  <img src="docs/assets/teaser.png" alt="CEO-Bench teaser" width="100%"/>
 </p>
 
 CEO-Bench evaluates general long-horizon agent capabilities by simulating a
@@ -39,53 +39,46 @@ observable, noisy, and evolving market with delayed and coupled consequences.
 
 ### 🔑 Setup: Environment variables
 
-CEO-Bench has two LLM roles in the current main experiment:
+CEO-Bench has two required LLM roles and one optional Analysis role in the current main experiment:
 
 - the benchmarked agent model
 - the social/macro post simulator model
+- the Analysis model, when the innovation module is enabled
 
 Enterprise negotiations use the benchmark's structured rules and do not call
 an enterprise customer LLM.
 
-Main experiments load all experiment and LLM settings from
-`experiments/experiment.toml`. There are no model defaults in `config.py`.
+New experiments must load all experiment and LLM settings from an explicitly
+selected TOML file. [`config/config_template.toml`](config/config_template.toml)
+documents the complete structure. There are no model defaults in the simulator
+`config.py`.
 
-**Option A: Amazon Bedrock for all models**
-
-```bash
-export AWS_ACCESS_KEY_ID="..."
-export AWS_SECRET_ACCESS_KEY="..."
-export AWS_REGION="us-east-2"
-```
-
-```toml
-[models.decision_agent]
-provider = "bedrock"
-api_type = "anthropic_messages"
-
-[models.social_llm]
-provider = "bedrock"
-api_type = "anthropic_messages"
-```
-
-**Option B: Anthropic direct API for all models**
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-```
+All active model calls use the OpenAI SDK. OpenAI official, AutoDL,
+DeepSeek, GLM, Qwen, and Ollama endpoints all configure
+`provider = "openai"`; select the actual protocol explicitly with
+`api_type` and distinguish endpoints with `base_url`.
 
 ```toml
 [models.decision_agent]
-provider = "anthropic"
-api_type = "anthropic_messages"
+provider = "openai"
+api_type = "openai_chat_completions"
+base_url = "https://provider.example/v1"
+api_key_env = "MODEL_API_KEY"
 
 [models.social_llm]
-provider = "anthropic"
-api_type = "anthropic_messages"
+provider = "openai"
+api_type = "openai_chat_completions"
+base_url = "https://provider.example/v1"
+api_key_env = "MODEL_API_KEY"
 ```
 
-See `experiments/README.md` for the supported provider/API combinations,
+See [`config/README.md`](config/README.md) for the run commands and
+[`config/config_template.toml`](config/config_template.toml) for supported provider/API combinations,
 model pricing tables, task-level overrides, and request extensions.
+
+The archived Anthropic/Bedrock extension code under `src/saas_bench/legacy/`
+can be prepared separately with `uv sync --extra legacy`; it is not part of
+the current main experiment.
 
 
 ### 🎯 Option A: Evaluate any coding agent easily
@@ -104,7 +97,7 @@ Download this, read instructions, and finish 500 day gameplay. https://github.co
 
 ### ⚙️ Option B: Customize the configuration
 
-All tunable simulator constants live in **`src/saas_bench/config.py`**: pricing,
+All tunable simulator constants live in **`src/saas_bench/simulator/config.py`**: pricing,
 customer groups, ad-channel productivity, R&D speed, competitor difficulty, etc.
 After editing, rebuild the public bundle. 
 
@@ -134,13 +127,11 @@ runs the full 500-day loop with checkpointing and logging. The full process:
 uv sync --frozen
 ```
 
-**2. Set provider credentials** in a `.env` file at the repo root. Which keys you
-need depends on the agent model; for a Bedrock run:
+**2. Set provider credentials** in a `.env` file at the repo root. The variable
+name is selected by each TOML model section through `api_key_env`:
 
 ```bash
-AWS_ACCESS_KEY_ID="..."
-AWS_SECRET_ACCESS_KEY="..."
-AWS_REGION="us-east-2"
+MODEL_API_KEY="..."
 ```
 
 Each TOML model section names its credential environment variable with
@@ -152,23 +143,19 @@ Local unauthenticated endpoints must set `api_key_required = false`.
 **3. Run.** `public/` ships prebuilt, so there is no build step:
 
 ```bash
-uv run --frozen python -m saas_bench.agents.bash_agent.run_test
+uv run --frozen python -m saas_bench.agents.bash_agent.cli \
+  --config config/<experiment>.toml
 ```
 
-The runner reads `experiments/experiment.toml` by default. To start a new run
-from another complete profile, select it explicitly:
-
-```bash
-uv run --frozen python -m saas_bench.agents.bash_agent.run_test \
-  --config experiments/smoke-deepseek.toml
-```
-
+New runs always require `--config`; there is no default experiment profile.
 CLI flags do not override individual experiment or model settings. To resume
 an existing run, pass only `--resume <run_id-or-directory>`; the runner then
 reads that run's saved `config.json`. `--config` and `--resume` are mutually
 exclusive.
 
-**4. Output.** Each run lands at `bash_agent_runs/run_<id>/`: `result.json`
+**4. Output.** Each run lands at
+`outputs/runs/<experiment_name>/<北京时间>_seed-<seed>_<run_id>/`:
+`result.json`
 (machine-readable outcome), `world.nmdb` (encrypted ledger), `config.json`,
 `checkpoint.json`, `agent_workspace/` (the
 agent's sandbox, a fresh git repo with weekly commits), `analysis/day_<day>/`
@@ -178,7 +165,7 @@ LLM, and tool events) plus `performance_<id>.jsonl` (week, decision-batch,
 module, and run summaries). To score and analyze the run, see
 [docs/analyze_trajectory.md](docs/analyze_trajectory.md).
 
-If you edit `src/saas_bench/config.py`, rebuild the bundle the agent sees with
+If you edit `src/saas_bench/simulator/config.py`, rebuild the bundle the agent sees with
 `uv run --frozen python scripts/build_public.py` before launching.
 
 
@@ -190,11 +177,11 @@ Every finished run leaves a single artifact: an encrypted `world.nmdb` ledger
 subscriptions, customers, competitor events, and every action the agent took.
 
 The decryption key is fixed and bundled into the published `novamind-operation`
-zipapp at build time; see `KEYS.md` in this repo for the value, or import it
-from the compiled `saas_bench._embedded_key` module. To decrypt and query:
+zipapp at build time; see `docs/database-encryption.md` for the value, or import it
+from the compiled `saas_bench.runtime._embedded_key` module. To decrypt and query:
 
 ```bash
-KEY=$(grep _NMDB_KEY KEYS.md | head -1 | cut -d'"' -f2)
+KEY=$(grep _NMDB_KEY docs/database-encryption.md | head -1 | cut -d'"' -f2)
 sqlcipher path/to/world.nmdb \
   "PRAGMA key = '$KEY';" \
   "SELECT day, category, amount FROM ledger ORDER BY day, id LIMIT 10;"
@@ -210,22 +197,18 @@ cheating, see **[docs/analyze_trajectory.md](docs/analyze_trajectory.md)**.
 ```
 ceobench-src/
 ├── README.md                          ← this file
+├── config/                            ← experiment configuration template
 ├── docs/
+│   ├── assets/                        ← README and paper media
 │   └── analyze_trajectory.md          ← decrypt, schema + analysis guide
-├── public_sources/                    ← human-written inputs to the public build
-│   └── README.md, requirements.txt
+├── outputs/                           ← local runs and temporary files (ignored)
+├── public/                            ← agent-facing CLI, docs and static instructions
 ├── scripts/
 │   ├── build_public.py                ← canonical public-repo builder
 │   ├── generate_public_docs.py        ← public documentation generator
 │   └── decode_db.py                   ← decrypt run database for analysis
-└── src/saas_bench/                    ← simulator + bash agent
-    ├── simulation.py, environment.py, shocks.py, event_logger.py
-    ├── config.py                      ← all tunable constants
-    ├── customer_llm.py, personas.py, enterprise.py
-    ├── database.py, db_protection.py
-    ├── api_server.py, server_entry.py, tools.py
-    ├── novamind_api/, _public_cli.py
-    └── agents/bash_agent/             ← canonical baseline harness
+├── src/saas_bench/                    ← simulator, runtime and agent source
+└── tests/                             ← unit, component and integration tests
 ```
 
 

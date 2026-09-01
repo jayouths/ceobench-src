@@ -2,7 +2,7 @@
 
 This is the symmetric key used to encrypt and decrypt every CEO-Bench session
 database. It is bundled into the published `novamind-operation` zipapp at
-build time (compiled into `saas_bench._embedded_key._NMDB_KEY`) so the engine
+build time (compiled into `saas_bench.runtime._embedded_key._NMDB_KEY`) so the engine
 can open the file without any external configuration.
 
 ## The key
@@ -15,7 +15,7 @@ _NMDB_KEY = "72692ea1293c52fbeef3ad8587db9d4fe3546d744766c3bdcb5aab4dad4b3c34"
 key — `PRAGMA key = '<hex_string>'` — so SQLCipher runs its default PBKDF2
 derivation over the ASCII bytes of the hex string (it is **not** the
 `PRAGMA key = "x'…'"` raw-bytes syntax). See
-`src/saas_bench/db_protection.py::_apply_key`.
+`src/saas_bench/runtime/db_protection.py::_apply_key`.
 
 ## Decrypting a session file
 
@@ -40,7 +40,7 @@ for row in conn.execute("SELECT day, category, amount FROM ledger ORDER BY day, 
 ```
 
 For the database schema and richer analysis recipes, see
-[`docs/analyze_trajectory.md`](docs/analyze_trajectory.md).
+[`analyze_trajectory.md`](analyze_trajectory.md).
 
 ## Rotation policy
 
@@ -48,11 +48,11 @@ For the database schema and richer analysis recipes, see
 `world.nmdb` is encrypted with this exact value; rotating it makes those
 files permanently undecryptable. If you do rotate:
 
-1. Update `src/saas_bench/_embedded_key.py::_NMDB_KEY`
+1. Update `src/saas_bench/runtime/_embedded_key.py::_NMDB_KEY`
 2. Update the value above in this file
 3. Rebuild the public zipapp (`uv run python scripts/build_public.py`) and
    push the new `public/` submodule pointer
-4. Archive (or delete) all pre-rotation `bash_agent_runs/` artifacts so no
+4. Archive (or delete) all pre-rotation `outputs/runs/` artifacts so no
    one tries to decrypt them with the new key
 
 ## Why this lives in a plaintext file

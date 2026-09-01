@@ -182,7 +182,7 @@ Prompt 必须包含字段语义、枚举范围、数量上限和最小合法输�
 
 角色 Prompt 位于 `analysis/role_prompts.py`，执行和校验位于 `analysis/role_reports.py`。四个角色按市场、财务、产品、客户的固定顺序调用，并且每个角色只接收自身信号、周次和统计窗口，不接收其他角色报告或历史策略。
 
-程序除校验 JSON Schema 外，还校验证据的业务语义：`metric` 必须引用当前角色信号中真实存在的精确字段路径；引用带有程序计算方向的环比指标时，`direction` 必须与确定性信号一致。非法输出触发修复调用时，每次请求都会重新携带完整原始信号、上一份非法回答和程序校验错误，不依赖供应商是否保留聊天历史。
+程序除校验 JSON Schema 外，还校验证据的业务语义：每个角色至少需要输出一条可核验证据，禁止用三个空数组静默降级；`metric` 必须引用当前角色信号中真实存在的精确字段路径；引用带有程序计算方向的环比指标时，`direction` 必须与确定性信号一致；引用当前现金、当前配置等单点信号时，`direction` 必须为 `insufficient_data`，禁止 LLM 自行补出上升、下降或持平趋势。非法输出触发修复调用时，每次请求都会重新携带完整原始信号、上一份非法回答和程序校验错误，不依赖供应商是否保留聊天历史。
 
 每周成功产出的 `role_reports.json` 同时保存四份报告以及每次初始、修复调用的请求模型、服务模型、计价模型、Token、推理 Token、成本和耗时。同一周已有合法产物时直接复用，不重复请求模型。
 
@@ -230,7 +230,7 @@ max_schema_retries = 1
 每个模拟周保存一份不可混淆的独立产物：
 
 ```text
-run_<run_id>/analysis/day_007/
+<run_dir>/analysis/day_007/
 ├── signals.json
 ├── role_reports.json
 ├── state_portrait.json
@@ -279,12 +279,12 @@ Analysis 汇总同时包含总用量、市场/财务/产品/客户四角色用�
 
 | 位置 | 计划改动 |
 | --- | --- |
-| `src/saas_bench/public_week_snapshot.py` | 统一构建公开周度经营事实并确定性渲染 Dashboard |
-| `src/saas_bench/api_server.py` 与 `environment.py` | 在 `/dashboard` 暴露结构化快照，Dashboard 复用同一数据来源 |
-| `src/saas_bench/llm_provider.py` | 在统一 LLM 返回结构中补充推理 Token |
+| `src/saas_bench/simulator/public_week_snapshot.py` | 统一构建公开周度经营事实并确定性渲染 Dashboard |
+| `src/saas_bench/runtime/api_server.py` 与 `simulator/environment.py` | 在 `/dashboard` 暴露结构化快照，Dashboard 复用同一数据来源 |
+| `src/saas_bench/experiment/llm_provider.py` | 在统一 LLM 返回结构中补充推理 Token |
 | `src/saas_bench/agents/bash_agent/analysis/` | 新增 Schema、统计信号、Prompt、流程编排和简报生成 |
-| `src/saas_bench/agents/bash_agent/run_test.py` | 接入独立模型、每周调用、简报注入、用量与恢复 |
-| `src/saas_bench/experiment_config.py` 与 `experiments/*.toml` | 补齐模块和模型配置 |
+| `src/saas_bench/agents/bash_agent/runner.py` | 接入独立模型、每周调用、简报注入、用量与恢复 |
+| `src/saas_bench/experiment/experiment_config.py` 与 `config/*.toml` | 补齐模块和模型配置 |
 | `tests/` | 分别覆盖 Schema、信号、流程、产物、消融和恢复 |
 
-本模块不修改 `simulation.py`、`database.py`、`config.py` 等模拟器底层规则，不修改 Agent 可见的公开工具权限。
+本模块不修改 `simulator/simulation.py`、`simulator/database.py`、`simulator/config.py` 等模拟器底层规则，不修改 Agent 可见的公开工具权限。
