@@ -147,14 +147,68 @@ def test_analysis_signal_queries_pass_public_query_policy(
 
 @pytest.mark.parametrize(
     "table_name",
-    ["_eval_subscription_day", "_eval_subscription_event", "_eval_future_fact"],
+    [
+        "_eval_subscription_day",
+        "_eval_subscription_event",
+        "_eval_segment_day",
+        "_eval_quality_day",
+        "_eval_channel_effectiveness_event",
+        "_eval_future_fact",
+    ],
 )
 def test_api_blocks_all_evaluation_fact_tables(
     make_initialized_sim, table_name, monkeypatch
 ):
     conn, _, _ = make_initialized_sim()
-    # 评测结果不是模拟世界状态，Oracle 模式也不得向 Agent 开放。
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {"sql": f"SELECT * FROM {table_name}"}
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 403
+    assert payload == {
+        "success": False,
+        "error": f"Table '{table_name}' is not accessible.",
+    }
+
+
+def test_oracle_can_read_evaluation_fact_tables(make_initialized_sim, monkeypatch):
+    conn, simulator, _ = make_initialized_sim()
+    simulator.step_day()
     monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", True)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=1), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {
+        "sql": "SELECT day, group_id FROM _eval_segment_day ORDER BY group_id"
+    }
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 200
+    assert payload["success"] is True
+    assert payload["row_count"] > 0
+    assert payload["columns"] == ["day", "group_id"]
+
+
+@pytest.mark.parametrize(
+    "table_name",
+    ["_hidden_legacy_fact", "_hidden_future_fact"],
+)
+def test_api_blocks_all_hidden_prefix_tables(
+    make_initialized_sim, table_name, monkeypatch
+):
+    conn, _, _ = make_initialized_sim()
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
     server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
     responses = []
     handler = _APIHandler.__new__(_APIHandler)

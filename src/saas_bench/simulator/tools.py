@@ -3197,9 +3197,6 @@ _HIDDEN_TABLES = {{
     'group_parameters',       # V2.1: Internal preference drift tracking (agent must infer from behavior)
     'competitor_events',      # V4: Hidden — agent should not see internal competitor boost mechanics
     'group_insight_snapshots', # Internal: frozen market data for get_group_insights (accessed via tool)
-    '_hidden_group_params_history',  # Post-run analysis: daily group parameter snapshots
-    '_hidden_quality_snapshot',      # Post-run analysis: daily quality components per group×plan
-    '_hidden_satisfaction_snapshot', # Post-run analysis: daily avg satisfaction per group
     'global_drift_state',           # Internal: global quality drift accumulator
 }}
 
@@ -3301,11 +3298,11 @@ def _is_schema_query(query):
 def _references_hidden_table(query):
     \"\"\"Check if query references any hidden table.\"\"\"
     q = query.lower()
-    # 所有实验事实表统一使用 _eval_ 前缀，新增表时无需再维护泄露黑名单。
+    # 私有事实表统一按前缀隔离，新增表时无需再维护逐表黑名单。
     import re
-    evaluation_table = re.search(r'\\b_eval_[a-z0-9_]+\\b', q)
-    if evaluation_table:
-        return evaluation_table.group(0)
+    private_table = re.search(r'\\b_(?:eval|hidden)_[a-z0-9_]+\\b', q)
+    if private_table:
+        return private_table.group(0)
     for table in _HIDDEN_TABLES:
         # Check for table name with common SQL patterns
         # Match: FROM table, JOIN table, INTO table, UPDATE table, table., "table"

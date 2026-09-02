@@ -19,10 +19,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Set
 
 # Oracle mode: when set, all hidden-table/column/schema filters are bypassed
-# so the agent can see internal simulation state (latent customer params,
-# competitor events, hidden snapshots, etc.). Default = OFF; only set this
-# env var for an oracle benchmark run. Normal benchmark runs MUST leave it
-# unset so the hide-policy stays enforced.
+# so the agent can see internal simulation state and _eval_* evaluation facts.
+# Default = OFF; only set this env var for an oracle benchmark run. Normal
+# benchmark runs MUST leave it unset so the hide-policy stays enforced.
 _ORACLE_MODE: bool = os.environ.get("ORACLE_MODE") == "1"
 
 from ..simulator.tools import AgentTools, ToolResult
@@ -58,7 +57,6 @@ _HIDDEN_TABLES: Set[str] = {
     'pending_group_research', # Internal async research tracking
     'group_parameters',       # V2.1: Internal preference drift tracking
     'competitor_events',      # V4: Hidden — agent should not see internal competitor boost mechanics
-    '_hidden_leads_per_1k_snapshot',  # v3.4ai: monthly leads_per_1000_dollars snapshot (engine-only)
 }
 
 _HIDDEN_COLUMNS: Set[str] = {
@@ -130,17 +128,12 @@ def _is_schema_query(query: str) -> bool:
     return any(p in q for p in blocked_patterns)
 
 
-def _references_evaluation_table(query: str) -> Optional[str]:
-    """识别实验私有事实表；这类数据在任何 Agent 模式下都不可见。"""
-    evaluation_table = re.search(r'\b_eval_[a-z0-9_]+\b', query.lower())
-    if evaluation_table:
-        return evaluation_table.group(0)
-    return None
-
-
 def _references_hidden_table(query: str) -> Optional[str]:
-    """Check if query references a hidden table. Returns table name or None."""
+    """识别普通 Agent 不可读取的模拟器内部表和实验事实表。"""
     q = query.lower()
+    private_table = re.search(r'\b_(?:eval|hidden)_[a-z0-9_]+\b', q)
+    if private_table:
+        return private_table.group(0)
     for table in _HIDDEN_TABLES:
         if re.search(r'\b' + re.escape(table) + r'\b', q):
             return table
@@ -571,16 +564,8 @@ class _APIHandler(BaseHTTPRequestHandler):
                 }, 403)
                 return
 
-            # 评测事实永远不属于 Agent 观察空间，Oracle 扩展实验也不能读取。
-            evaluation_table = _references_evaluation_table(sql)
-            if evaluation_table:
-                self._send_json({
-                    "success": False,
-                    "error": f"Table '{evaluation_table}' is not accessible.",
-                }, 403)
-                return
-
-            # Block simulator hidden tables (bypassed in oracle mode)
+            # 普通 Agent 只能读取公开经营数据；Oracle 用于白盒上界实验，
+            # 可以读取模拟器内部状态和 _eval_ 实验事实。
             if not _ORACLE_MODE:
                 hidden_table = _references_hidden_table(sql)
                 if hidden_table:

@@ -79,7 +79,12 @@ from .database import (
 )
 from ._sql_chunk import chunked_select, chunked_execute
 from ..experiment.llm_provider import MissingModelPricingError
-from ..evaluation.fact_recorder import record_subscription_day
+from ..evaluation.fact_recorder import (
+    PlanQualityFact,
+    SegmentAcquisitionFact,
+    record_channel_effectiveness_event,
+    record_evaluation_day,
+)
 
 
 def sigmoid(x: float) -> float:
@@ -611,8 +616,8 @@ class Simulator:
 
         Mutates `AD_CHANNELS[ch].leads_per_1000_dollars[gid]` in-place and mirrors the
         new value into `self._leads_per_1k_overrides[(ch, gid)]` so it survives resume.
-        Also writes a row per (channel, group) into `_hidden_leads_per_1k_snapshot`
-        for post-run analysis (engine-only — not exposed via novamind_api).
+        The evaluation layer records each changed (channel, group) value for
+        post-run analysis.
         New values are floored at 0.0.
         """
         from .config import AD_CHANNELS
@@ -625,7 +630,7 @@ class Simulator:
 
         month = self.current_day // 30
         sorted_channels = sorted(AD_CHANNELS.keys())
-        rows = []
+        effectiveness = {}
         for gid in sorted(group_ids):
             gid_hash = zlib.crc32(gid.encode('utf-8'))
             sub_seed = (self._leads_drift_seed ^ (gid_hash * 0x9E3779B1) ^ (month * 0xA24BAED1)) & ((1 << 63) - 1)
@@ -640,12 +645,12 @@ class Simulator:
                 new_value = max(0.0, current + noise)
                 channel.leads_per_1000_dollars[gid] = new_value
                 self._leads_per_1k_overrides[(channel_id, gid)] = new_value
-                rows.append((self.current_day, channel_id, gid, new_value))
-        if rows:
-            self.conn.executemany(
-                "INSERT OR REPLACE INTO _hidden_leads_per_1k_snapshot "
-                "(day, channel_id, group_id, value) VALUES (?, ?, ?, ?)",
-                rows,
+                effectiveness[(channel_id, gid)] = new_value
+        if effectiveness:
+            record_channel_effectiveness_event(
+                self.conn,
+                self.current_day,
+                effectiveness,
             )
 
     def _restore_leads_overrides_to_ad_channels(self):
@@ -780,6 +785,18 @@ class Simulator:
             self._market_observer_id = self.conn.execute(
                 "SELECT customer_id FROM customers WHERE email = 'market_observer@external'"
             ).fetchone()['customer_id']
+
+            # 初始状态必须落表，才能从 day 0 还原完整的渠道效率变化历史。
+            from .config import AD_CHANNELS
+            record_channel_effectiveness_event(
+                self.conn,
+                0,
+                {
+                    (channel_id, group_id): value
+                    for channel_id, channel in AD_CHANNELS.items()
+                    for group_id, value in channel.leads_per_1000_dollars.items()
+                },
+            )
 
         if resume:
             # Recover market_observer_id on resume
@@ -1995,6 +2012,7 @@ class Simulator:
         # =========================================================================
         # Track acquisition source weights per group for probabilistic attribution
         acquisition_weights = {g: {} for g in active_groups}
+        segment_acquisition: dict[str, SegmentAcquisitionFact] = {}
 
         for group_id, group in active_groups.items():
             # Reputation factor: reputation IS the multiplier directly
@@ -2052,16 +2070,19 @@ class Simulator:
             n_new = self.rng.poisson(max(0, daily_leads))
             leads_by_group[group_id] = n_new
 
-            # Record all multipliers for post-run analysis (hidden from agent)
-            self.conn.execute("""
-                INSERT OR REPLACE INTO _hidden_lead_multiplier_snapshot
-                (day, group_id, reputation_factor, demand_multiplier, cycle_mult,
-                 macro_lead_mult, social_media_mult, surge_mult, total_channel_leads,
-                 network_leads, daily_leads_expected, actual_leads)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (self.current_day, group_id, reputation_factor, demand_multiplier,
-                  cycle_mult, macro_lead_mult, social_media_mult, surge_mult,
-                  total_channel_leads, network_leads, daily_leads, n_new))
+            # 获客公式中的中间量只能在计算现场准确取得，统一交给 evaluation
+            # 在日末落表；这里不改变任何线索生成或客户决策逻辑。
+            segment_acquisition[group_id] = SegmentAcquisitionFact(
+                market_capacity_multiplier=demand_multiplier,
+                calendar_cycle_multiplier=cycle_mult,
+                macroeconomic_multiplier=macro_lead_mult,
+                social_media_multiplier=social_media_mult,
+                demand_surge_multiplier=surge_mult,
+                channel_leads_expected=total_channel_leads,
+                network_leads_expected=network_leads,
+                total_leads_expected=daily_leads,
+                actual_leads=int(n_new),
+            )
 
             # =========================================================================
             # Acquisition source attribution (proportional to contribution)
@@ -2432,6 +2453,7 @@ class Simulator:
             'new_individual_leads': new_individual_leads,
             'new_enterprise_leads': new_enterprise_leads,
             'new_individual_subscribers': new_individual_subscribers,
+            'segment_acquisition': segment_acquisition,
         }
 
     def _choose_plan_for_customer_curve(self, params: dict, config: dict) -> str:
@@ -7099,122 +7121,6 @@ Guidelines:
 
         return total_costs
 
-    def _record_hidden_snapshots(self, config: dict):
-        """Record hidden daily snapshots for post-run analysis.
-
-        Three tables:
-        1. _hidden_group_params_history: group spawning params + reputation + awareness
-        2. _hidden_quality_snapshot: quality components per group × plan
-        3. _hidden_satisfaction_snapshot: group-level customer health
-        """
-        day = self.current_day
-
-        # --- Group drift accumulators + reputation + awareness ---
-        all_params = get_all_group_parameters(self.conn)
-        global_q_bias = get_global_drift(self.conn)
-        all_reps = self.conn.execute(
-            "SELECT group_id, reputation FROM group_reputation"
-        ).fetchall()
-        rep_map = {r['group_id']: r['reputation'] for r in all_reps}
-        all_aware = self.conn.execute(
-            "SELECT group_id, awareness FROM group_awareness"
-        ).fetchall()
-        aware_map = {r['group_id']: r['awareness'] for r in all_aware}
-
-        param_rows = []
-        for group_id, gp in all_params.items():
-            param_rows.append((
-                day, group_id,
-                gp['drift_q_bias_total'], gp['drift_c_max_total'],
-                global_q_bias,
-                rep_map.get(group_id, 0.5), aware_map.get(group_id, 0.0),
-            ))
-        if param_rows:
-            self.conn.executemany("""
-                INSERT OR REPLACE INTO _hidden_group_params_history
-                (day, group_id, drift_q_bias_total, drift_c_max_total,
-                 global_q_bias_total, reputation, awareness)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, param_rows)
-
-        # --- Quality components per group × plan ---
-        # Read fresh values (not cached) since _update_global_state() ran mid-step
-        base_pq = self.config.base_product_quality
-        q_shared_bonus = get_global_state(self.conn, 'q_shared_bonus', 0.0)
-        q_group_bonuses = {}
-        for row in self.conn.execute(
-            "SELECT key, value FROM global_state WHERE key LIKE 'q_group_bonus_%'"
-        ).fetchall():
-            gid = row['key'][len('q_group_bonus_'):]
-            q_group_bonuses[gid] = float(row['value'])
-
-        quality_rows = []
-        for group_id in all_params:
-            q_group = q_group_bonuses.get(group_id, 0.0)
-            for plan in ('A', 'B', 'C'):
-                tier = config.get(f'tier_{plan}', 4)
-                multiplier = self._cached_tier_multiplier_per_plan.get(plan, 1.0)
-                delivered = (base_pq + q_shared_bonus + q_group) * multiplier
-                quality_rows.append((
-                    day, group_id, plan,
-                    base_pq, q_shared_bonus, q_group,
-                    tier, multiplier, delivered,
-                ))
-        if quality_rows:
-            self.conn.executemany("""
-                INSERT OR REPLACE INTO _hidden_quality_snapshot
-                (day, group_id, plan, base_product_quality, q_shared_bonus,
-                 q_group_bonus, tier, tier_multiplier, delivered_quality)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, quality_rows)
-
-        # --- Satisfaction snapshot per group ---
-        sat_rows = self.conn.execute("""
-            SELECT c.group_id,
-                   COUNT(*) as active_subs,
-                   AVG(cs.satisfaction) as avg_sat,
-                   AVG(cs.relationship) as avg_rel,
-                   MIN(cs.satisfaction) as min_sat,
-                   MAX(cs.satisfaction) as max_sat
-            FROM customer_state cs
-            JOIN customers c ON cs.customer_id = c.customer_id
-            JOIN subscriptions s ON s.customer_id = c.customer_id AND s.status = 'subscribed'
-            GROUP BY c.group_id
-        """).fetchall()
-
-        # Count churned today and new today
-        churned_map = {}
-        new_map = {}
-        for row in self.conn.execute(
-            "SELECT c.group_id, COUNT(*) as cnt FROM subscriptions s "
-            "JOIN customers c ON s.customer_id = c.customer_id "
-            "WHERE s.end_day = ? GROUP BY c.group_id", (day,)
-        ).fetchall():
-            churned_map[row['group_id']] = row['cnt']
-        for row in self.conn.execute(
-            "SELECT group_id, COUNT(*) as cnt FROM customers "
-            "WHERE created_day = ? GROUP BY group_id", (day,)
-        ).fetchall():
-            new_map[row['group_id']] = row['cnt']
-
-        sat_snapshot_rows = []
-        for row in sat_rows:
-            gid = row['group_id']
-            sat_snapshot_rows.append((
-                day, gid, row['active_subs'],
-                row['avg_sat'], row['avg_rel'],
-                row['min_sat'], row['max_sat'],
-                churned_map.get(gid, 0), new_map.get(gid, 0),
-            ))
-        if sat_snapshot_rows:
-            self.conn.executemany("""
-                INSERT OR REPLACE INTO _hidden_satisfaction_snapshot
-                (day, group_id, active_subscribers, avg_satisfaction,
-                 avg_relationship, min_satisfaction, max_satisfaction,
-                 churned_today, new_today)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, sat_snapshot_rows)
-
     def step_week(self) -> DayResult:
         """Simulate one week (7 days) and return accumulated results.
 
@@ -7484,9 +7390,22 @@ Guidelines:
               AND c.customer_type = 'large'
         """, (self.current_day,)).fetchone()[0]
 
-        # === Hidden snapshots for post-run analysis (invisible to agent) ===
-        self._record_hidden_snapshots(config)
-        record_subscription_day(self.conn, self.current_day)
+        # 经营事实由 evaluation 层统一落表；模拟器只提供准确的日末触发时点。
+        record_evaluation_day(
+            self.conn,
+            self.current_day,
+            gen_result['segment_acquisition'],
+            base_product_quality=self.config.base_product_quality,
+            quality_by_plan={
+                plan: PlanQualityFact(
+                    model_tier=config.get(f'tier_{plan}', 4),
+                    tier_multiplier=self._cached_tier_multiplier_per_plan.get(
+                        plan, 1.0
+                    ),
+                )
+                for plan in ('A', 'B', 'C')
+            },
+        )
 
         # Save RNG states for deterministic resume
         self.save_rng_states()

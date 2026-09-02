@@ -2,7 +2,12 @@
 
 import pytest
 
-from saas_bench.evaluation.fact_recorder import record_subscription_day
+from saas_bench.evaluation.fact_recorder import (
+    SegmentAcquisitionFact,
+    record_segment_day,
+    record_subscription_day,
+)
+from saas_bench.simulator.config import AD_CHANNELS
 
 
 def _insert_customer(conn, customer_type: str, group_id: str, seats: int) -> int:
@@ -244,3 +249,195 @@ def test_step_day_records_subscription_day(make_initialized_sim):
         """
     ).fetchone()
     assert tuple(row) == pytest.approx((1, 1, 20.0))
+
+    segment_row = conn.execute(
+        """
+        SELECT reputation, market_capacity_multiplier,
+               calendar_cycle_multiplier, macroeconomic_multiplier,
+               social_media_multiplier, demand_surge_multiplier,
+               channel_leads_expected, network_leads_expected,
+               total_leads_expected, actual_leads
+        FROM _eval_segment_day
+        WHERE day = 1 AND group_id = 'S1'
+        """
+    ).fetchone()
+    assert segment_row is not None
+    segment = dict(segment_row)
+    assert segment["market_capacity_multiplier"] is not None
+    assert segment["actual_leads"] is not None
+    assert segment["total_leads_expected"] == pytest.approx(
+        segment["reputation"]
+        * segment["market_capacity_multiplier"]
+        * segment["calendar_cycle_multiplier"]
+        * segment["macroeconomic_multiplier"]
+        * segment["social_media_multiplier"]
+        * segment["demand_surge_multiplier"]
+        * (segment["channel_leads_expected"] + segment["network_leads_expected"])
+    )
+
+    group_count = conn.execute("SELECT COUNT(*) FROM group_parameters").fetchone()[0]
+    quality_count = conn.execute(
+        "SELECT COUNT(*) FROM _eval_quality_day WHERE day = 1"
+    ).fetchone()[0]
+    assert quality_count == group_count * 3
+    quality = dict(
+        conn.execute(
+            """
+            SELECT * FROM _eval_quality_day
+            WHERE day = 1 AND group_id = 'S1' AND plan = 'A'
+            """
+        ).fetchone()
+    )
+    assert quality["delivered_quality"] == pytest.approx(
+        (
+            quality["base_product_quality"]
+            + quality["shared_quality_bonus"]
+            + quality["group_quality_bonus"]
+        )
+        * quality["tier_multiplier"]
+    )
+
+
+def test_initial_channel_effectiveness_is_recorded(make_initialized_sim):
+    original_effectiveness = {
+        channel_id: dict(channel.leads_per_1000_dollars)
+        for channel_id, channel in AD_CHANNELS.items()
+    }
+    try:
+        conn, simulator, _ = make_initialized_sim()
+        initial_rows = conn.execute(
+            """
+            SELECT channel_id, group_id, leads_per_1000_dollars
+            FROM _eval_channel_effectiveness_event
+            WHERE day = 0
+            ORDER BY channel_id, group_id
+            """
+        ).fetchall()
+
+        assert initial_rows
+        assert all(row["leads_per_1000_dollars"] >= 0 for row in initial_rows)
+
+        simulator.current_day = 30
+        simulator._apply_monthly_leads_noise()
+        changed_rows = conn.execute(
+            """
+            SELECT channel_id, group_id, leads_per_1000_dollars
+            FROM _eval_channel_effectiveness_event
+            WHERE day = 30
+            ORDER BY channel_id, group_id
+            """
+        ).fetchall()
+        assert len(changed_rows) == len(initial_rows)
+        assert all(row["leads_per_1000_dollars"] >= 0 for row in changed_rows)
+    finally:
+        # AD_CHANNELS 是模拟器进程内共享状态，测试结束后恢复，避免污染其他用例。
+        for channel_id, values in original_effectiveness.items():
+            AD_CHANNELS[channel_id].leads_per_1000_dollars = values
+
+
+def test_segment_day_records_all_groups_and_real_acquisition_inputs(
+    make_initialized_sim,
+):
+    conn, _, _ = make_initialized_sim()
+    customer_id = _insert_customer(conn, "small", "S1", 1)
+    _insert_subscription(conn, customer_id, plan="A", price=20.0, start_day=7)
+    conn.execute(
+        """
+        INSERT INTO customer_state (customer_id, satisfaction, relationship)
+        VALUES (?, 0.25, 0.75)
+        """,
+        (customer_id,),
+    )
+    conn.execute(
+        "UPDATE group_reputation SET reputation = 0.6 WHERE group_id = 'S1'"
+    )
+    conn.execute(
+        "UPDATE group_awareness SET awareness = 0.2 WHERE group_id = 'S1'"
+    )
+    conn.execute(
+        """
+        UPDATE group_parameters
+        SET drift_q_bias_total = 0.03, drift_c_max_total = -4.0
+        WHERE group_id = 'S1'
+        """
+    )
+    conn.execute(
+        "UPDATE global_drift_state SET global_q_bias_total = 0.04 WHERE id = 1"
+    )
+
+    acquisition = SegmentAcquisitionFact(
+        market_capacity_multiplier=0.9,
+        calendar_cycle_multiplier=1.1,
+        macroeconomic_multiplier=0.8,
+        social_media_multiplier=1.2,
+        demand_surge_multiplier=1.0,
+        channel_leads_expected=12.0,
+        network_leads_expected=3.0,
+        total_leads_expected=8.5536,
+        actual_leads=9,
+    )
+    record_segment_day(conn, 7, {"S1": acquisition})
+
+    total_groups = conn.execute("SELECT COUNT(*) FROM group_parameters").fetchone()[0]
+    recorded_groups = conn.execute(
+        "SELECT COUNT(*) FROM _eval_segment_day WHERE day = 7"
+    ).fetchone()[0]
+    assert recorded_groups == total_groups
+
+    s1 = dict(
+        conn.execute(
+            "SELECT * FROM _eval_segment_day WHERE day = 7 AND group_id = 'S1'"
+        ).fetchone()
+    )
+    assert s1 == {
+        "day": 7,
+        "group_id": "S1",
+        "info_level": 1,
+        "reputation": pytest.approx(0.6),
+        "awareness": pytest.approx(0.2),
+        "group_quality_drift": pytest.approx(0.03),
+        "group_budget_drift": pytest.approx(-4.0),
+        "global_quality_drift": pytest.approx(0.04),
+        "satisfaction_sample_accounts": 1,
+        "avg_satisfaction": pytest.approx(0.25),
+        "min_satisfaction": pytest.approx(0.25),
+        "max_satisfaction": pytest.approx(0.25),
+        "avg_relationship": pytest.approx(0.75),
+        "market_capacity_multiplier": pytest.approx(0.9),
+        "calendar_cycle_multiplier": pytest.approx(1.1),
+        "macroeconomic_multiplier": pytest.approx(0.8),
+        "social_media_multiplier": pytest.approx(1.2),
+        "demand_surge_multiplier": pytest.approx(1.0),
+        "channel_leads_expected": pytest.approx(12.0),
+        "network_leads_expected": pytest.approx(3.0),
+        "total_leads_expected": pytest.approx(8.5536),
+        "actual_leads": 9,
+    }
+
+    undiscovered = dict(
+        conn.execute(
+            """
+            SELECT esd.*
+            FROM _eval_segment_day AS esd
+            JOIN group_info_levels AS gil ON gil.group_id = esd.group_id
+            WHERE esd.day = 7 AND gil.info_level = 0
+            LIMIT 1
+            """
+        ).fetchone()
+    )
+    assert undiscovered["satisfaction_sample_accounts"] == 0
+    assert undiscovered["avg_satisfaction"] is None
+    assert undiscovered["total_leads_expected"] is None
+    assert undiscovered["actual_leads"] is None
+
+
+def test_no_hidden_snapshot_tables_are_created(make_initialized_sim):
+    conn, _, _ = make_initialized_sim()
+    hidden_tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+        if row[0].startswith("_hidden_")
+    }
+    assert hidden_tables == set()

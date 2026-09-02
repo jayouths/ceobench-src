@@ -19,10 +19,7 @@ _HIDDEN_TABLES = {
     'test_assignments', 'customer_personas', 'customer_persona_map',
     'group_characteristics', 'enterprise_thread_counter', 'world_context',
     'pending_group_research', 'group_parameters', 'competitor_events',
-    'group_insight_snapshots',
-    '_hidden_group_params_history', '_hidden_quality_snapshot',
-    '_hidden_satisfaction_snapshot', '_hidden_lead_multiplier_snapshot',
-    'global_drift_state',
+    'group_insight_snapshots', 'global_drift_state',
 }
 
 
