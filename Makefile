@@ -1,6 +1,6 @@
 PYTEST := uv run --frozen pytest
 
-.PHONY: test test-fast test-unit test-component test-config test-llm test-agent test-analysis test-checkpoint test-resume test-api test-simulator test-integration test-all test-collect
+.PHONY: test test-fast test-unit test-component test-config test-llm test-agent test-analysis test-evaluation test-checkpoint test-resume test-api test-simulator test-integration test-all test-collect
 
 # 日常默认入口：只执行不依赖外部服务的单元和组件测试。
 test: test-fast
@@ -25,6 +25,9 @@ test-agent:
 
 test-analysis:
 	$(PYTEST) tests/unit/saas_bench/agents/bash_agent/analysis
+
+test-evaluation:
+	$(PYTEST) tests/unit/saas_bench/evaluation
 
 test-checkpoint:
 	$(PYTEST) tests/integration/bash_agent/test_checkpoint.py

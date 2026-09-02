@@ -12,6 +12,22 @@
 
 当前只进行指标和结果方案设计。正式实验结果必须从 `outputs/runs/` 的原始产物统一生成，不手工维护中间 CSV。
 
+单次运行结束后使用以下命令计算指标：
+
+```bash
+uv run --frozen python scripts/evaluate_run.py <run_dir>
+```
+
+默认生成：
+
+```text
+<run_dir>/evaluation/
+├── metrics.json       # 保留完整标量、日级时序和分组明细
+└── metrics_long.csv   # 统一长表，供多次运行拼接、统计和画图
+```
+
+评价程序只读 `world.nmdb`、运行配置、终态结果和调用日志，不修改模拟器状态。未满 28 天的运行无法形成完整末四周指标，对应值明确记录为 `null`。
+
 ## 2. 文档结构
 
 | 文档 | 用途 |
