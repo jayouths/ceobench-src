@@ -1,22 +1,24 @@
 # 📈 Analyzing an Agent Trajectory
 
-Each finished CEO-Bench run leaves a single artifact:
+Each finished CEO-Bench run leaves two primary result sources:
 
 ```
 <run_dir>/world.nmdb
+<run_dir>/logs/performance_<run_id>.jsonl
 ```
 
 `world.nmdb` is a **SQLCipher** database (page-level AES-256 encrypted SQLite)
-and is the complete record of the run: cash, subscriptions, customers,
-competitor events, and every action the agent took. Decrypt it to analyze how
-the agent played.
+and is the authoritative record of the simulated business. Decrypt it to
+analyze cash, subscriptions, customers, service quality, and business events.
+The performance log records runtime measurements such as model usage, API
+cost, and elapsed time; it is not a business-state data source.
 
 ---
 
 ## 🔑 Decrypt and open
 
 The SQLCipher key is fixed and bundled into the published `novamind-operation`
-zipapp. The value is in `docs/database-encryption.md`, or import it from the
+zipapp. The value is in `docs/engineering/database-encryption.md`, or import it from the
 compiled `saas_bench.runtime._embedded_key` module.
 
 **One-shot decrypt to plain SQLite:**

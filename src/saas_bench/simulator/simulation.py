@@ -7101,9 +7101,10 @@ Guidelines:
     def _record_hidden_snapshots(self, config: dict):
         """Record hidden daily snapshots for post-run analysis.
 
-        Two tables:
+        Three tables:
         1. _hidden_group_params_history: group spawning params + reputation + awareness
         2. _hidden_quality_snapshot: quality components per group × plan
+        3. _hidden_satisfaction_snapshot: group-level customer health
         """
         day = self.current_day
 

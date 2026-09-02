@@ -54,7 +54,7 @@ Dashboard 文本      Analysis 统计信号
 
 `modules.analysis.enabled = false` 时，Runner 仍只把原有 Dashboard 文本交给决策 Agent，不执行额外查询或 LLM 调用。该结构化改造只统一数据口径，不改变模拟器规则、随机数状态或 Baseline 上下文。
 
-字段不照搬交付原型，而是从业务含义和状态识别目标反向选择。每个候选字段必须满足以下要求：
+字段从业务含义和状态识别目标反向选择。每个候选字段必须满足以下要求：
 
 1. **语义准确**：先确认字段在模拟器中的真实含义。例如，`customers.created_day` 记录潜在对象创建，其中可能包含未被 Dashboard 认定为有效线索的企业对象，更不等同于成功订阅或付费获客。
 2. **状态相关**：字段必须能支持五个经营状态维度中的至少一个，或用于解释状态变化；只反映 Agent 信息掌握程度的字段不进入经营状态。
@@ -253,7 +253,7 @@ max_schema_retries = 1
 Analysis 必须独立统计：
 
 - LLM 调用次数。
-- `input_tokens`、`output_tokens`、`cached_tokens` 和 `reasoning_tokens`。
+- `input_tokens`、`output_tokens`、`cached_tokens` 和 `reasoning_tokens`；供应商未上报推理 Token 时保留为 `null`。
 - 按市场、财务、产品、客户和状态重构拆分的用量。
 - 按供应商结算币种分开累计的成本。
 

@@ -74,9 +74,6 @@ simulation.db
 *.pdf
 *.png
 *.zip
-# ...except checked-in documentation assets (mascot, teaser, etc.)
-!docs/assets/
-!docs/assets/**
 
 # Reports and viz (generated, not source)
 reports/
@@ -105,12 +102,6 @@ backups/
 /analysis/
 build/
 dist/
-# Generated docs are in public/docs; we DO track top-level docs/ for
-# user-facing markdown (e.g. docs/analyze_trajectory.md).
-docs/*
-!docs/*.md
-!docs/assets/
-!docs/assets/**
 modal_deploy/
 monitor/
 paper/

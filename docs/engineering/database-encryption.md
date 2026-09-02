@@ -40,7 +40,7 @@ for row in conn.execute("SELECT day, category, amount FROM ledger ORDER BY day, 
 ```
 
 For the database schema and richer analysis recipes, see
-[`analyze_trajectory.md`](analyze_trajectory.md).
+[`analyze-trajectory.md`](../experiments/analyze-trajectory.md).
 
 ## Rotation policy
 
