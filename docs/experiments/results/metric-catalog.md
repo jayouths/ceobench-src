@@ -31,12 +31,12 @@
 | 企业订阅席位数 | P0 | 终止日有效企业订阅覆盖席位之和 | `subscriptions` + `customers` | Analysis |
 | 末四周平均每周净现金流 | P0 | 最后 28 天账本净额除以 4 | `ledger` | Analysis |
 | 末四周实际订阅收入 | P1 | 最后 28 天 `subscription_payment` 合计 | `ledger` | Analysis |
-| 末四周个人订阅净增长 | P1 | 终止日个人订阅数减去 28 天前数值 | 待新增实验私有事实层 | Analysis |
-| 末四周企业席位净增长 | P1 | 终止日企业席位减去 28 天前数值 | 待新增实验私有事实层 | Analysis |
-| 个人订阅流失率 | P1 | 窗口内取消数除以窗口内曾有效订阅数 | 待新增实验私有事实层 | Analysis |
-| 企业席位流失率 | P1 | 窗口内流失席位除以窗口内曾有效席位 | 待新增实验私有事实层 | Analysis |
+| 末四周个人订阅净增长 | P1 | 终止日个人订阅数减去 28 天前数值 | `_eval_subscription_day` | Analysis |
+| 末四周企业席位净增长 | P1 | 终止日企业席位减去 28 天前数值 | `_eval_subscription_day` | Analysis |
+| 个人订阅流失率 | P1 | 窗口内结束订阅数除以期初有效订阅数加窗口内新增数 | `_eval_subscription_event` + `_eval_subscription_day` | Analysis |
+| 企业席位流失率 | P1 | 窗口内结束订阅的席位数除以期初有效席位加窗口内新增席位 | `_eval_subscription_event` + `_eval_subscription_day` | Analysis |
 | 活跃客户群数量 | P1 | 终止日仍有有效订阅的 `group_id` 数量 | `subscriptions` + `customers` | Analysis |
-| MRR 客群集中度 | P1 | 各客群 MRR 占比的 HHI 或最大客群占比 | 待新增实验私有事实层 | Analysis |
+| MRR 客群集中度 | P1 | 各客群 MRR 占比的 HHI 或最大客群占比 | `_eval_subscription_day` | Analysis |
 
 MRR 表示当前订阅结构未来每月可持续产生的收入，与历史累计形成的现金不同。
 
@@ -101,6 +101,6 @@ MRR 表示当前订阅结构未来每月可持续产生的收入，与历史累�
 - TODO：实现 Deliberation 时记录逐次结构化经营指标方向预测。
 - TODO：实现 Reflection 时记录到期真实方向和预测命中结果。
 - TODO：Deliberation 与 Reflection 接入统一的调用、Token 和成本日志。
-- TODO：新增 Agent 不可见的实验事实层，补齐订阅、席位、MRR、真实新增和真实流失的日级历史。
+- `_eval_subscription_day` 已记录日末订阅、席位和 MRR 存量；`_eval_subscription_event` 已记录真实订阅开始与结束事件。两表均不向 Agent 开放。
 - 正式实验前需要锁定严重故障阈值、广告投入产出比口径和方向预测阈值。
 - 图表代码尚未开发；本阶段先保证原始指标可采集、可追溯和可复算。

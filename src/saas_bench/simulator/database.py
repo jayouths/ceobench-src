@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 import json
 
+from ..evaluation.schema import initialize_evaluation_schema
+
 
 # =====================================================================
 # TABLE_DOCS: Canonical documentation for all database tables.
@@ -1053,6 +1055,8 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_predictions_submit_day ON predictions(submit_day);
         CREATE INDEX IF NOT EXISTS idx_predictions_metric ON predictions(metric, horizon_days);
     """)
+
+    initialize_evaluation_schema(conn)
 
     # 成本表只保存实验元数据。旧表把所有金额误标为 USD，不能与新原币口径混用。
     api_cost_columns = {

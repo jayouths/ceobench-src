@@ -130,6 +130,14 @@ def _is_schema_query(query: str) -> bool:
     return any(p in q for p in blocked_patterns)
 
 
+def _references_evaluation_table(query: str) -> Optional[str]:
+    """识别实验私有事实表；这类数据在任何 Agent 模式下都不可见。"""
+    evaluation_table = re.search(r'\b_eval_[a-z0-9_]+\b', query.lower())
+    if evaluation_table:
+        return evaluation_table.group(0)
+    return None
+
+
 def _references_hidden_table(query: str) -> Optional[str]:
     """Check if query references a hidden table. Returns table name or None."""
     q = query.lower()
@@ -563,7 +571,16 @@ class _APIHandler(BaseHTTPRequestHandler):
                 }, 403)
                 return
 
-            # Block hidden tables (bypassed in oracle mode)
+            # 评测事实永远不属于 Agent 观察空间，Oracle 扩展实验也不能读取。
+            evaluation_table = _references_evaluation_table(sql)
+            if evaluation_table:
+                self._send_json({
+                    "success": False,
+                    "error": f"Table '{evaluation_table}' is not accessible.",
+                }, 403)
+                return
+
+            # Block simulator hidden tables (bypassed in oracle mode)
             if not _ORACLE_MODE:
                 hidden_table = _references_hidden_table(sql)
                 if hidden_table:

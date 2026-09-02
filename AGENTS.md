@@ -56,6 +56,7 @@
 |---|---|---|
 | `src/saas_bench/agents/` | 主实验 Agent、Analysis 及后续创新模块 | 论文创新的主要实现位置 |
 | `src/saas_bench/experiment/` | TOML 配置、Provider 协议、用量归一化和成本计算 | 同类模型调用问题必须在统一层解决 |
+| `src/saas_bench/evaluation/` | Agent 不可见的实验事实、离线指标和结果导出 | 只观察经营状态，不得改变模拟规则或进入 Agent 查询结果 |
 | `src/saas_bench/runtime/` | API 服务、数据库保护和宿主运行时 | 可以为主实验完善，但不得泄露隐藏状态 |
 | `src/saas_bench/simulator/` | 企业经营环境、数据库和状态转移规则 | 主实验保持默认；只在明确的场景实验中统一调整 |
 | `src/saas_bench/novamind_api/` | Agent 可使用的企业管理 API 客户端 | 视为 Agent 与世界的稳定接口，修改需评估公平性 |

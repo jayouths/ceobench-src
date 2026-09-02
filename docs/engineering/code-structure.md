@@ -7,11 +7,12 @@
 | `src/saas_bench/simulator/` | 经营状态、数据库、每日推进规则、客户行为和经营动作 | 是 |
 | `src/saas_bench/runtime/` | API Server、公开 CLI、会话管理、数据库保护和文档生成 | 是 |
 | `src/saas_bench/experiment/` | TOML 实验配置、模型 Provider 接入和实验文件写入 | 是 |
+| `src/saas_bench/evaluation/` | 私有实验事实采集、离线指标计算和结果导出 | 是 |
 | `src/saas_bench/agents/` | 当前 Bash Agent、Analysis 创新模块和运行 Harness | 是 |
 | `src/saas_bench/novamind_api/` | Agent 在隔离环境内调用模拟器的公开 SDK | 是 |
 | `src/saas_bench/legacy/` | 暂未使用的旧 Agent、消融、Replay 和参考材料 | 否 |
 
-主实验依赖方向为 `agents -> experiment/runtime -> simulator`。`legacy` 不得被主实验导入。
+`evaluation` 只能旁路观察模拟器事实，不能改变经营状态；其 `_eval_` 数据表对所有 Agent 模式均不可见。`legacy` 不得被主实验导入。
 
 ## Bash Agent Harness
 

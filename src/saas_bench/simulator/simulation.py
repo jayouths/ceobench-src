@@ -79,6 +79,7 @@ from .database import (
 )
 from ._sql_chunk import chunked_select, chunked_execute
 from ..experiment.llm_provider import MissingModelPricingError
+from ..evaluation.fact_recorder import record_subscription_day
 
 
 def sigmoid(x: float) -> float:
@@ -7485,6 +7486,7 @@ Guidelines:
 
         # === Hidden snapshots for post-run analysis (invisible to agent) ===
         self._record_hidden_snapshots(config)
+        record_subscription_day(self.conn, self.current_day)
 
         # Save RNG states for deterministic resume
         self.save_rng_states()

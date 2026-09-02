@@ -99,6 +99,7 @@ make test-all   # 正式实验前完整回归
 | `scripts/` | `public/` 构建、文档生成和数据库解密脚本 |
 | `src/saas_bench/agents/` | 当前主实验 Agent 和创新模块 |
 | `src/saas_bench/experiment/` | 实验配置、模型调用和成本计算 |
+| `src/saas_bench/evaluation/` | Agent 不可见的实验事实采集、指标计算和结果导出 |
 | `src/saas_bench/runtime/` | API 服务、数据库保护和运行时能力 |
 | `src/saas_bench/simulator/` | 企业经营模拟规则 |
 | `src/saas_bench/novamind_api/` | Agent 可调用的企业管理 API 客户端 |

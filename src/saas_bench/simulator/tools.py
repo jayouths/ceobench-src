@@ -3301,10 +3301,14 @@ def _is_schema_query(query):
 def _references_hidden_table(query):
     \"\"\"Check if query references any hidden table.\"\"\"
     q = query.lower()
+    # 所有实验事实表统一使用 _eval_ 前缀，新增表时无需再维护泄露黑名单。
+    import re
+    evaluation_table = re.search(r'\\b_eval_[a-z0-9_]+\\b', q)
+    if evaluation_table:
+        return evaluation_table.group(0)
     for table in _HIDDEN_TABLES:
         # Check for table name with common SQL patterns
         # Match: FROM table, JOIN table, INTO table, UPDATE table, table., "table"
-        import re
         pattern = r'\\b' + re.escape(table.lower()) + r'\\b'
         if re.search(pattern, q):
             return table

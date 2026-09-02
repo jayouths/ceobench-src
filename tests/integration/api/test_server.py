@@ -144,6 +144,33 @@ def test_analysis_signal_queries_pass_public_query_policy(
         result.new_individual_leads
     )
 
+
+@pytest.mark.parametrize(
+    "table_name",
+    ["_eval_subscription_day", "_eval_subscription_event", "_eval_future_fact"],
+)
+def test_api_blocks_all_evaluation_fact_tables(
+    make_initialized_sim, table_name, monkeypatch
+):
+    conn, _, _ = make_initialized_sim()
+    # 评测结果不是模拟世界状态，Oracle 模式也不得向 Agent 开放。
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", True)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {"sql": f"SELECT * FROM {table_name}"}
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 403
+    assert payload == {
+        "success": False,
+        "error": f"Table '{table_name}' is not accessible.",
+    }
+
 def test_public_cli_and_sdk_prefer_unix_socket(monkeypatch):
     socket_dir = Path(tempfile.mkdtemp(prefix="ceobench-test-"))
     socket_path = socket_dir / "api.sock"

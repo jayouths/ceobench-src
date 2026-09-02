@@ -66,6 +66,9 @@ _ENGINE_MODULES = [
     "experiment/__init__",
     "experiment/json_io",
     "experiment/llm_provider",
+    "evaluation/__init__",
+    "evaluation/fact_recorder",
+    "evaluation/schema",
 ]
 
 # novamind_api subpackage used by the engine internally. Bundled as bytecode;

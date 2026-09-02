@@ -88,7 +88,7 @@ def test_all_queryable_tables_have_docs():
 
         missing = []
         for t in tables:
-            if t.startswith('_hidden') or t.startswith('_tmp') or t.startswith('sqlite_'):
+            if t.startswith(('_hidden', '_eval', '_tmp', 'sqlite_')):
                 continue
             if t in _HIDDEN_TABLES:
                 continue

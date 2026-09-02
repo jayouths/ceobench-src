@@ -58,6 +58,8 @@ column types. The tables most useful for trajectory analysis:
 | `predictions`             | Cash forecasts the agent submitted at each `next-week` call (point + 95% CI, 4 horizons) |
 | `subscriptions`           | Customer subscriptions, current + historical, with plan/price/status |
 | `customers`               | All customers with persona, company profile, acquisition source, group |
+| `_eval_subscription_day`  | Private daily account, seat, and MRR stock by customer type, segment, and plan |
+| `_eval_subscription_event`| Private subscription start/end events with event-time seats and MRR |
 | `enterprise_turns`        | Enterprise negotiation messages: offers, seat counts, close reason |
 | `ad_channel_leads`        | Per-(day, channel, group) leads generated and ad spend             |
 | `daily_usage`             | Per-customer daily usage units                                    |
@@ -137,6 +139,26 @@ spend = (
 )
 print(spend)
 ```
+
+**Daily subscription and recurring-revenue trajectory:**
+
+```sql
+SELECT
+    day,
+    SUM(mrr) AS mrr,
+    SUM(CASE WHEN customer_type = 'small' THEN active_accounts ELSE 0 END)
+        AS individual_subscriptions,
+    SUM(CASE WHEN customer_type = 'large' THEN active_seats ELSE 0 END)
+        AS enterprise_seats
+FROM _eval_subscription_day
+GROUP BY day
+ORDER BY day;
+```
+
+`_eval_subscription_day` stores end-of-day stock. `_eval_subscription_event`
+stores actual transitions into and out of the active subscription state, so
+gross acquisition and churn do not need to be inferred from mutable rows.
+Both tables are available only to post-run analysis.
 
 **Forecast accuracy**: compare what the agent predicted at each `next-week`
 call against the cash it actually had at that horizon. Each submission inserts
