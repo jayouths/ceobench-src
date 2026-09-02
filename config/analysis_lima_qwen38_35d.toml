@@ -1,0 +1,97 @@
+# 35 天 Analysis Lima 集成验证。
+#
+# 实验在 Linux VM 内运行，通过 host.lima.internal 调用 macOS 宿主的 Ollama。
+# 本配置只验证模型、实验、隔离、采集和评价链路，不作为论文正式实验。
+
+[experiment]
+name = "analysis-lima-qwen38-35d"
+seed = 42
+days = 35
+scenario = "default"
+initial_cash = 1000000.0
+workspace = "outputs/runs"
+max_decision_turns_per_batch = 100
+max_invalid_responses_per_turn = 3
+
+[modules.analysis]
+enabled = true
+max_schema_retries = 1
+max_enterprise_threads = 50
+
+[models.decision_agent]
+provider = "openai"
+api_type = "openai_chat_completions"
+tool_choice = "required"
+model = "qwen3.8:27b-q4_K_M"
+base_url = "http://host.lima.internal:11434/v1"
+api_key_required = false
+reasoning_effort = "low"
+temperature = 0.2
+top_p = 0.8
+max_output_tokens = 8192
+timeout_seconds = 600
+
+[models.decision_agent.pricing."qwen3.8:27b-q4_K_M"]
+currency = "USD"
+uncached_input_cost_per_million = 0.0
+cached_input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+
+[models.social_llm]
+provider = "openai"
+api_type = "openai_chat_completions"
+model = "qwen3.8:27b-q4_K_M"
+base_url = "http://host.lima.internal:11434/v1"
+api_key_required = false
+reasoning_effort = "none"
+temperature = 0.7
+top_p = 0.9
+max_output_tokens = 1000
+timeout_seconds = 600
+
+[models.social_llm.pricing."qwen3.8:27b-q4_K_M"]
+currency = "USD"
+uncached_input_cost_per_million = 0.0
+cached_input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+
+[models.social_llm.tasks.customer_post]
+max_output_tokens = 1000
+
+[models.social_llm.tasks.macro_post]
+max_output_tokens = 300
+
+[models.social_llm.tasks.competitor_post]
+max_output_tokens = 300
+
+[models.social_llm.tasks.agent_post_judge]
+temperature = 0.3
+max_output_tokens = 100
+
+[models.social_llm.tasks.agent_post_reply]
+temperature = 0.9
+max_output_tokens = 150
+
+[models.analysis]
+provider = "openai"
+api_type = "openai_chat_completions"
+model = "qwen3.8:27b-q4_K_M"
+base_url = "http://host.lima.internal:11434/v1"
+api_key_required = false
+reasoning_effort = "low"
+temperature = 0.2
+top_p = 0.8
+max_output_tokens = 5000
+timeout_seconds = 600
+
+[models.analysis.pricing."qwen3.8:27b-q4_K_M"]
+currency = "USD"
+uncached_input_cost_per_million = 0.0
+cached_input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+
+[models.analysis.tasks.role_report]
+max_output_tokens = 3000
+
+[models.analysis.tasks.state_reconstruction]
+max_output_tokens = 4000
