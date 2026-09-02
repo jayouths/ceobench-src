@@ -131,7 +131,7 @@ class RoleCallUsage(AnalysisModel):
     input_tokens: NonNegativeInt
     output_tokens: NonNegativeInt
     cached_tokens: NonNegativeInt
-    reasoning_tokens: NonNegativeInt
+    reasoning_tokens: NonNegativeInt | None
     elapsed_seconds: NonNegativeFloat
     cost_amount: NonNegativeFloat
     currency: str = Field(pattern=r"^[A-Z]{3}$")
@@ -154,7 +154,7 @@ class StateCallUsage(AnalysisModel):
     input_tokens: NonNegativeInt
     output_tokens: NonNegativeInt
     cached_tokens: NonNegativeInt
-    reasoning_tokens: NonNegativeInt
+    reasoning_tokens: NonNegativeInt | None
     elapsed_seconds: NonNegativeFloat
     cost_amount: NonNegativeFloat
     currency: str = Field(pattern=r"^[A-Z]{3}$")

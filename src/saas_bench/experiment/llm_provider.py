@@ -26,7 +26,8 @@ class TextLLMResult:
 
     input_tokens 是计费总输入，cached_tokens 是其中命中缓存的部分；
     output_tokens 是按输出单价计费的总输出，推理 Token 通常包含在其中。
-    reasoning_tokens 只用于独立观测，不从 output_tokens 中减除，也不重复计费。
+    reasoning_tokens 只用于独立观测，不从 output_tokens 中减除，也不重复计费；
+    供应商未上报时为 None，不能用 0 代替未知值。
     当前主实验只接入 OpenAI SDK 及其兼容协议。接入新协议时，
     必须根据官方计费口径单独适配，不能只根据字段名推断。
     """
@@ -36,7 +37,7 @@ class TextLLMResult:
     input_tokens: int
     output_tokens: int
     cached_tokens: int
-    reasoning_tokens: int
+    reasoning_tokens: Optional[int]
     raw_response: Any
 
 
@@ -184,7 +185,7 @@ def call_text_model(
             cached_tokens=_nested_int_attr(
                 usage, "input_tokens_details", "cached_tokens"
             ),
-            reasoning_tokens=_nested_int_attr(
+            reasoning_tokens=_optional_nested_int_attr(
                 usage, "output_tokens_details", "reasoning_tokens"
             ),
             raw_response=response,
@@ -210,7 +211,7 @@ def call_text_model(
             input_tokens=_int_attr(usage, "prompt_tokens"),
             output_tokens=_int_attr(usage, "completion_tokens"),
             cached_tokens=openai_chat_cached_tokens(usage),
-            reasoning_tokens=_nested_int_attr(
+            reasoning_tokens=_optional_nested_int_attr(
                 usage, "completion_tokens_details", "reasoning_tokens"
             ),
             raw_response=response,
@@ -282,6 +283,25 @@ def _int_attr(value: Any, name: str) -> int:
 
 def _nested_int_attr(value: Any, parent: str, name: str) -> int:
     return _int_attr(getattr(value, parent, None), name) if value is not None else 0
+
+
+def optional_reasoning_tokens(value: Any, parent: str) -> Optional[int]:
+    """读取供应商可选的推理 Token；字段缺失不能解释为零。"""
+    return _optional_nested_int_attr(value, parent, "reasoning_tokens")
+
+
+def _optional_nested_int_attr(
+    value: Any,
+    parent: str,
+    name: str,
+) -> Optional[int]:
+    if value is None:
+        return None
+    details = getattr(value, parent, None)
+    if details is None or not hasattr(details, name):
+        return None
+    raw = getattr(details, name)
+    return int(raw) if raw is not None else None
 
 
 def openai_chat_cached_tokens(usage: Any) -> int:

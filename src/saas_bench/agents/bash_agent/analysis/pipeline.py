@@ -364,13 +364,15 @@ class AnalysisPipeline:
 
         def add_call(target: dict[str, Any], call: Any) -> None:
             target["call_count"] += 1
-            for field in (
-                "input_tokens",
-                "output_tokens",
-                "cached_tokens",
-                "reasoning_tokens",
-            ):
+            for field in ("input_tokens", "output_tokens", "cached_tokens"):
                 target[field] += getattr(call, field)
+            reasoning_tokens = call.reasoning_tokens
+            if target["reasoning_tokens"] is not None:
+                target["reasoning_tokens"] = (
+                    target["reasoning_tokens"] + reasoning_tokens
+                    if reasoning_tokens is not None
+                    else None
+                )
             costs = target["cost_by_currency"]
             costs[call.currency] = costs.get(call.currency, 0.0) + call.cost_amount
 

@@ -19,6 +19,7 @@ from ...experiment.llm_provider import (
     api_tool_choice,
     openai_chat_request_parameters,
     openai_chat_cached_tokens,
+    optional_reasoning_tokens,
     validate_tool_choice,
 )
 
@@ -124,17 +125,27 @@ class BashAgent(BaseAgent):
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
         self.total_cached_tokens: int = 0
-        self.total_reasoning_tokens: int = 0
+        self.total_reasoning_tokens: Optional[int] = 0
         self.last_input_tokens: int = 0
         self.last_output_tokens: int = 0
         self.last_cached_tokens: int = 0
-        self.last_reasoning_tokens: int = 0
+        self.last_reasoning_tokens: Optional[int] = None
         self.last_serving_model: str = model
 
         # 每次 LLM 调用后的可读诊断快照；精确恢复只使用 Runner 提交的不可变 checkpoint。
         self._snapshot_path: Optional[Path] = None
         # checkpoint 已包含最后一个工具结果，恢复首轮不能再追加 Runner 新取的 Dashboard。
         self._skip_next_observation: bool = False
+
+    def _record_reasoning_tokens(self, reasoning_tokens: Optional[int]) -> None:
+        """保留“供应商未上报”的语义；不完整的累计值也必须为未知。"""
+        self.last_reasoning_tokens = reasoning_tokens
+        if self.total_reasoning_tokens is None:
+            return
+        if reasoning_tokens is None:
+            self.total_reasoning_tokens = None
+        else:
+            self.total_reasoning_tokens += reasoning_tokens
 
     def _default_system_prompt(self) -> str:
         """Build the default system prompt.
@@ -574,17 +585,17 @@ class BashAgent(BaseAgent):
                     # Cache and reasoning details
                     # OpenAI 与 DeepSeek 的 Chat Completions 缓存字段位置不同。
                     self.last_cached_tokens = openai_chat_cached_tokens(usage)
-                    ctd = getattr(usage, 'completion_tokens_details', None)
-                    self.last_reasoning_tokens = getattr(ctd, 'reasoning_tokens', 0) or 0 if ctd else 0
+                    self._record_reasoning_tokens(optional_reasoning_tokens(
+                        usage, 'completion_tokens_details'
+                    ))
                 else:
                     self.last_input_tokens = 0
                     self.last_output_tokens = 0
                     self.last_cached_tokens = 0
-                    self.last_reasoning_tokens = 0
+                    self._record_reasoning_tokens(None)
                 self.total_input_tokens += self.last_input_tokens
                 self.total_output_tokens += self.last_output_tokens
                 self.total_cached_tokens += self.last_cached_tokens
-                self.total_reasoning_tokens += self.last_reasoning_tokens
 
                 self._emit_response_callback(
                     messages,
@@ -779,17 +790,17 @@ class BashAgent(BaseAgent):
                     # Cache and reasoning details
                     itd = getattr(usage, 'input_tokens_details', None)
                     self.last_cached_tokens = getattr(itd, 'cached_tokens', 0) or 0 if itd else 0
-                    otd = getattr(usage, 'output_tokens_details', None)
-                    self.last_reasoning_tokens = getattr(otd, 'reasoning_tokens', 0) or 0 if otd else 0
+                    self._record_reasoning_tokens(optional_reasoning_tokens(
+                        usage, 'output_tokens_details'
+                    ))
                 else:
                     self.last_input_tokens = 0
                     self.last_output_tokens = 0
                     self.last_cached_tokens = 0
-                    self.last_reasoning_tokens = 0
+                    self._record_reasoning_tokens(None)
                 self.total_input_tokens += self.last_input_tokens
                 self.total_output_tokens += self.last_output_tokens
                 self.total_cached_tokens += self.last_cached_tokens
-                self.total_reasoning_tokens += self.last_reasoning_tokens
 
                 self._emit_response_callback(
                     input_items,

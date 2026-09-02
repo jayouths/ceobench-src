@@ -532,7 +532,7 @@ class BashAgentRunner:
         input_tokens = self.agent.last_input_tokens if self.agent else 0
         output_tokens = self.agent.last_output_tokens if self.agent else 0
         cached_tokens = self.agent.last_cached_tokens if self.agent else 0
-        reasoning_tokens = self.agent.last_reasoning_tokens if self.agent else 0
+        reasoning_tokens = self.agent.last_reasoning_tokens if self.agent else None
         served_model = self.agent.last_serving_model if self.agent else self.model
         cost = model_token_cost(
             served_model,
@@ -1191,7 +1191,6 @@ class BashAgentRunner:
                 dashboard=dashboard,
                 elapsed_seconds=round(_dashboard_elapsed, 3),
             )
-
             _analysis_started = _time.monotonic()
             signals = self.analysis_pipeline.ensure_signals(dashboard_payload)
             role_reports_generated = False
@@ -1260,7 +1259,7 @@ class BashAgentRunner:
             batch_input_tokens = 0
             batch_output_tokens = 0
             batch_cached_tokens = 0
-            batch_reasoning_tokens = 0
+            batch_reasoning_tokens: Optional[int] = 0
             batch_api_calls = 0
 
             while (
@@ -1282,13 +1281,24 @@ class BashAgentRunner:
                 _turn_input_tokens = self.agent.total_input_tokens - _before_input_tokens
                 _turn_output_tokens = self.agent.total_output_tokens - _before_output_tokens
                 _turn_cached_tokens = self.agent.total_cached_tokens - _before_cached_tokens
-                _turn_reasoning_tokens = self.agent.total_reasoning_tokens - _before_reasoning_tokens
+                _after_reasoning_tokens = self.agent.total_reasoning_tokens
+                _turn_reasoning_tokens = (
+                    _after_reasoning_tokens - _before_reasoning_tokens
+                    if _after_reasoning_tokens is not None
+                    and _before_reasoning_tokens is not None
+                    else None
+                )
                 batch_api_calls += _call_count
                 batch_llm_s += _llm_elapsed
                 batch_input_tokens += _turn_input_tokens
                 batch_output_tokens += _turn_output_tokens
                 batch_cached_tokens += _turn_cached_tokens
-                batch_reasoning_tokens += _turn_reasoning_tokens
+                if batch_reasoning_tokens is not None:
+                    batch_reasoning_tokens = (
+                        batch_reasoning_tokens + _turn_reasoning_tokens
+                        if _turn_reasoning_tokens is not None
+                        else None
+                    )
 
                 # 若 action 为 None，说明 LLM 返回有误，此时直接报错
                 if action is None:
@@ -1454,6 +1464,11 @@ class BashAgentRunner:
             pct_environment = (environment_advance_s / batch_elapsed_s * 100) if batch_elapsed_s > 0 else 0
             pct_tool = (agent_tool_s / batch_elapsed_s * 100) if batch_elapsed_s > 0 else 0
             cache_pct = (batch_cached_tokens / batch_input_tokens * 100) if batch_input_tokens > 0 else 0
+            reasoning_display = (
+                f"{batch_reasoning_tokens:,}"
+                if batch_reasoning_tokens is not None
+                else "N/A"
+            )
             print(f"\n⏱ BATCH {decision_batch} (DAY {sim_day}): total={batch_elapsed_s:.0f}s | "
                   f"llm={batch_llm_s:.0f}s ({pct_llm:.0f}%) | "
                   f"environment={environment_advance_s:.0f}s ({pct_environment:.0f}%) | "
@@ -1462,7 +1477,7 @@ class BashAgentRunner:
                   f"turns={turns_in_batch} | "
                   f"tokens={batch_input_tokens:,}in/{batch_output_tokens:,}out "
                   f"cached={batch_cached_tokens:,}({cache_pct:.0f}%) "
-                  f"reasoning={batch_reasoning_tokens:,} "
+                  f"reasoning={reasoning_display} "
                   f"(cumul: {self.agent.total_input_tokens:,}in/{self.agent.total_output_tokens:,}out)",
                   file=sys.stderr, flush=True)
 
@@ -1553,7 +1568,11 @@ class BashAgentRunner:
                 f"Cached Tokens: {result_agent_state['cached_tokens']:,} "
                 f"({cache_pct:.0f}% of input)"
             )
-            print(f"Reasoning Tokens: {result_agent_state['reasoning_tokens']:,}")
+            reasoning_tokens = result_agent_state['reasoning_tokens']
+            reasoning_display = (
+                f"{reasoning_tokens:,}" if reasoning_tokens is not None else "N/A"
+            )
+            print(f"Reasoning Tokens: {reasoning_display}")
             print(
                 "Decision Agent Cost: "
                 f"{result_agent_state['decision_cost_by_currency']}"

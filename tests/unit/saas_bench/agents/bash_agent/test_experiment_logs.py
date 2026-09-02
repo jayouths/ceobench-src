@@ -120,3 +120,22 @@ def test_week_summary_is_rebuilt_from_all_atomic_events_for_the_week(tmp_path):
     assert decision["invalid_count"] == 1
     assert decision["input_tokens"] == 110
     assert decision["cost_by_currency"]["USD"] == pytest.approx(0.05)
+
+
+def test_week_summary_keeps_unreported_reasoning_tokens_unknown(tmp_path):
+    writer = _writer(tmp_path)
+    writer.trajectory(
+        "llm_call",
+        7,
+        component="bash_agent",
+        status="valid",
+        input_tokens=10,
+        output_tokens=3,
+        cached_tokens=0,
+        reasoning_tokens=None,
+        elapsed_seconds=1.0,
+    )
+
+    summary = writer.summarize_week(7)
+
+    assert summary["modules"]["bash_agent"]["reasoning_tokens"] is None

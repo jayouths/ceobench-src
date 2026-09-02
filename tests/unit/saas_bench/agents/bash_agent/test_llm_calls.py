@@ -11,6 +11,24 @@ from saas_bench.agents.bash_agent.agent import BashAgent
 from saas_bench.agents.bash_agent.runner import BashAgentRunner
 
 
+def test_reasoning_token_total_becomes_unknown_after_unreported_call():
+    agent = BashAgent.__new__(BashAgent)
+    agent.total_reasoning_tokens = 0
+
+    agent._record_reasoning_tokens(0)
+    assert agent.last_reasoning_tokens == 0
+    assert agent.total_reasoning_tokens == 0
+
+    agent._record_reasoning_tokens(None)
+    assert agent.last_reasoning_tokens is None
+    assert agent.total_reasoning_tokens is None
+
+    # 累计值一旦不完整，后续已上报调用也不能让它重新变成伪完整总量。
+    agent._record_reasoning_tokens(5)
+    assert agent.last_reasoning_tokens == 5
+    assert agent.total_reasoning_tokens is None
+
+
 def test_decision_response_cost_uses_the_served_model(tmp_path):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.model = "requested"
@@ -379,3 +397,4 @@ def test_openai_responses_stops_after_configured_invalid_response_limit():
         agent._call_openai_responses()
 
     assert len(calls) == 2
+    assert agent.total_reasoning_tokens is None

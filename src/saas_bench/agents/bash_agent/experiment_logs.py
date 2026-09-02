@@ -124,13 +124,15 @@ class ExperimentLogWriter:
                 summary["accepted_count"] += 1
             elif status == "invalid":
                 summary["invalid_count"] += 1
-            for field in (
-                "input_tokens",
-                "output_tokens",
-                "cached_tokens",
-                "reasoning_tokens",
-            ):
+            for field in ("input_tokens", "output_tokens", "cached_tokens"):
                 summary[field] += int(event.get(field, 0))
+            reasoning_tokens = event.get("reasoning_tokens")
+            if summary["reasoning_tokens"] is not None:
+                summary["reasoning_tokens"] = (
+                    summary["reasoning_tokens"] + int(reasoning_tokens)
+                    if reasoning_tokens is not None
+                    else None
+                )
             summary["elapsed_seconds"] += float(event.get("elapsed_seconds", 0.0))
             currency = event.get("currency")
             if currency:

@@ -156,6 +156,32 @@ def test_deepseek_chat_cache_hit_tokens_are_normalized():
     assert result.input_tokens == 12
     assert result.output_tokens == 4
     assert result.cached_tokens == 9
+    assert result.reasoning_tokens is None
+
+
+def test_explicit_zero_reasoning_tokens_is_preserved():
+    recorder = Recorder(SimpleNamespace(
+        model="served-chat",
+        usage=SimpleNamespace(
+            prompt_tokens=8,
+            completion_tokens=3,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=0),
+        ),
+        choices=[SimpleNamespace(message=SimpleNamespace(content="text"))],
+    ))
+
+    result = call_text_model(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=recorder)),
+        api_type=API_OPENAI_CHAT,
+        model="requested",
+        system_prompt="system",
+        user_prompt="user",
+        max_output_tokens=50,
+        temperature=None,
+        top_p=None,
+        reasoning_effort=None,
+    )
+
     assert result.reasoning_tokens == 0
 
 
