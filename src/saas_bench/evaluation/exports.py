@@ -83,6 +83,89 @@ def export_run_metrics(
     return json_path, csv_path
 
 
+def export_experiment_metrics(
+    metrics: dict[str, Any], output_dir: Path | str
+) -> tuple[Path, Path, Path, Path]:
+    """导出实验组描述统计、组间差异和时序聚合表。"""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / "experiment_metrics.json"
+    summary_path = output_dir / "group_summary.csv"
+    comparison_path = output_dir / "group_comparisons.csv"
+    series_path = output_dir / "group_series.csv"
+    json_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n")
+
+    summary_rows = []
+    series_rows = []
+    for group in metrics["groups"]:
+        for metric in group["scalar_metrics"]:
+            summary_rows.append(
+                {
+                    "group": group["group"],
+                    "run_count": group["run_count"],
+                    "completed_run_count": group["completed_run_count"],
+                    "bankrupt_run_count": group["bankrupt_run_count"],
+                    "bankruptcy_rate": group["bankruptcy_rate"],
+                    **metric,
+                }
+            )
+        for point in group["series"]:
+            series_rows.append({"group": group["group"], **point})
+    comparison_rows = []
+    for comparison in metrics["comparisons"]:
+        identity = {
+            "baseline_group": comparison["baseline_group"],
+            "treatment_group": comparison["treatment_group"],
+        }
+        comparison_rows.append(
+            {
+                **identity,
+                "section": "outcome",
+                "metric": "bankruptcy_rate",
+                "baseline_n": "",
+                "treatment_n": "",
+                "baseline_mean": "",
+                "treatment_mean": "",
+                "absolute_difference": comparison["bankruptcy_rate_difference"],
+                "relative_difference": "",
+            }
+        )
+        for difference in comparison["scalar_differences"]:
+            comparison_rows.append(
+                {**identity, "section": "summary", **difference}
+            )
+        for difference in comparison["ledger_differences"]:
+            comparison_rows.append(
+                {
+                    **identity,
+                    "section": "ledger_by_category",
+                    "metric": difference["category"],
+                    "baseline_n": difference["baseline_n"],
+                    "treatment_n": difference["treatment_n"],
+                    "baseline_mean": difference["baseline_mean"],
+                    "treatment_mean": difference["treatment_mean"],
+                    "absolute_difference": difference[
+                        "cash_difference_contribution"
+                    ],
+                    "relative_difference": "",
+                }
+            )
+    _write_rows(summary_path, summary_rows)
+    _write_rows(comparison_path, comparison_rows)
+    _write_rows(series_path, series_rows)
+    return json_path, summary_path, comparison_path, series_path
+
+
+def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        path.write_text("")
+        return
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def metrics_to_long_rows(metrics: dict[str, Any]) -> list[dict[str, Any]]:
     """展开成适合 pandas、统计检验和绘图直接拼接的行结构。"""
     identity = {
