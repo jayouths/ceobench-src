@@ -98,7 +98,7 @@
 
 ## 7. 隔离与隐藏状态
 
-1. 决策 Agent 只能通过公开 Dashboard、文档和工具了解经营世界。不得把数据库密钥、隐藏状态、未来事件或宿主源码暴露给 Agent。
+1. 普通决策 Agent 和三个创新模块只能通过公开 Dashboard、文档和工具了解经营世界。不得把数据库密钥、模拟器内部状态、实验评价事实、未来事件或宿主源码暴露给它们。Oracle 白盒上界实验可以读取模拟器内部状态和 `_eval_*` 实验事实。
 2. 正式实验应在 Linux 沙箱中运行，禁止 Agent 任意联网，只开放完成实验所需的模拟器本地接口。macOS 本机调试不能被当作正式隔离证明。
 3. 修改挂载、文件权限、网络或模拟器接口前，必须检查 Agent 是否能够读取 `world.nmdb`、密钥、宿主环境变量或实验配置中的敏感信息。
 4. 数据库加密和威胁边界见 [docs/engineering/database-encryption.md](docs/engineering/database-encryption.md) 与 [docs/experiments/analyze-trajectory.md](docs/experiments/analyze-trajectory.md)。

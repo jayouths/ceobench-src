@@ -18,7 +18,8 @@
 | 生存天数 | P0 | 运行实际完成的模拟天数 | 运行结果 | Analysis |
 | 最终现金 | P0 | 截止终止日全部 `ledger.amount` 累计值 | `ledger` | Analysis |
 | 现金轨迹 | P0 | 按日累计 `ledger.amount`，主图按周取样 | `ledger` | Analysis |
-| 最大现金回撤 | P1 | 历史现金峰值到后续最低点的最大降幅 | `ledger` | Analysis |
+| 最大绝对现金回撤 | P1 | 历史现金峰值与后续最低点的最大差额 | `ledger` | Analysis |
+| 最大现金回撤率 | P1 | 各次峰值后的现金降幅除以对应峰值，取最大值 | `ledger` | Analysis |
 
 最终现金是 CEO-Bench 的北极星指标；破产率和生存天数优先于提前破产运行的终态比较。
 
@@ -45,7 +46,6 @@ MRR 表示当前订阅结构未来每月可持续产生的收入，与历史累�
 | 指标 | 优先级 | 计算口径 | 数据来源 | 可用阶段 |
 |---|---|---|---|---|
 | 累计宕机时间 | P1 | 全周期 `downtime_minutes` 合计 | `service_day` | Analysis |
-| 严重故障周数 | P1 | 超过预先锁定错误率或宕机阈值的周数 | `service_day` | Analysis |
 | 平均错误率 | P2 | 先在 run 内按周期聚合，再比较实验组 | `service_day` | Analysis |
 | P95 延迟 | P2 | 按周或全周期聚合，必须注明均值或峰值 | `service_day` | Analysis |
 | 容量利用率 | P2 | `total_usage_units / capacity_units` | `service_day` | Analysis |
@@ -61,8 +61,9 @@ MRR 表示当前订阅结构未来每月可持续产生的收入，与历史累�
 |---|---|---|---|---|
 | 各账本类别现金贡献 | P1 | 实验组与 Baseline 的同类账本累计金额均值之差 | `ledger` | Analysis |
 | 各类经营支出 | P2 | 按周或全周期累计支出绝对值 | `ledger` | Analysis |
-| 广告投入产出比 | P2 | 广告相关收入与获客支出的预先固定口径 | `ledger` | Analysis |
-| 定向研发投入占比 | P2 | 定向研发支出除以全部研发支出 | `ledger` + 配置历史 | Analysis |
+| 广告获客效率 | P2 | 实际归因到广告渠道的线索数除以广告投入 | `ad_channel_leads` | Analysis |
+| 定向研发投入占比 | P2 | 定向研发支出 ÷（全局日常研发支出 + 定向研发支出）；不包含独立研究项目 | `ledger` | Analysis |
+| 独立研究项目支出 | P2 | 全周期 `research_project` 账本支出绝对值合计 | `ledger` | Analysis |
 | 客群发现数量与研究等级 | P2 | 已发现客群数及研究等级汇总 | `group_info_levels` | Analysis |
 
 所有账本分类必须覆盖正式运行中出现的全部 `ledger.category`。未识别类别不得静默丢弃。
@@ -102,5 +103,9 @@ MRR 表示当前订阅结构未来每月可持续产生的收入，与历史累�
 - TODO：实现 Reflection 时记录到期真实方向和预测命中结果。
 - TODO：Deliberation 与 Reflection 接入统一的调用、Token 和成本日志。
 - `_eval_subscription_day` 已记录日末订阅、席位和 MRR 存量；`_eval_subscription_event` 已记录真实订阅开始与结束事件。两表均不向 Agent 开放。
-- 正式实验前需要锁定严重故障阈值、广告投入产出比口径和方向预测阈值。
+- `_eval_segment_day` 已统一记录客群日末状态、客户健康和当日真实获客过程。没有客户样本时满意度为空，未发现客群的获客字段为空；新增和流失仍以订阅事件表为准。
+- `_eval_quality_day` 已记录日期、客群和套餐维度的交付质量组成；`_eval_channel_effectiveness_event` 已记录初始及月度变化后的渠道获客效率。
+- 正式实验前需要锁定方向预测阈值。服务故障直接报告宕机、错误率、延迟和过载等实际表现，不再人为划分“严重故障”。
+- 潜在 TODO（低优先级）：如果最终实验出现稳定且有解释价值的故障分层，可在正式统计前固定“严重故障”阈值，仅作附录补充；不用于开题阶段和主结论。
+- 潜在 TODO：只有最终实验确实需要分析“渠道投入→订阅回款”时，才补充客户级结构化回款事实和归因窗口；开题阶段不实现。
 - 图表代码尚未开发；本阶段先保证原始指标可采集、可追溯和可复算。
