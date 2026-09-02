@@ -18,6 +18,7 @@ max_invalid_responses_per_turn = 3      # 必填：单轮允许的连续无效�
 enabled = false                         # 必填：是否开启 Analysis 创新模块；Baseline 必须为 false
 max_schema_retries = 1                  # 必填：Analysis JSON 校验失败后的最大修复次数
 max_enterprise_threads = 50             # 必填：信号中最多保留的开放企业谈判明细数
+role_report_concurrency = 4             # 必填：四角色报告并发数，范围 1-4；须匹配 Provider 限流和本地模型并行槽位
 
 # 决策 Agent：读取 Dashboard/战略简报并调用经营工具。
 [models.decision_agent]

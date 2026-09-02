@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from dataclasses import dataclass
 from json import JSONDecodeError
@@ -39,19 +40,40 @@ class RoleReportGenerationError(RuntimeError):
 
 
 class RoleReportGenerator:
-    """按固定角色顺序调用模型，失败时执行有限次数的自包含修复。"""
+    """并行调用独立角色，失败时执行有限次数的自包含修复。"""
 
-    def __init__(self, call_model: RoleModelCall, *, max_schema_retries: int):
+    def __init__(
+        self,
+        call_model: RoleModelCall,
+        *,
+        max_schema_retries: int,
+        role_report_concurrency: int = 1,
+    ):
         if max_schema_retries < 0:
             raise ValueError("max_schema_retries must be non-negative")
+        if not 1 <= role_report_concurrency <= len(Role):
+            raise ValueError("role_report_concurrency must be between 1 and 4")
         self.call_model = call_model
         self.max_schema_retries = max_schema_retries
+        self.role_report_concurrency = role_report_concurrency
 
     def generate(self, signals: AnalysisSignals) -> RoleReportsArtifact:
         reports: list[RoleReport] = []
         calls: list[RoleCallUsage] = []
-        for role in Role:
-            report, role_calls = self._generate_role(signals, role)
+        roles = list(Role)
+        if self.role_report_concurrency == 1:
+            outcomes = [self._generate_role(signals, role) for role in roles]
+        else:
+            # 四个角色只读取同一份不可变信号，彼此没有数据依赖；map 在并行
+            # 执行的同时保持角色枚举顺序，使落盘产物和串行版本一致。
+            with ThreadPoolExecutor(
+                max_workers=self.role_report_concurrency,
+                thread_name_prefix="analysis-role",
+            ) as executor:
+                outcomes = list(executor.map(
+                    lambda role: self._generate_role(signals, role), roles
+                ))
+        for report, role_calls in outcomes:
             reports.append(report)
             calls.extend(role_calls)
         return RoleReportsArtifact(day=signals.day, reports=reports, calls=calls)

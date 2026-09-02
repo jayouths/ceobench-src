@@ -21,6 +21,7 @@ def test_experiment_config_loads_all_experiment_and_model_fields():
     assert config.modules.analysis.enabled is False
     assert config.modules.analysis.max_schema_retries == 1
     assert config.modules.analysis.max_enterprise_threads == 50
+    assert config.modules.analysis.role_report_concurrency == 1
     assert config.analysis is None
     assert config.decision_agent.model == "test-decision-model"
     assert config.decision_agent.tool_choice == "required"
@@ -120,6 +121,16 @@ def test_analysis_settings_must_be_explicitly_configured(tmp_path):
     ):
         load_experiment_config(missing_retries_path)
 
+    missing_concurrency_path = tmp_path / "missing-analysis-concurrency.toml"
+    missing_concurrency_path.write_text(
+        text.replace("role_report_concurrency = 1", "", 1)
+    )
+    with pytest.raises(
+        ValueError,
+        match="modules.analysis must explicitly configure: role_report_concurrency",
+    ):
+        load_experiment_config(missing_concurrency_path)
+
 @pytest.mark.parametrize("value", ["1", '"true"'])
 def test_analysis_enabled_must_be_boolean(tmp_path, value):
     text = TEST_CONFIG.read_text()
@@ -154,6 +165,22 @@ def test_analysis_enterprise_thread_limit_must_be_positive_integer(tmp_path, val
     )
 
     with pytest.raises(ValueError, match="max_enterprise_threads must be a positive integer"):
+        load_experiment_config(path)
+
+
+@pytest.mark.parametrize("value", ["0", "5", "true"])
+def test_analysis_role_concurrency_must_be_between_one_and_four(tmp_path, value):
+    text = TEST_CONFIG.read_text()
+    path = tmp_path / "invalid-analysis-role-concurrency.toml"
+    path.write_text(
+        text.replace(
+            "role_report_concurrency = 1",
+            f"role_report_concurrency = {value}",
+            1,
+        )
+    )
+
+    with pytest.raises(ValueError, match="must be an integer between 1 and 4"):
         load_experiment_config(path)
 
 def test_experiment_config_path_is_required():
@@ -193,6 +220,7 @@ max_invalid_responses_per_turn = 3
 enabled = false
 max_schema_retries = 1
 max_enterprise_threads = 50
+role_report_concurrency = 1
 
 [models.decision_agent]
 provider = "openai"

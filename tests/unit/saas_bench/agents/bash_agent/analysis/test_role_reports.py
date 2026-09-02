@@ -1,6 +1,7 @@
 """四角色报告生成、修复和周产物测试。"""
 
 import json
+import threading
 
 import pytest
 
@@ -129,6 +130,28 @@ def test_generator_repairs_invalid_json_with_self_contained_context(day_zero_sig
     assert "not-json" in market_repair[4]
     assert "程序校验错误" in market_repair[4]
     assert '"market"' in market_repair[4]
+
+
+def test_generator_runs_independent_roles_concurrently_in_stable_order(
+    day_zero_signals,
+):
+    barrier = threading.Barrier(len(Role))
+
+    def call_model(day, role, attempt, call_kind, system_prompt, user_prompt):
+        barrier.wait(timeout=2)
+        return RoleCallOutcome(
+            text=_valid_response(role),
+            usage=_usage(role, attempt, call_kind),
+        )
+
+    artifact = RoleReportGenerator(
+        call_model,
+        max_schema_retries=0,
+        role_report_concurrency=4,
+    ).generate(day_zero_signals)
+
+    assert [report.role for report in artifact.reports] == list(Role)
+    assert [call.role for call in artifact.calls] == list(Role)
 
 
 def test_generator_fails_after_configured_repair_limit(day_zero_signals):

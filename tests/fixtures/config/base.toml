@@ -12,6 +12,7 @@ max_invalid_responses_per_turn = 3
 enabled = false
 max_schema_retries = 1
 max_enterprise_threads = 50
+role_report_concurrency = 1
 
 [models.decision_agent]
 provider = "openai"

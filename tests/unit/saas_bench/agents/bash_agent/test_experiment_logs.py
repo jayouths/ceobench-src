@@ -1,5 +1,6 @@
 """实验轨迹与聚合性能日志测试。"""
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 
 import pytest
@@ -139,3 +140,22 @@ def test_week_summary_keeps_unreported_reasoning_tokens_unknown(tmp_path):
     summary = writer.summarize_week(7)
 
     assert summary["modules"]["bash_agent"]["reasoning_tokens"] is None
+
+
+def test_concurrent_calls_write_complete_json_lines(tmp_path):
+    writer = _writer(tmp_path)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(
+            executor.map(
+                lambda index: writer.trajectory("llm_call", 7, call_index=index),
+                range(100),
+            )
+        )
+
+    events = [
+        json.loads(line)
+        for line in writer.trajectory_file.read_text().splitlines()
+    ]
+    assert len(events) == 100
+    assert {event["call_index"] for event in events} == set(range(100))

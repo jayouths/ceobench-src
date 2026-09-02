@@ -65,6 +65,7 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(
             "enabled": False,
             "max_schema_retries": 1,
             "max_enterprise_threads": 50,
+            "role_report_concurrency": 1,
         },
         "analysis_model": None,
         "git_commit": "test-commit",

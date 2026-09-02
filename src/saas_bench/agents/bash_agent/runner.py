@@ -175,11 +175,19 @@ class BashAgentRunner:
             "enabled": False,
             "max_schema_retries": 0,
             "max_enterprise_threads": 50,
+            "role_report_concurrency": 1,
         })
         self.analysis_enabled = self.analysis_module_config.get("enabled") is True
         max_threads = self.analysis_module_config.get("max_enterprise_threads")
         if not isinstance(max_threads, int) or isinstance(max_threads, bool) or max_threads <= 0:
             raise ValueError("analysis max_enterprise_threads must be a positive integer")
+        role_concurrency = self.analysis_module_config.get("role_report_concurrency")
+        if (
+            not isinstance(role_concurrency, int)
+            or isinstance(role_concurrency, bool)
+            or not 1 <= role_concurrency <= 4
+        ):
+            raise ValueError("analysis role_report_concurrency must be between 1 and 4")
         self.analysis_model_config = (
             dict(analysis_model_config) if analysis_model_config is not None else None
         )

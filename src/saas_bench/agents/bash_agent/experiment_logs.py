@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -28,6 +29,7 @@ class ExperimentLogWriter:
         self.run_id = run_id
         self.trajectory_file = trajectory_file
         self.performance_file = performance_file
+        self._write_lock = threading.Lock()
 
     @staticmethod
     def week_index(sim_day: int) -> int:
@@ -36,12 +38,14 @@ class ExperimentLogWriter:
 
     def trajectory(self, event_type: str, sim_day: int, **fields: Any) -> dict[str, Any]:
         entry = self._entry(event_type, sim_day, fields)
-        self._append(self.trajectory_file, entry)
+        with self._write_lock:
+            self._append(self.trajectory_file, entry)
         return entry
 
     def performance(self, event_type: str, sim_day: int, **fields: Any) -> dict[str, Any]:
         entry = self._entry(event_type, sim_day, fields)
-        self._append(self.performance_file, entry)
+        with self._write_lock:
+            self._append(self.performance_file, entry)
         return entry
 
     def has_trajectory_event(self, event_type: str, sim_day: int) -> bool:

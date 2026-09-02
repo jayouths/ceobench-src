@@ -31,6 +31,7 @@ def make_analysis_pipeline(
         module_config=module_config or {
             "max_schema_retries": 1,
             "max_enterprise_threads": 50,
+            "role_report_concurrency": 1,
         },
         model_config=model_config,
         client=client,

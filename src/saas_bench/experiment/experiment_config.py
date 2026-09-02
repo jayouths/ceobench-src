@@ -30,6 +30,7 @@ _EXPERIMENT_KEYS = {
 }
 _ANALYSIS_MODULE_KEYS = {
     "enabled", "max_schema_retries", "max_enterprise_threads",
+    "role_report_concurrency",
 }
 
 
@@ -75,6 +76,7 @@ class AnalysisModuleSettings:
     enabled: bool
     max_schema_retries: int
     max_enterprise_threads: int
+    role_report_concurrency: int
 
 
 @dataclass(frozen=True)
@@ -178,10 +180,20 @@ def _load_analysis_module(raw: Mapping[str, Any]) -> AnalysisModuleSettings:
         raise ValueError(
             "modules.analysis.max_enterprise_threads must be a positive integer"
         )
+    role_report_concurrency = raw["role_report_concurrency"]
+    if (
+        not isinstance(role_report_concurrency, int)
+        or isinstance(role_report_concurrency, bool)
+        or not 1 <= role_report_concurrency <= 4
+    ):
+        raise ValueError(
+            "modules.analysis.role_report_concurrency must be an integer between 1 and 4"
+        )
     return AnalysisModuleSettings(
         enabled=enabled,
         max_schema_retries=max_schema_retries,
         max_enterprise_threads=max_enterprise_threads,
+        role_report_concurrency=role_report_concurrency,
     )
 
 

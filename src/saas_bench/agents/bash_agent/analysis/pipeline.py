@@ -301,6 +301,7 @@ class AnalysisPipeline:
         generator = RoleReportGenerator(
             self.call_role_model,
             max_schema_retries=self.module_config["max_schema_retries"],
+            role_report_concurrency=self.module_config["role_report_concurrency"],
         )
         artifact = generator.generate(signals)
         write_json_atomic(path, artifact.model_dump(mode="json"))
