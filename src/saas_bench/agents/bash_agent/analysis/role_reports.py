@@ -6,14 +6,13 @@ from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from dataclasses import dataclass
 from json import JSONDecodeError
-import re
 
 from pydantic import ValidationError
 
+from .evidence_cards import build_evidence_cards, state_core_evidence_ids
 from .models import (
-    Direction,
     Role,
-    RoleAnalysis,
+    RoleSelection,
     AnalysisCallKind,
     RoleCallUsage,
     RoleReport,
@@ -84,7 +83,9 @@ class RoleReportGenerator:
         signals: AnalysisSignals,
         role: Role,
     ) -> tuple[RoleReport, list[RoleCallUsage]]:
-        system_prompt, user_prompt = build_role_prompts(signals, role)
+        # 证据卡片只生成一次，初次调用与修复调用必须使用完全相同的事实集合。
+        cards = build_evidence_cards(signals, role)
+        system_prompt, user_prompt = build_role_prompts(signals, role, cards)
         role_calls: list[RoleCallUsage] = []
         last_error = ""
         last_text = ""
@@ -97,6 +98,7 @@ class RoleReportGenerator:
                 system_prompt, user_prompt = build_repair_prompt(
                     signals,
                     role,
+                    cards,
                     last_text,
                     last_error,
                 )
@@ -119,9 +121,14 @@ class RoleReportGenerator:
 
             try:
                 payload = parse_json_object(last_text)
-                analysis = RoleAnalysis.model_validate(payload)
-                report = RoleReport.from_analysis(role, signals.day, analysis)
-                self._validate_evidence_metrics(signals, report)
+                selection = RoleSelection.model_validate(payload)
+                report = RoleReport.from_selection(
+                    role,
+                    signals.day,
+                    selection,
+                    cards,
+                    state_core_evidence_ids(cards, role),
+                )
                 return (
                     report,
                     role_calls,
@@ -133,70 +140,3 @@ class RoleReportGenerator:
             f"{role.value} role report remained invalid after "
             f"{len(role_calls)} call(s): {last_error}"
         )
-
-    @staticmethod
-    def _validate_evidence_metrics(
-        signals: AnalysisSignals,
-        report: RoleReport,
-    ) -> None:
-        """证据必须引用本角色真实字段，环比方向必须与程序计算一致。"""
-
-        role_payload = getattr(signals, report.role.value).model_dump(mode="json")
-        prefix = report.role.value + "."
-        errors: list[str] = []
-        for evidence in report.evidence:
-            if not evidence.metric.startswith(prefix):
-                errors.append(
-                    f"metric path must start with {prefix!r}: {evidence.metric!r}"
-                )
-                continue
-            found, target = RoleReportGenerator._resolve_metric_path(
-                role_payload,
-                evidence.metric.removeprefix(prefix),
-            )
-            if not found:
-                errors.append(f"unknown metric path: {evidence.metric!r}")
-                continue
-
-            # direction 只描述完整的前后比较。时点值、文本、列表元素以及
-            # 数据不足的比较都必须省略该字段，避免把“未知”伪装成一种方向。
-            expected_direction = RoleReportGenerator._expected_direction(target)
-            if evidence.direction is not expected_direction:
-                actual = evidence.direction.value if evidence.direction else None
-                expected = expected_direction.value if expected_direction else None
-                errors.append(
-                    f"metric direction mismatch for {evidence.metric!r}: "
-                    f"expected {expected!r}, got {actual!r}"
-                )
-        if errors:
-            raise ValueError("; ".join(errors))
-
-    @staticmethod
-    def _resolve_metric_path(payload: object, path: str) -> tuple[bool, object]:
-        """解析 JSON 字段路径，并支持列表下标，例如 posts[0].content。"""
-
-        target = payload
-        for segment in path.split("."):
-            match = re.fullmatch(
-                r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)(?P<indexes>(?:\[\d+\])*)",
-                segment,
-            )
-            if match is None or not isinstance(target, dict):
-                return False, None
-            key = match.group("key")
-            if key not in target:
-                return False, None
-            target = target[key]
-            for raw_index in re.findall(r"\[(\d+)\]", match.group("indexes")):
-                index = int(raw_index)
-                if not isinstance(target, list) or index >= len(target):
-                    return False, None
-                target = target[index]
-        return True, target
-
-    @staticmethod
-    def _expected_direction(target: object) -> Direction | None:
-        if not isinstance(target, dict) or "comparison_status" not in target:
-            return None
-        direction = target.get("direction")
-        return Direction(direction) if direction is not None else None

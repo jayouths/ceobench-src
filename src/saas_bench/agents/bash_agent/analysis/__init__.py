@@ -1,8 +1,9 @@
 """Analysis 模块的结构化数据契约与执行逻辑。"""
 
 from .models import (
+    EvidenceCard,
     Role,
-    RoleAnalysis,
+    RoleSelection,
     RoleReportsArtifact,
     RoleReport,
     StateCallUsage,
@@ -16,8 +17,9 @@ from .signals import SignalCollector, parse_public_week_snapshot
 from .brief import render_strategy_brief
 
 __all__ = [
+    "EvidenceCard",
     "Role",
-    "RoleAnalysis",
+    "RoleSelection",
     "RoleReportsArtifact",
     "RoleReport",
     "StateCallUsage",

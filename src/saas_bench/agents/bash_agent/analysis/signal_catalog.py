@@ -47,6 +47,12 @@ SIGNAL_CATALOG = {
         "取最新已发布读数，并记录观察日与测量日间隔",
         "最新公开读数",
     ),
+    "finance.current_cash": SignalDefinition(
+        "当前可支配现金余额",
+        ("public_week_snapshot.current_state.cash",),
+        "直接读取当前周边界的公开现金快照",
+        "当前时点",
+    ),
     "finance.operating_revenue": SignalDefinition(
         "订阅收入与广告收入",
         ("ledger.subscription_payment", "ledger.ad_revenue"),

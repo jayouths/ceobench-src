@@ -4,37 +4,39 @@ import pytest
 from pydantic import ValidationError
 
 from saas_bench.agents.bash_agent.analysis.models import (
+    EvidenceCard,
     Role,
-    RoleAnalysis,
     RoleReport,
+    RoleSelection,
     StateAssessment,
     StatePortrait,
 )
 
 
-def _evidence(evidence_id: str = "MAR-1") -> dict:
-    return {
-        "id": evidence_id,
-        "observation": "Recent acquisition increased",
-        "metric": "market.new_customers_wow",
-        "direction": "up",
-        "strength": 0.8,
-        "lag_note": "Advertising effects can lag by one week",
-    }
+def _card(evidence_id: str = "MAR-001") -> EvidenceCard:
+    return EvidenceCard(
+        id=evidence_id,
+        metric="market.effective_leads.individual",
+        meaning="个人有效线索",
+        fact="当前值 10，前期值 8，方向为上升",
+        window="最近7天与前7天",
+        direction="up",
+    )
 
 
-def _role_analysis() -> RoleAnalysis:
-    return RoleAnalysis.model_validate({
-        "evidence": [_evidence()],
+def _selection(evidence_id: str = "MAR-001") -> RoleSelection:
+    return RoleSelection.model_validate({
+        "selected_evidence_ids": [evidence_id],
         "hypotheses": [{
-            "cause": "Higher advertising exposure",
-            "evidence_ids": ["MAR-1"],
+            "cause": "获客曝光可能增加",
+            "evidence_ids": [evidence_id],
             "confidence": 0.7,
-            "validation": "Compare acquisition by channel next week",
+            "validation": "观察下一周同一公开指标",
         }],
         "risks": [{
-            "risk": "Acquisition may outpace service capacity",
-            "early_indicator": "Capacity utilization",
+            "risk": "新增客户可能带来服务压力",
+            "evidence_ids": [evidence_id],
+            "early_indicator": "容量利用率",
             "horizon_weeks": 2,
             "severity": 3,
         }],
@@ -50,79 +52,70 @@ def _assessment_payload() -> dict:
         ("customer_health", "watch"),
     ]
     return {
-        "diagnosis": "Growth is creating service and margin pressure",
+        "diagnosis": "增长正在形成服务和利润压力",
         "dimensions": [{
             "dimension": dimension,
             "label": label,
             "confidence": 0.7,
-            "evidence_ids": ["MAR-1"],
-            "rationale": "Supported by the current operating signals",
+            "evidence_ids": ["MAR-001"],
+            "rationale": "当前经营证据支持这一判断",
         } for dimension, label in dimensions],
-        "facts": [{
-            "statement": "Acquisition increased",
-            "evidence_ids": ["MAR-1"],
-            "confidence": 0.8,
-        }],
+        "key_evidence_ids": ["MAR-001"],
         "hypotheses": [{
-            "cause": "Advertising increased demand",
-            "evidence_for": ["MAR-1"],
+            "cause": "广告可能增加需求",
+            "evidence_for": ["MAR-001"],
             "evidence_against": [],
-            "competing_causes": ["Organic word of mouth"],
+            "competing_causes": [],
             "confidence": 0.6,
-            "validation_test": "Compare acquisition channels next week",
+            "validation_test": "比较下一周不同获客来源",
         }],
         "latent_risks": [{
-            "risk": "Service degradation may increase churn",
-            "evidence_ids": ["MAR-1"],
-            "early_indicator": "Error rate",
+            "risk": "服务质量可能承压",
+            "evidence_ids": ["MAR-001"],
+            "early_indicator": "错误率",
             "horizon_weeks": 2,
             "severity": 4,
-        }],
-        "causal_chain": [{
-            "cause": "Higher acquisition",
-            "effect": "Higher service load",
-            "evidence_ids": ["MAR-1"],
-            "confidence": 0.6,
         }],
     }
 
 
-def test_role_report_adds_program_owned_identity():
-    report = RoleReport.from_analysis(Role.MARKET, 7, _role_analysis())
+def test_role_report_uses_program_owned_evidence_cards():
+    report = RoleReport.from_selection(
+        Role.MARKET,
+        7,
+        _selection(),
+        [_card()],
+    )
 
     assert report.role is Role.MARKET
     assert report.day == 7
-    assert report.evidence[0].id == "MAR-1"
+    assert report.evidence == [_card()]
 
 
-def test_evidence_without_direction_omits_field_when_serialized():
-    payload = _evidence()
-    payload.pop("direction")
-
-    evidence = RoleAnalysis.model_validate({
-        "evidence": [payload],
-        "hypotheses": [],
-        "risks": [],
-    }).evidence[0]
-
-    assert evidence.direction is None
-    assert "direction" not in evidence.model_dump(mode="json")
+def test_role_selection_rejects_duplicate_core_evidence():
+    payload = _selection().model_dump()
+    payload["selected_evidence_ids"] = ["MAR-001", "MAR-001"]
+    with pytest.raises(ValidationError, match="must be unique"):
+        RoleSelection.model_validate(payload)
 
 
-def test_role_report_rejects_invalid_evidence_references_and_role_prefix():
-    invalid_reference = _role_analysis().model_dump()
-    invalid_reference["hypotheses"][0]["evidence_ids"] = ["MAR-2"]
-    with pytest.raises(ValidationError, match="unknown evidence ids"):
-        RoleAnalysis.model_validate(invalid_reference)
+def test_role_report_rejects_unknown_selection_and_wrong_role_prefix():
+    with pytest.raises(ValueError, match="unknown evidence ids"):
+        RoleReport.from_selection(Role.MARKET, 7, _selection("MAR-999"), [_card()])
 
     with pytest.raises(ValidationError, match="must start with FIN-"):
-        RoleReport.from_analysis(Role.FINANCE, 7, _role_analysis())
+        RoleReport.from_selection(Role.FINANCE, 7, _selection(), [_card()])
+
+    selection = _selection()
+    selection.hypotheses[0].evidence_ids = ["MAR-999"]
+    with pytest.raises(ValueError, match="unknown evidence ids"):
+        RoleReport.from_selection(Role.MARKET, 7, selection, [_card()])
 
 
-def test_role_analysis_rejects_empty_evidence_report():
+def test_role_selection_requires_at_least_one_evidence():
     with pytest.raises(ValidationError, match="at least 1 item"):
-        RoleAnalysis.model_validate({
-            "evidence": [],
+        RoleSelection.model_validate({
+            "selected_evidence_ids": [],
             "hypotheses": [],
             "risks": [],
         })
@@ -135,6 +128,7 @@ def test_state_portrait_adds_day_and_preserves_fixed_dimensions():
     assert portrait.day == 7
     assert portrait.dimensions == assessment.dimensions
     assert "state_label" not in portrait.model_dump()
+    assert "causal_chain" not in portrait.model_dump()
 
 
 def test_state_assessment_requires_each_fixed_dimension_once():
@@ -154,8 +148,8 @@ def test_operating_dimension_rejects_wrong_label_for_dimension():
 
 
 def test_analysis_models_do_not_coerce_string_numbers():
-    payload = _role_analysis().model_dump()
-    payload["evidence"][0]["strength"] = "0.8"
+    payload = _selection().model_dump()
+    payload["hypotheses"][0]["confidence"] = "0.7"
 
     with pytest.raises(ValidationError, match="valid number"):
-        RoleAnalysis.model_validate(payload)
+        RoleSelection.model_validate(payload)

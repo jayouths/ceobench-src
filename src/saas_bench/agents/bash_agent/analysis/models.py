@@ -36,16 +36,18 @@ class Direction(StrEnum):
     FLAT = "flat"
 
 
-class Evidence(AnalysisModel):
-    id: str = Field(pattern=r"^[A-Z]{3}-[1-5]$")
-    observation: str = Field(min_length=1, max_length=500)
+class EvidenceCard(AnalysisModel):
+    """程序从确定性经营信号生成的原子事实，LLM 只能选择、不能改写。"""
+
+    id: str = Field(pattern=r"^(MAR|FIN|PRO|CUS)-\d{3}$")
     metric: str = Field(min_length=1, max_length=120)
+    meaning: str = Field(min_length=1, max_length=300)
+    fact: str = Field(min_length=1, max_length=4000)
+    window: str = Field(min_length=1, max_length=100)
     direction: Direction | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )
-    strength: Confidence
-    lag_note: str = Field(min_length=1, max_length=300)
 
 
 class RoleHypothesis(AnalysisModel):
@@ -57,38 +59,35 @@ class RoleHypothesis(AnalysisModel):
 
 class RoleRisk(AnalysisModel):
     risk: str = Field(min_length=1, max_length=400)
+    evidence_ids: list[str] = Field(min_length=1, max_length=5)
     early_indicator: str = Field(min_length=1, max_length=300)
     horizon_weeks: HorizonWeeks
     severity: Severity
 
 
-class RoleAnalysis(AnalysisModel):
-    """LLM 只填写分析内容，角色和日期由程序附加。"""
+class RoleSelection(AnalysisModel):
+    """角色 LLM 只选择事实并生成需要判断力的假设与风险。"""
 
-    # 每个角色至少要记录一条可核验事实；数据不足时
-    # 也应引用对应信号并标记 insufficient_data，不能用空报告静默降级。
-    evidence: list[Evidence] = Field(min_length=1, max_length=5)
+    selected_evidence_ids: list[str] = Field(min_length=1, max_length=5)
     hypotheses: list[RoleHypothesis] = Field(default_factory=list, max_length=3)
     risks: list[RoleRisk] = Field(default_factory=list, max_length=3)
 
     @model_validator(mode="after")
     def validate_evidence_references(self) -> Self:
-        evidence_ids = [item.id for item in self.evidence]
-        if len(evidence_ids) != len(set(evidence_ids)):
-            raise ValueError("evidence ids must be unique")
-        known = set(evidence_ids)
-        for hypothesis in self.hypotheses:
-            unknown = sorted(set(hypothesis.evidence_ids) - known)
-            if unknown:
-                raise ValueError(
-                    f"hypothesis references unknown evidence ids: {unknown}"
-                )
+        if len(self.selected_evidence_ids) != len(set(self.selected_evidence_ids)):
+            raise ValueError("selected evidence ids must be unique")
         return self
 
 
-class RoleReport(RoleAnalysis):
+class RoleReport(AnalysisModel):
     role: Role
     day: NonNegativeDay
+    key_evidence_ids: list[str] = Field(min_length=1, max_length=5)
+    # 这里保存所有被选择或引用的事实；输入规模由信号采集上限控制，
+    # 不再用任意数量上限拒绝一份引用关系完整的合法报告。
+    evidence: list[EvidenceCard] = Field(min_length=1)
+    hypotheses: list[RoleHypothesis] = Field(default_factory=list, max_length=3)
+    risks: list[RoleRisk] = Field(default_factory=list, max_length=3)
 
     _PREFIX_BY_ROLE: ClassVar[dict[Role, str]] = {
         Role.MARKET: "MAR",
@@ -100,19 +99,62 @@ class RoleReport(RoleAnalysis):
     @model_validator(mode="after")
     def validate_role_prefix(self) -> Self:
         expected_prefix = self._PREFIX_BY_ROLE[self.role] + "-"
-        invalid = [item.id for item in self.evidence if not item.id.startswith(expected_prefix)]
+        evidence_ids = [item.id for item in self.evidence]
+        invalid = [item_id for item_id in evidence_ids if not item_id.startswith(expected_prefix)]
         if invalid:
             raise ValueError(
                 f"{self.role.value} evidence ids must start with {expected_prefix}: {invalid}"
             )
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("role report evidence ids must be unique")
+        known = set(evidence_ids)
+        unknown_keys = sorted(set(self.key_evidence_ids) - known)
+        if unknown_keys:
+            raise ValueError(
+                f"role report key evidence ids are unknown: {unknown_keys}"
+            )
+        for hypothesis in self.hypotheses:
+            unknown = sorted(set(hypothesis.evidence_ids) - known)
+            if unknown:
+                raise ValueError(
+                    f"hypothesis references unknown evidence ids: {unknown}"
+                )
+        for risk in self.risks:
+            unknown = sorted(set(risk.evidence_ids) - known)
+            if unknown:
+                raise ValueError(f"risk references unknown evidence ids: {unknown}")
         return self
 
     @classmethod
-    def from_analysis(cls, role: Role, day: int, analysis: RoleAnalysis) -> Self:
+    def from_selection(
+        cls,
+        role: Role,
+        day: int,
+        selection: RoleSelection,
+        cards: list[EvidenceCard],
+        state_core_ids: list[str] | None = None,
+    ) -> Self:
+        cards_by_id = {card.id: card for card in cards}
+        referenced_ids = list(selection.selected_evidence_ids)
+        referenced_ids.extend(state_core_ids or [])
+        for hypothesis in selection.hypotheses:
+            referenced_ids.extend(hypothesis.evidence_ids)
+        for risk in selection.risks:
+            referenced_ids.extend(risk.evidence_ids)
+        referenced_ids = list(dict.fromkeys(referenced_ids))
+        unknown = sorted(set(referenced_ids) - cards_by_id.keys())
+        if unknown:
+            raise ValueError(f"role selection references unknown evidence ids: {unknown}")
         return cls.model_validate({
             "role": role,
             "day": day,
-            **analysis.model_dump(),
+            "key_evidence_ids": selection.selected_evidence_ids,
+            "evidence": [
+                cards_by_id[evidence_id].model_dump(mode="json")
+                for evidence_id in referenced_ids
+            ],
+            "hypotheses": selection.hypotheses,
+            "risks": selection.risks,
         })
 
 
@@ -171,7 +213,7 @@ class StateCallUsage(AnalysisModel):
 class RoleReportsArtifact(AnalysisModel):
     """一个模拟周的四角色报告及其全部调用成本。"""
 
-    schema_version: Literal["2.0"] = "2.0"
+    schema_version: Literal["3.0"] = "3.0"
     day: NonNegativeDay
     reports: list[RoleReport] = Field(min_length=4, max_length=4)
     calls: list[RoleCallUsage] = Field(min_length=4)
@@ -250,17 +292,11 @@ class OperatingDimension(AnalysisModel):
         return self
 
 
-class StateFact(AnalysisModel):
-    statement: str = Field(min_length=1, max_length=500)
-    evidence_ids: list[str] = Field(min_length=1, max_length=8)
-    confidence: Confidence
-
-
 class StateHypothesis(AnalysisModel):
     cause: str = Field(min_length=1, max_length=500)
     evidence_for: list[str] = Field(min_length=1, max_length=8)
     evidence_against: list[str] = Field(default_factory=list, max_length=8)
-    competing_causes: list[str] = Field(min_length=1, max_length=4)
+    competing_causes: list[str] = Field(default_factory=list, max_length=4)
     confidence: Confidence
     validation_test: str = Field(min_length=1, max_length=500)
 
@@ -273,22 +309,15 @@ class LatentRisk(AnalysisModel):
     severity: Severity
 
 
-class CausalStep(AnalysisModel):
-    cause: str = Field(min_length=1, max_length=300)
-    effect: str = Field(min_length=1, max_length=300)
-    evidence_ids: list[str] = Field(min_length=1, max_length=8)
-    confidence: Confidence
-
-
 class StateAssessment(AnalysisModel):
     """LLM 输出的经营状态，不包含程序生成的标识字段。"""
 
     diagnosis: str = Field(min_length=1, max_length=500)
     dimensions: list[OperatingDimension] = Field(min_length=5, max_length=5)
-    facts: list[StateFact] = Field(default_factory=list, max_length=6)
-    hypotheses: list[StateHypothesis] = Field(default_factory=list, max_length=4)
-    latent_risks: list[LatentRisk] = Field(default_factory=list, max_length=4)
-    causal_chain: list[CausalStep] = Field(default_factory=list, max_length=6)
+    # 关键事实直接引用程序生成的证据卡片，避免状态模型再次改写数字。
+    key_evidence_ids: list[str] = Field(min_length=1, max_length=3)
+    hypotheses: list[StateHypothesis] = Field(default_factory=list, max_length=2)
+    latent_risks: list[LatentRisk] = Field(default_factory=list, max_length=2)
 
     @model_validator(mode="after")
     def validate_dimensions(self) -> Self:
@@ -314,7 +343,7 @@ class StatePortrait(StateAssessment):
 class StatePortraitArtifact(StatePortrait):
     """一个模拟周的经营画像及其全部状态重构调用成本。"""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     calls: list[StateCallUsage] = Field(min_length=1)
 
     @model_validator(mode="after")

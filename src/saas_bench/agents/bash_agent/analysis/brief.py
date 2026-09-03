@@ -31,6 +31,12 @@ def render_strategy_brief(
     if role_reports.day != portrait.day:
         raise ValueError("role reports and state portrait must have the same day")
 
+    evidence_by_id = {
+        evidence.id: evidence
+        for report in role_reports.reports
+        for evidence in report.evidence
+    }
+
     lines = [
         "# 本周经营状态简报",
         "",
@@ -61,14 +67,13 @@ def render_strategy_brief(
         )
 
     lines.extend(["", "## 已确认事实", ""])
-    if portrait.facts:
-        for fact in portrait.facts:
-            lines.append(
-                f"- {fact.statement}（证据：{_ids(fact.evidence_ids)}；"
-                f"置信度：{fact.confidence:.2f}）"
-            )
-    else:
-        lines.append("- 无")
+    # 数字事实直接来自确定性证据卡片，不让状态模型再次转述或计算。
+    for evidence_id in portrait.key_evidence_ids:
+        evidence = evidence_by_id[evidence_id]
+        lines.append(
+            f"- {evidence.meaning}：{evidence.fact}"
+            f"（统计口径：{evidence.window}；证据：{evidence.id}）"
+        )
 
     lines.extend(["", "## 待验证假设", ""])
     if portrait.hypotheses:
@@ -76,10 +81,15 @@ def render_strategy_brief(
             lines.extend([
                 f"{index}. {hypothesis.cause}（置信度：{hypothesis.confidence:.2f}）",
                 f"   - 支持证据：{_ids(hypothesis.evidence_for)}",
-                f"   - 反对证据：{_ids(hypothesis.evidence_against)}",
-                f"   - 竞争性解释：{'；'.join(hypothesis.competing_causes)}",
                 f"   - 验证方式：{hypothesis.validation_test}",
             ])
+            if hypothesis.evidence_against:
+                lines.insert(-1, f"   - 反对证据：{_ids(hypothesis.evidence_against)}")
+            if hypothesis.competing_causes:
+                lines.insert(
+                    -1,
+                    f"   - 竞争性解释：{'；'.join(hypothesis.competing_causes)}",
+                )
     else:
         lines.append("- 无")
 
@@ -92,30 +102,6 @@ def render_strategy_brief(
                 f"严重度：{risk.severity}/5）"
             )
     else:
-        lines.append("- 无")
-
-    lines.extend(["", "## 因果链", ""])
-    if portrait.causal_chain:
-        for step in portrait.causal_chain:
-            lines.append(
-                f"- {step.cause} -> {step.effect}（证据：{_ids(step.evidence_ids)}；"
-                f"置信度：{step.confidence:.2f}）"
-            )
-    else:
-        lines.append("- 无")
-
-    lines.extend(["", "## 证据索引", ""])
-    for report in role_reports.reports:
-        for evidence in report.evidence:
-            direction = (
-                f"; {evidence.direction.value}" if evidence.direction is not None else ""
-            )
-            lines.append(
-                f"- **{evidence.id}** [{evidence.metric}{direction}; "
-                f"强度 {evidence.strength:.2f}] {evidence.observation} "
-                f"（滞后：{evidence.lag_note}）"
-            )
-    if not any(report.evidence for report in role_reports.reports):
         lines.append("- 无")
 
     return "\n".join(lines) + "\n"

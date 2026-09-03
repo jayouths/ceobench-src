@@ -8,7 +8,7 @@ from saas_bench.agents.bash_agent.analysis.models import (
     Role,
     AnalysisCallKind,
     RoleCallUsage,
-    Evidence,
+    EvidenceCard,
     RoleReport,
     RoleReportsArtifact,
 )
@@ -90,12 +90,13 @@ def test_checkpoint_persists_role_report_usage_from_artifacts(tmp_path):
         RoleReport(
             role=role,
             day=7,
-            evidence=[Evidence(
-                id=f"{prefixes[role]}-1",
-                observation="test evidence",
+            key_evidence_ids=[f"{prefixes[role]}-001"],
+            evidence=[EvidenceCard(
+                id=f"{prefixes[role]}-001",
                 metric=f"{role.value}.test_metric",
-                strength=1.0,
-                lag_note="test fixture",
+                meaning="test metric",
+                fact="current value 1",
+                window="current point",
             )],
             hypotheses=[],
             risks=[],

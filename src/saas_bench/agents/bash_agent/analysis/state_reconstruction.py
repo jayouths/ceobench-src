@@ -110,15 +110,12 @@ class StateReconstructor:
         references: list[str] = []
         for dimension in assessment.dimensions:
             references.extend(dimension.evidence_ids)
-        for fact in assessment.facts:
-            references.extend(fact.evidence_ids)
+        references.extend(assessment.key_evidence_ids)
         for hypothesis in assessment.hypotheses:
             references.extend(hypothesis.evidence_for)
             references.extend(hypothesis.evidence_against)
         for risk in assessment.latent_risks:
             references.extend(risk.evidence_ids)
-        for step in assessment.causal_chain:
-            references.extend(step.evidence_ids)
 
         unknown = sorted(set(references) - known_ids)
         if unknown:
