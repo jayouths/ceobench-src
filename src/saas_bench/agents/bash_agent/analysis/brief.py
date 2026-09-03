@@ -107,8 +107,11 @@ def render_strategy_brief(
     lines.extend(["", "## 证据索引", ""])
     for report in role_reports.reports:
         for evidence in report.evidence:
+            direction = (
+                f"; {evidence.direction.value}" if evidence.direction is not None else ""
+            )
             lines.append(
-                f"- **{evidence.id}** [{evidence.metric}; {evidence.direction.value}; "
+                f"- **{evidence.id}** [{evidence.metric}{direction}; "
                 f"强度 {evidence.strength:.2f}] {evidence.observation} "
                 f"（滞后：{evidence.lag_note}）"
             )

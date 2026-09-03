@@ -96,10 +96,10 @@ SIGNAL_CATALOG = {
         "最近7天与前7天",
     ),
     "product.configuration": SignalDefinition(
-        "当前产品配置、上周配置和窗口内变化",
-        ("public_week_snapshot.configuration", "config_history"),
-        "比较相邻配置快照，仅记录真实变化字段",
-        "当前时点与最近7天",
+        "产品配置逐项变化",
+        ("public_week_snapshot.configuration", "历史 signals.json"),
+        "按套餐和配置项比较相邻周边界公开快照",
+        "当前时点与上周时点",
     ),
     "product.research_pipeline": SignalDefinition(
         "在研、已完成项目及新完成数量",

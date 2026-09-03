@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from dataclasses import dataclass
 from json import JSONDecodeError
-from numbers import Real
+import re
 
 from pydantic import ValidationError
 
@@ -150,67 +150,53 @@ class RoleReportGenerator:
                     f"metric path must start with {prefix!r}: {evidence.metric!r}"
                 )
                 continue
-            target = role_payload
-            for part in evidence.metric.removeprefix(prefix).split("."):
-                if not isinstance(target, dict) or part not in target:
-                    errors.append(f"unknown metric path: {evidence.metric!r}")
-                    target = None
-                    break
-                target = target[part]
-
-            if target is None:
+            found, target = RoleReportGenerator._resolve_metric_path(
+                role_payload,
+                evidence.metric.removeprefix(prefix),
+            )
+            if not found:
+                errors.append(f"unknown metric path: {evidence.metric!r}")
                 continue
 
-            # 只有确定性信号层已经计算出 direction 的环比对象，
-            # 才允许角色报告声称 up/down/flat。单点值、文本和配置值
-            # 都不能自行推断趋势，否则会把当前状态误写成变化方向。
-            expected_direction = RoleReportGenerator._expected_direction(
-                evidence.metric,
-                target,
-            )
-            if evidence.direction.value != expected_direction:
+            # direction 只描述完整的前后比较。时点值、文本、列表元素以及
+            # 数据不足的比较都必须省略该字段，避免把“未知”伪装成一种方向。
+            expected_direction = RoleReportGenerator._expected_direction(target)
+            if evidence.direction is not expected_direction:
+                actual = evidence.direction.value if evidence.direction else None
+                expected = expected_direction.value if expected_direction else None
                 errors.append(
                     f"metric direction mismatch for {evidence.metric!r}: "
-                    f"expected {expected_direction!r}, got {evidence.direction.value!r}"
+                    f"expected {expected!r}, got {actual!r}"
                 )
         if errors:
             raise ValueError("; ".join(errors))
 
     @staticmethod
-    def _expected_direction(metric: str, target: object) -> str:
-        if isinstance(target, dict) and "direction" in target:
-            return str(target["direction"])
-        if metric == "product.configuration.changes":
-            return RoleReportGenerator._configuration_changes_direction(target)
-        return Direction.INSUFFICIENT_DATA.value
+    def _resolve_metric_path(payload: object, path: str) -> tuple[bool, object]:
+        """解析 JSON 字段路径，并支持列表下标，例如 posts[0].content。"""
+
+        target = payload
+        for segment in path.split("."):
+            match = re.fullmatch(
+                r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)(?P<indexes>(?:\[\d+\])*)",
+                segment,
+            )
+            if match is None or not isinstance(target, dict):
+                return False, None
+            key = match.group("key")
+            if key not in target:
+                return False, None
+            target = target[key]
+            for raw_index in re.findall(r"\[(\d+)\]", match.group("indexes")):
+                index = int(raw_index)
+                if not isinstance(target, list) or index >= len(target):
+                    return False, None
+                target = target[index]
+        return True, target
 
     @staticmethod
-    def _configuration_changes_direction(target: object) -> str:
-        """仅在全部配置变更同向时，为变更列表确定一个整体方向。"""
-        if not isinstance(target, list) or not target:
-            return Direction.INSUFFICIENT_DATA.value
-
-        directions: set[str] = set()
-        for change in target:
-            if not isinstance(change, dict):
-                return Direction.INSUFFICIENT_DATA.value
-            previous = change.get("previous")
-            current = change.get("current")
-            if (
-                not isinstance(previous, Real)
-                or isinstance(previous, bool)
-                or not isinstance(current, Real)
-                or isinstance(current, bool)
-            ):
-                return Direction.INSUFFICIENT_DATA.value
-            if current > previous:
-                directions.add(Direction.UP.value)
-            elif current < previous:
-                directions.add(Direction.DOWN.value)
-            else:
-                directions.add(Direction.FLAT.value)
-
-        if len(directions) == 1:
-            return directions.pop()
-        # 配置项量纲不同，升降混合时不存在可解释的单一总体方向。
-        return Direction.INSUFFICIENT_DATA.value
+    def _expected_direction(target: object) -> Direction | None:
+        if not isinstance(target, dict) or "comparison_status" not in target:
+            return None
+        direction = target.get("direction")
+        return Direction(direction) if direction is not None else None

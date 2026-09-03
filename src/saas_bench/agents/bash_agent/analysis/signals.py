@@ -20,7 +20,6 @@ from .signal_models import (
     ChangeDirection,
     ChannelGroupEfficiency,
     ChurnSignals,
-    ConfigurationChange,
     CostSignals,
     CustomerBase,
     CustomerSignals,
@@ -39,8 +38,8 @@ from .signal_models import (
     ObservationWindow,
     PaidAcquisition,
     PaidEfficiency,
+    PlanConfigurationSignals,
     PlanCustomerBase,
-    ProductConfiguration,
     ProductConfigurationSignals,
     ProductSignals,
     ReliabilitySignals,
@@ -122,7 +121,6 @@ def _comparison_from_observations(
             previous=previous,
             absolute_change=None,
             relative_change=None,
-            direction=ChangeDirection.INSUFFICIENT_DATA,
             comparison_status=status,
         )
 
@@ -224,7 +222,6 @@ class SignalCollector:
             self.query(signal_queries.service_days(start_14d, day))
             if day else []
         )
-        config_rows = self.query(signal_queries.configuration_history(day))
         research_rows = self.query(signal_queries.RESEARCH_PROJECTS)
         customer_base_rows = self.query(signal_queries.CUSTOMER_BASE)
         paid_subscription_rows = (
@@ -245,7 +242,7 @@ class SignalCollector:
             snapshot, windows, history, ledger_max_id, ledger_rows
         )
         product = self._build_product(
-            snapshot, windows, history, service_rows, config_rows, research_rows
+            snapshot, windows, history, service_rows, research_rows
         )
         customer = self._build_customer(
             snapshot,
@@ -665,7 +662,6 @@ class SignalCollector:
         windows: AnalysisWindows,
         history: Mapping[int, AnalysisSignals],
         service_rows: list[dict[str, Any]],
-        config_rows: list[dict[str, Any]],
         research_rows: list[dict[str, Any]],
     ) -> ProductSignals:
         current_rows = self._period_rows(service_rows, windows.current_7d)
@@ -703,62 +699,55 @@ class SignalCollector:
         def pair(key: str) -> MetricComparison:
             return _comparison(current.get(key), previous.get(key), cs, ps)
 
-        cfg = snapshot.configuration
-        current_config = ProductConfiguration(
-            tier_a=cfg.tier_a, tier_b=cfg.tier_b, tier_c=cfg.tier_c,
-            quota_a=cfg.quota_a, quota_b=cfg.quota_b, quota_c=cfg.quota_c,
-            capacity_tier=cfg.capacity_tier,
-            daily_operations_spend=float(cfg.daily_operations_spend),
-            daily_development_spend=float(cfg.daily_development_spend),
-        )
-        config_fields = {
-            "tier_A": "tier_a", "tier_B": "tier_b", "tier_C": "tier_c",
-            "quota_A": "quota_a", "quota_B": "quota_b", "quota_C": "quota_c",
-            "capacity_tier": "capacity_tier",
-            "spend_operations": "daily_operations_spend",
-            "spend_development": "daily_development_spend",
-        }
         previous_artifact = history.get(snapshot.day - 7)
-        previous_config = (
-            previous_artifact.product.configuration.current
+        previous_configuration = (
+            previous_artifact.public_week_snapshot.configuration
             if previous_artifact else None
         )
-        changes = []
-        # config_history 同一天只保留最终配置。以上周公开快照为起点并包含
-        # 周初边界日，才能捕获 Analysis 完成后、同一天发生的 Agent 配置修改。
-        running_config = previous_config.model_dump() if previous_config else None
-        boundary_day = snapshot.day - 7
-        ordered = [
-            row for row in config_rows
-            if boundary_day <= int(row["day"]) <= snapshot.day
-        ]
-        for row in ordered:
-            row_config = {
-                target: row[source] for source, target in config_fields.items()
-            }
-            if running_config is None:
-                running_config = row_config
-                continue
-            for source, target in config_fields.items():
-                if running_config[target] != row_config[target]:
-                    changes.append(ConfigurationChange(
-                        day=int(row["day"]), field=target,
-                        previous=running_config[target], current=row_config[target],
-                    ))
-            running_config = row_config
+        current_configuration = snapshot.configuration
 
-        # 正常情况下当前快照与最后一条 config_history 一致；显式比较可避免
-        # 配置持久化异常被静默忽略。
-        current_config_values = current_config.model_dump()
-        if running_config is not None:
-            for field, current_value in current_config_values.items():
-                if running_config[field] != current_value:
-                    changes.append(ConfigurationChange(
-                        day=snapshot.day,
-                        field=field,
-                        previous=running_config[field],
-                        current=current_value,
-                    ))
+        def configuration_pair(current_value: int | float, field: str) -> MetricComparison:
+            """配置是周边界状态；没有上周快照时只保留当前值，不伪造方向。"""
+
+            previous_value = (
+                getattr(previous_configuration, field)
+                if previous_configuration is not None else None
+            )
+            return _comparison(
+                current_value,
+                previous_value,
+                DataStatus.AVAILABLE,
+                (
+                    DataStatus.AVAILABLE
+                    if previous_configuration is not None
+                    else DataStatus.INSUFFICIENT_DATA
+                ),
+            )
+
+        configuration = ProductConfigurationSignals(
+            model_tier=PlanConfigurationSignals(
+                A=configuration_pair(current_configuration.tier_a, "tier_a"),
+                B=configuration_pair(current_configuration.tier_b, "tier_b"),
+                C=configuration_pair(current_configuration.tier_c, "tier_c"),
+            ),
+            usage_quota=PlanConfigurationSignals(
+                A=configuration_pair(current_configuration.quota_a, "quota_a"),
+                B=configuration_pair(current_configuration.quota_b, "quota_b"),
+                C=configuration_pair(current_configuration.quota_c, "quota_c"),
+            ),
+            capacity_tier=configuration_pair(
+                current_configuration.capacity_tier,
+                "capacity_tier",
+            ),
+            daily_operations_spend=configuration_pair(
+                float(current_configuration.daily_operations_spend),
+                "daily_operations_spend",
+            ),
+            daily_development_spend=configuration_pair(
+                float(current_configuration.daily_development_spend),
+                "daily_development_spend",
+            ),
+        )
 
         projects = [ResearchProjectSignal(**row) for row in research_rows]
         in_progress = [project for project in projects if project.status == "in_progress"]
@@ -800,14 +789,7 @@ class SignalCollector:
                 downtime_minutes=pair("downtime"),
                 outage_days=pair("outage_days"),
             ),
-            configuration=ProductConfigurationSignals(
-                current=current_config,
-                previous_week=previous_config,
-                changes=changes,
-                comparison_status=(
-                    DataStatus.AVAILABLE if previous_config else DataStatus.INSUFFICIENT_DATA
-                ),
-            ),
+            configuration=configuration,
             research_pipeline=ResearchPipeline(
                 in_progress=in_progress,
                 completed=completed,

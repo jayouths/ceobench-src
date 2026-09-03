@@ -95,6 +95,20 @@ def test_role_report_adds_program_owned_identity():
     assert report.evidence[0].id == "MAR-1"
 
 
+def test_evidence_without_direction_omits_field_when_serialized():
+    payload = _evidence()
+    payload.pop("direction")
+
+    evidence = RoleAnalysis.model_validate({
+        "evidence": [payload],
+        "hypotheses": [],
+        "risks": [],
+    }).evidence[0]
+
+    assert evidence.direction is None
+    assert "direction" not in evidence.model_dump(mode="json")
+
+
 def test_role_report_rejects_invalid_evidence_references_and_role_prefix():
     invalid_reference = _role_analysis().model_dump()
     invalid_reference["hypotheses"][0]["evidence_ids"] = ["MAR-2"]

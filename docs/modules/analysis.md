@@ -114,13 +114,13 @@ Dashboard 文本      Analysis 统计信号
 | 使用量趋势 | `service_day.total_usage_units` | 比较两个 7 天窗口的总量和日均值，作为容量压力的需求侧背景。 |
 | 容量利用 | `total_usage_units / capacity_units` | 计算平均值、峰值、超载天数，以及 `max(利用率 - 1, 0)` 的峰值。保留连续值，不在信号层提前分类。 |
 | 服务可靠性 | `p95_ms`、`error_rate`、`downtime_minutes` | 分别保留两个窗口的平均值、峰值、宕机总分钟和宕机天数，避免只看一次极值。 |
-| 产品配置 | `config_history` | 比较当前日与一周前有效的模型档位、配额、容量档位、运营投入和开发投入，并列出期间变化。价格不归入产品状态。 |
+| 产品配置 | 当前与上周 `public_week_snapshot.configuration` | 模型档位和配额按 A/B/C 套餐分别比较，容量档位、运营投入和开发投入逐项比较。价格不归入产品状态。 |
 | 研发管线 | `research_projects` | 区分进行中与已完成项目。进行中项目的预计完成日和预计提升只表示未来管线；只有已完成项目的 `quality_boost_applied` 能证明能力已经释放。 |
 | 当前交付质量 | `public_week_snapshot.delivered_quality` | 这是 Baseline 已通过 Dashboard 公开给 Agent 的当前能力信息，可以作为证据；Analysis 不查询隐藏质量状态。 |
 
-`config_history` 实际保存配置变更后的快照，不能当作连续的逐日观测求平均。延迟、错误率和宕机包含随机波动，产品角色可以提出原因假设，但不得仅凭时间先后认定某次配置修改造成了指标变化。
+延迟、错误率和宕机包含随机波动，产品角色可以提出原因假设，但不得仅凭时间先后认定某次配置修改造成了指标变化。
 
-同一天多次配置操作会覆盖为该日最终快照，因此产品配置不能仅查询自然日 `1..7`。实现以上周 `signals.json` 中的公开配置为基线，并比较包含周初边界日的 `config_history`；这样 day 0 或 day 7 在 Analysis 之后发生的修改，会进入下一周信号。无法还原同一天内被覆盖的中间步骤，只记录最终有效配置变化。
+产品配置属于周边界状态，不是需要求和或平均的区间流量。实现直接比较当前公开快照与上周 `signals.json` 保存的公开快照，因此 day 0 或 day 7 在 Analysis 之后发生的修改会进入下一周信号。该口径关注每周决策时实际生效的配置，不试图还原周内每次中间操作。
 
 ### 3.4 客户信号设计
 
@@ -153,8 +153,8 @@ Dashboard 文本      Analysis 统计信号
 
 ```json
 {
-  "schema_version": "1.0",
-  "signal_catalog_version": "1.0",
+  "schema_version": "2.0",
+  "signal_catalog_version": "2.0",
   "day": 7,
   "week": 1,
   "windows": {},
@@ -166,7 +166,9 @@ Dashboard 文本      Analysis 统计信号
 }
 ```
 
-每个可比较数值分别保存 `current`、`previous`、绝对变化、相对变化、方向和比较状态。`current` 与 `previous` 各自携带 `available / insufficient_data / not_applicable` 状态，避免把“数据不足”和“零值”混淆。最近 7 天为 day 1 至 day 7 这类完整模拟日窗口，前 7 天为其前一个完整窗口；现金和配置等周边界状态按上文的相邻公开快照规则处理。
+每个可比较数值分别保存 `current`、`previous`、绝对变化、相对变化、方向和比较状态。只有比较成立时才保存 `direction = up / down / flat`；数据不足或不适用时省略方向。`current` 与 `previous` 各自携带 `available / insufficient_data / not_applicable` 状态，避免把“数据不足”和“零值”混淆。最近 7 天为 day 1 至 day 7 这类完整模拟日窗口，前 7 天为其前一个完整窗口；现金和配置等周边界状态按上文的相邻公开快照规则处理。
+
+配置指标采用与其他比较指标一致的结构，不保留整体 `changes`：`model_tier.A/B/C` 和 `usage_quota.A/B/C` 分别记录各套餐变化，`capacity_tier`、`daily_operations_spend`、`daily_development_spend` 各自记录变化。A/B/C 是套餐维度，不是有序方向。
 
 Runner 在 `modules.analysis.enabled = true` 时生成 `analysis/day_XXX/signals.json`，同一日期已有合法产物则直接复用。断点恢复会保留断点日及以前的确定性信号，并删除更晚的孤立目录。确定性信号层、四角色报告层、经营画像、简报格式化和决策上下文注入均已实现。
 
@@ -174,7 +176,7 @@ Runner 在 `modules.analysis.enabled = true` 时生成 `analysis/day_XXX/signals
 
 四个角色都只分析与自身职能相关的信号，不提供经营行动建议。结构化输出包含：
 
-- `evidence`：可由公开统计信号支持的经营事实，包含唯一证据 ID、原始指标、变化方向、证据强度和反馈滞后说明。
+- `evidence`：可由公开统计信号支持的经营事实，包含唯一证据 ID、原始指标、可选变化方向、证据强度和反馈滞后说明。
 - `hypotheses`：对事实成因的暂时解释，必须引用证据 ID，并给出置信度和可执行的后续验证方式。
 - `risks`：尚未充分暴露但已有早期信号的风险，包含早期指标、预计时间范围和严重程度。
 
@@ -182,7 +184,7 @@ Prompt 必须包含字段语义、枚举范围、数量上限和最小合法输�
 
 角色 Prompt 位于 `analysis/role_prompts.py`，执行和校验位于 `analysis/role_reports.py`。四个角色按市场、财务、产品、客户的固定顺序调用，并且每个角色只接收自身信号、周次和统计窗口，不接收其他角色报告或历史策略。
 
-程序除校验 JSON Schema 外，还校验证据的业务语义：每个角色至少需要输出一条可核验证据，禁止用三个空数组静默降级；`metric` 必须引用当前角色信号中真实存在的精确字段路径；引用带有程序计算方向的环比指标时，`direction` 必须与确定性信号一致；引用当前现金、当前配置等单点信号时，`direction` 必须为 `insufficient_data`，禁止 LLM 自行补出上升、下降或持平趋势。非法输出触发修复调用时，每次请求都会重新携带完整原始信号、上一份非法回答和程序校验错误，不依赖供应商是否保留聊天历史。
+程序除校验 JSON Schema 外，还校验证据的业务语义：每个角色至少需要输出一条可核验证据，禁止用三个空数组静默降级；`metric` 必须引用当前角色信号中真实存在的精确字段路径，并支持 `current_posts[0].content` 这类数组元素路径；引用带有程序计算方向的比较指标时，`direction` 必须与确定性信号一致；引用当前现金、文本、列表元素等非比较指标，或引用数据不足的比较时，必须省略 `direction`，禁止 LLM 自行补出趋势。非法输出触发修复调用时，每次请求都会重新携带完整原始信号、上一份非法回答和程序校验错误，不依赖供应商是否保留聊天历史。
 
 每周成功产出的 `role_reports.json` 同时保存四份报告以及每次初始、修复调用的请求模型、服务模型、计价模型、Token、推理 Token、成本和耗时。同一周已有合法产物时直接复用，不重复请求模型。
 

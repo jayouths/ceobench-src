@@ -34,14 +34,16 @@ class Direction(StrEnum):
     UP = "up"
     DOWN = "down"
     FLAT = "flat"
-    INSUFFICIENT_DATA = "insufficient_data"
 
 
 class Evidence(AnalysisModel):
     id: str = Field(pattern=r"^[A-Z]{3}-[1-5]$")
     observation: str = Field(min_length=1, max_length=500)
     metric: str = Field(min_length=1, max_length=120)
-    direction: Direction
+    direction: Direction | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     strength: Confidence
     lag_note: str = Field(min_length=1, max_length=300)
 
@@ -169,7 +171,7 @@ class StateCallUsage(AnalysisModel):
 class RoleReportsArtifact(AnalysisModel):
     """一个模拟周的四角色报告及其全部调用成本。"""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     day: NonNegativeDay
     reports: list[RoleReport] = Field(min_length=4, max_length=4)
     calls: list[RoleCallUsage] = Field(min_length=4)

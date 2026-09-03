@@ -86,9 +86,9 @@ def build_role_prompts(signals: AnalysisSignals, role: Role) -> tuple[str, str]:
 
 必须遵守：
 1. 只能使用用户提供的 JSON 信号，不得补充外部事实或隐藏状态。
-2. evidence 是可由输入直接核验的事实，至少 1 条、最多 5 条；id 必须使用 {prefix}-1 至 {prefix}-5。数据不足时也要引用真实信号并将 direction 写为 insufficient_data。
+2. evidence 是可由输入直接核验的事实，至少 1 条、最多 5 条；id 必须使用 {prefix}-1 至 {prefix}-5。数据不足时也要引用真实信号，但不得杜撰变化方向。
 3. metric 必须从输入 JSON 的 {role.value} 顶层键开始，逐层复制完整字段路径；不得添加 signals 前缀或省略中间层级。day、week、windows 只用于判断数据完整性，不是业务指标，不得作为 metric 或单独写成 evidence。
-4. 同一条 evidence 的 observation、metric、direction 和 lag_note 必须描述同一个信号；direction 只能是 up、down、flat、insufficient_data，没有完整可比窗口时使用 insufficient_data。
+4. 同一条 evidence 的 observation、metric、direction 和 lag_note 必须描述同一个信号。只有 metric 直接引用的对象含有 direction 时才输出 direction，并原样复制 up、down 或 flat；时点值、文本、列表元素及数据不足的比较必须省略 direction 字段。
 5. strength 表示证据对 observation 的支持强度，不表示业务重要程度。
 6. hypotheses 最多 3 条，必须引用已输出的 evidence id，并写出可由后续公开信号执行的验证方式。
 7. risks 最多 3 条，只写已有早期指标支持但尚未充分暴露的风险。
@@ -123,7 +123,7 @@ def build_repair_prompt(
     repair_prompt = f"""{original_user_prompt}
 
 上一份回答无法通过程序校验。请只修复不符合约束的内容，不要杜撰新证据。
-如果需要更换 metric，必须从本角色输入中选择真实路径，并同步改写该条 evidence 的 observation、direction 和 lag_note，使四个字段仍描述同一个信号；不得只替换路径。
+如果需要更换 metric，必须从本角色输入中选择真实路径，并同步改写该条 evidence 的 observation、可选 direction 和 lag_note，使这些字段仍描述同一个信号；不得只替换路径。
 
 上一份回答：
 {invalid_response}

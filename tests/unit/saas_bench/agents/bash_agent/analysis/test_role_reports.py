@@ -21,8 +21,11 @@ from saas_bench.agents.bash_agent.analysis.role_reports import (
 )
 from saas_bench.agents.bash_agent.analysis.signals import SignalCollector
 from saas_bench.agents.bash_agent.analysis.signal_models import (
-    ConfigurationChange,
+    ChangeDirection,
     DataStatus,
+    MetricComparison,
+    NumericObservation,
+    SocialPost,
 )
 from saas_bench.simulator.public_week_snapshot import build_public_week_snapshot
 from saas_bench.experiment.llm_provider import TextLLMResult
@@ -37,13 +40,10 @@ _PREFIX = {
 }
 
 _METRIC = {
-    Role.MARKET: ("market.effective_leads.individual", "insufficient_data"),
-    Role.FINANCE: ("finance.current_cash", "insufficient_data"),
-    Role.PRODUCT: ("product.configuration.current.tier_a", "insufficient_data"),
-    Role.CUSTOMER: (
-        "customer.customer_base.active_individual_accounts",
-        "insufficient_data",
-    ),
+    Role.MARKET: "market.effective_leads.individual",
+    Role.FINANCE: "finance.current_cash",
+    Role.PRODUCT: "product.configuration.model_tier.A",
+    Role.CUSTOMER: "customer.customer_base.active_individual_accounts",
 }
 
 
@@ -56,13 +56,11 @@ def _direct_query(conn):
 
 def _valid_response(role: Role) -> str:
     evidence_id = f"{_PREFIX[role]}-1"
-    metric, direction = _METRIC[role]
     return json.dumps({
         "evidence": [{
             "id": evidence_id,
             "observation": "当前公开信号支持一项经营事实",
-            "metric": metric,
-            "direction": direction,
+            "metric": _METRIC[role],
             "strength": 0.8,
             "lag_note": "无明显滞后",
         }],
@@ -113,6 +111,7 @@ def test_role_prompts_only_include_the_selected_role(day_zero_signals):
     assert "metric 必须从输入 JSON 的 market 顶层键开始" in system_prompt
     assert "windows 只用于判断数据完整性" in system_prompt
     assert "必须描述同一个信号" in system_prompt
+    assert "时点值、文本、列表元素及数据不足的比较必须省略 direction" in system_prompt
 
 
 def test_generator_repairs_invalid_json_with_self_contained_context(day_zero_signals):
@@ -266,30 +265,26 @@ def test_generator_rejects_invented_direction_for_point_in_time_metric(
     ).generate(day_zero_signals)
 
     assert len(artifact.calls) == 5
-    assert "expected 'insufficient_data', got 'up'" in observed[2]
+    assert "expected None, got 'up'" in observed[2]
 
 
-def test_generator_accepts_direction_when_all_configuration_changes_match(
+def test_generator_accepts_direction_for_individual_configuration_metric(
     day_zero_signals,
 ):
+    comparison = MetricComparison(
+        current=NumericObservation(value=2, status=DataStatus.AVAILABLE),
+        previous=NumericObservation(value=1, status=DataStatus.AVAILABLE),
+        absolute_change=1,
+        relative_change=1.0,
+        direction=ChangeDirection.UP,
+        comparison_status=DataStatus.AVAILABLE,
+    )
+    model_tier = day_zero_signals.product.configuration.model_tier.model_copy(
+        update={"A": comparison}
+    )
     configuration = day_zero_signals.product.configuration.model_copy(
         update={
-            "previous_week": day_zero_signals.product.configuration.current,
-            "changes": [
-                ConfigurationChange(
-                    day=0,
-                    field="tier_a",
-                    previous=1,
-                    current=2,
-                ),
-                ConfigurationChange(
-                    day=0,
-                    field="daily_development_spend",
-                    previous=0,
-                    current=3000,
-                ),
-            ],
-            "comparison_status": DataStatus.AVAILABLE,
+            "model_tier": model_tier,
         }
     )
     signals = day_zero_signals.model_copy(
@@ -305,7 +300,7 @@ def test_generator_accepts_direction_when_all_configuration_changes_match(
         if role is Role.PRODUCT:
             payload = json.loads(text)
             payload["evidence"][0].update({
-                "metric": "product.configuration.changes",
+                "metric": "product.configuration.model_tier.A",
                 "direction": "up",
             })
             text = json.dumps(payload, ensure_ascii=False)
@@ -320,15 +315,57 @@ def test_generator_accepts_direction_when_all_configuration_changes_match(
     assert product.evidence[0].direction is Direction.UP
 
 
-def test_mixed_configuration_changes_have_no_single_direction():
-    target = [
-        {"field": "tier_a", "previous": 1, "current": 2},
-        {"field": "daily_development_spend", "previous": 3000, "current": 1000},
-    ]
-
-    assert RoleReportGenerator._configuration_changes_direction(target) == (
-        Direction.INSUFFICIENT_DATA.value
+def test_generator_accepts_array_metric_path_without_direction(day_zero_signals):
+    post = SocialPost(post_id=1, day=0, content="公开客户反馈")
+    social_feedback = day_zero_signals.market.social_feedback.model_copy(
+        update={"current_posts": [post]}
     )
+    market = day_zero_signals.market.model_copy(
+        update={"social_feedback": social_feedback}
+    )
+    signals = day_zero_signals.model_copy(update={"market": market})
+
+    def call_model(day, role, attempt, call_kind, system_prompt, user_prompt):
+        text = _valid_response(role)
+        if role is Role.MARKET:
+            payload = json.loads(text)
+            payload["evidence"][0]["metric"] = (
+                "market.social_feedback.current_posts[0].content"
+            )
+            text = json.dumps(payload, ensure_ascii=False)
+        return RoleCallOutcome(text=text, usage=_usage(role, attempt, call_kind))
+
+    artifact = RoleReportGenerator(
+        call_model,
+        max_schema_retries=0,
+    ).generate(signals)
+
+    market_report = next(
+        report for report in artifact.reports if report.role is Role.MARKET
+    )
+    assert market_report.evidence[0].direction is None
+    assert "direction" not in market_report.evidence[0].model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "social_feedback.current_posts[1].content",
+        "social_feedback.current_posts[-1].content",
+        "social_feedback.current_posts[abc].content",
+    ],
+)
+def test_metric_path_rejects_invalid_array_index(path):
+    payload = {
+        "social_feedback": {
+            "current_posts": [{"content": "公开客户反馈"}],
+        }
+    }
+
+    found, target = RoleReportGenerator._resolve_metric_path(payload, path)
+
+    assert found is False
+    assert target is None
 
 
 def test_pipeline_writes_reuses_and_summarizes_role_reports(

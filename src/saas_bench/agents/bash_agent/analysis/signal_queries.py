@@ -98,16 +98,6 @@ def service_days(start: int, end: int) -> str:
     """
 
 
-def configuration_history(day: int) -> str:
-    return f"""
-        SELECT day, tier_A, tier_B, tier_C, quota_A, quota_B, quota_C,
-               capacity_tier, spend_operations, spend_development
-        FROM config_history
-        WHERE day <= {day}
-        ORDER BY day
-    """
-
-
 def paid_subscriptions(start: int, end: int) -> str:
     return f"""
         SELECT s.start_day AS day, c.customer_type,

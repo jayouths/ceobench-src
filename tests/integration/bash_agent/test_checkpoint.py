@@ -94,7 +94,6 @@ def test_checkpoint_persists_role_report_usage_from_artifacts(tmp_path):
                 id=f"{prefixes[role]}-1",
                 observation="test evidence",
                 metric=f"{role.value}.test_metric",
-                direction="insufficient_data",
                 strength=1.0,
                 lag_note="test fixture",
             )],

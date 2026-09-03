@@ -25,7 +25,6 @@ class ChangeDirection(StrEnum):
     UP = "up"
     DOWN = "down"
     FLAT = "flat"
-    INSUFFICIENT_DATA = "insufficient_data"
 
 
 Number = Annotated[int | float, Field(union_mode="left_to_right")]
@@ -52,7 +51,10 @@ class MetricComparison(SignalModel):
     previous: NumericObservation
     absolute_change: Number | None
     relative_change: float | None
-    direction: ChangeDirection
+    direction: ChangeDirection | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     comparison_status: DataStatus
 
     @model_validator(mode="after")
@@ -62,11 +64,15 @@ class MetricComparison(SignalModel):
                 self.current.status is not DataStatus.AVAILABLE
                 or self.previous.status is not DataStatus.AVAILABLE
                 or self.absolute_change is None
-                or self.direction is ChangeDirection.INSUFFICIENT_DATA
+                or self.direction is None
             ):
                 raise ValueError("available comparisons require two available values")
-        elif self.absolute_change is not None or self.relative_change is not None:
-            raise ValueError("unavailable comparisons cannot contain changes")
+        elif (
+            self.absolute_change is not None
+            or self.relative_change is not None
+            or self.direction is not None
+        ):
+            raise ValueError("unavailable comparisons cannot contain changes or direction")
         return self
 
 
@@ -214,30 +220,20 @@ class ReliabilitySignals(SignalModel):
     outage_days: MetricComparison
 
 
-class ProductConfiguration(SignalModel):
-    tier_a: int
-    tier_b: int
-    tier_c: int
-    quota_a: int
-    quota_b: int
-    quota_c: int
-    capacity_tier: int
-    daily_operations_spend: float
-    daily_development_spend: float
+class PlanConfigurationSignals(SignalModel):
+    """A、B、C 三档套餐的同类配置逐项比较。"""
 
-
-class ConfigurationChange(SignalModel):
-    day: int
-    field: str
-    previous: Number
-    current: Number
+    A: MetricComparison
+    B: MetricComparison
+    C: MetricComparison
 
 
 class ProductConfigurationSignals(SignalModel):
-    current: ProductConfiguration
-    previous_week: ProductConfiguration | None
-    changes: list[ConfigurationChange]
-    comparison_status: DataStatus
+    model_tier: PlanConfigurationSignals
+    usage_quota: PlanConfigurationSignals
+    capacity_tier: MetricComparison
+    daily_operations_spend: MetricComparison
+    daily_development_spend: MetricComparison
 
 
 class ResearchProjectSignal(SignalModel):
@@ -339,8 +335,8 @@ class CustomerSignals(SignalModel):
 
 
 class AnalysisSignals(SignalModel):
-    schema_version: Literal["1.0"] = "1.0"
-    signal_catalog_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
+    signal_catalog_version: Literal["2.0"] = "2.0"
     day: int = Field(ge=0)
     week: int = Field(ge=0)
     windows: AnalysisWindows

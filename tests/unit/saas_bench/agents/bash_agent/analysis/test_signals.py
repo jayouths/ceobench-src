@@ -114,7 +114,7 @@ def test_four_week_signal_pipeline_computes_all_roles(
     assert day_14.product.usage.total_units.comparison_status is DataStatus.AVAILABLE
     assert day_14.product.capacity.peak_utilization.current.value >= 0
     assert day_14.product.capacity.peak_overload_excess.current.value >= 0
-    assert day_14.product.configuration.current.tier_c == 4
+    assert day_14.product.configuration.model_tier.C.current.value == 4
 
     assert day_14.customer.customer_base.active_individual_accounts.value == (
         snapshots[14].current_state.individual_subscribers
@@ -153,14 +153,12 @@ def test_week_boundary_actions_are_included_in_finance_and_product_signals(
         day_7.public_week_snapshot.current_state.cash
         - day_0.public_week_snapshot.current_state.cash
     )
-    assert day_7.product.configuration.previous_week == day_0.product.configuration.current
-    assert any(
-        change.day == 0
-        and change.field == "tier_a"
-        and change.previous == day_0.product.configuration.current.tier_a
-        and change.current == 2
-        for change in day_7.product.configuration.changes
+    tier_a = day_7.product.configuration.model_tier.A
+    assert tier_a.previous.value == (
+        day_0.public_week_snapshot.configuration.tier_a
     )
+    assert tier_a.current.value == 2
+    assert tier_a.direction.value == "up"
 
 
 def test_consecutive_boundaries_do_not_duplicate_costs_and_keep_final_config(
@@ -206,16 +204,29 @@ def test_consecutive_boundaries_do_not_duplicate_costs_and_keep_final_config(
     assert day_14.finance.costs.one_time_investment.previous.value == pytest.approx(
         first_research.data["cost"]
     )
-    assert day_14.product.configuration.previous_week == day_7.product.configuration.current
-    assert day_14.product.configuration.current.tier_a == 4
-    assert day_14.product.configuration.current.capacity_tier == 1
-    assert [
-        (change.field, change.previous, change.current)
-        for change in day_14.product.configuration.changes
-    ] == [
-        ("tier_a", 2, 4),
-        ("capacity_tier", 0, 1),
-    ]
+    tier_a = day_14.product.configuration.model_tier.A
+    assert tier_a.previous.value == 2
+    assert tier_a.current.value == 4
+    assert tier_a.direction.value == "up"
+    capacity = day_14.product.configuration.capacity_tier
+    assert capacity.previous.value == 0
+    assert capacity.current.value == 1
+    assert capacity.direction.value == "up"
+
+
+def test_day_zero_configuration_has_current_values_without_direction(
+    make_initialized_sim,
+):
+    conn, _, _ = make_initialized_sim(seed=42)
+    signals = SignalCollector(_direct_query(conn)).collect(
+        build_public_week_snapshot(conn, 0)
+    )
+
+    tier_a = signals.product.configuration.model_tier.A
+    assert tier_a.current.status is DataStatus.AVAILABLE
+    assert tier_a.previous.status is DataStatus.INSUFFICIENT_DATA
+    assert tier_a.direction is None
+    assert "direction" not in tier_a.model_dump(mode="json")
 
 
 def test_signal_catalog_covers_each_role():

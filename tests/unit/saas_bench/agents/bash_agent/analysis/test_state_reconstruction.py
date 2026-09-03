@@ -275,6 +275,26 @@ def test_strategy_brief_is_deterministic_and_includes_evidence_index():
     assert "不包含行动指令" in first
 
 
+def test_strategy_brief_omits_missing_evidence_direction():
+    reports = _role_reports()
+    reports.reports[0].evidence[0].direction = None
+
+    def call_model(day, attempt, call_kind, system_prompt, user_prompt):
+        return StateCallOutcome(
+            text=_valid_assessment(),
+            usage=_usage(attempt, call_kind),
+        )
+
+    portrait = StateReconstructor(
+        call_model,
+        max_schema_retries=0,
+    ).generate(reports)
+
+    brief = render_strategy_brief(reports, portrait)
+
+    assert "**MAR-1** [market.metric; 强度 0.80]" in brief
+
+
 def test_strategy_brief_rejects_mismatched_days():
     reports = _role_reports()
 
