@@ -383,8 +383,15 @@ def test_pipeline_writes_reuses_and_summarizes_role_reports(
         )
 
     pipeline.call_role_model = call_model
-    artifact, generated = pipeline.ensure_role_reports(day_zero_signals)
-    path = tmp_path / "analysis" / "day_000" / "role_reports.json"
+    assert pipeline.ensure_role_reports(day_zero_signals) == (None, False)
+    assert calls == []
+    assert not (tmp_path / "analysis" / "day_000" / "role_reports.json").exists()
+
+    day_seven_signals = day_zero_signals.model_copy(
+        update={"day": 7, "week": 1}
+    )
+    artifact, generated = pipeline.ensure_role_reports(day_seven_signals)
+    path = tmp_path / "analysis" / "day_007" / "role_reports.json"
 
     assert generated is True
     assert path.is_file()
@@ -394,12 +401,12 @@ def test_pipeline_writes_reuses_and_summarizes_role_reports(
     pipeline.call_role_model = lambda *args: (_ for _ in ()).throw(
         AssertionError("completed report must be reused")
     )
-    reused, generated = pipeline.ensure_role_reports(day_zero_signals)
-    usage = pipeline.usage_summary(0)
+    reused, generated = pipeline.ensure_role_reports(day_seven_signals)
+    usage = pipeline.usage_summary(7)
 
     assert generated is False
     assert reused == artifact
-    assert usage["role_report_days"] == [0]
+    assert usage["role_report_days"] == [7]
     assert usage["state_portrait_days"] == []
     assert usage["call_count"] == 4
     assert usage["input_tokens"] == 400

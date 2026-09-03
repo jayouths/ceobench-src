@@ -28,6 +28,8 @@ from .state_reconstruction import StateCallOutcome, StateReconstructor
 class AnalysisPipeline:
     """将 Analysis 的五次周度调用与通用实验 Runner 解耦。"""
 
+    FIRST_REPORT_DAY = 7
+
     def __init__(
         self,
         *,
@@ -289,7 +291,9 @@ class AnalysisPipeline:
     def ensure_role_reports(
         self, signals: AnalysisSignals
     ) -> tuple[RoleReportsArtifact | None, bool]:
-        if not self.enabled:
+        # day 0 只保留确定性快照，供 day 7 计算配置变化；
+        # 没有经营历史时不花费模型调用生成低信息量报告。
+        if not self.enabled or signals.day < self.FIRST_REPORT_DAY:
             return None, False
         path = self.role_reports_path(signals.day)
         if path.is_file():

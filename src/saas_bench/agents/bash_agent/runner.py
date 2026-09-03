@@ -1205,7 +1205,11 @@ class BashAgentRunner:
             state_portrait_generated = False
             brief_generated = False
             analysis_brief = None
-            if signals is not None:
+            analysis_due = (
+                signals is not None
+                and sim_day >= self.analysis_pipeline.FIRST_REPORT_DAY
+            )
+            if analysis_due:
                 role_reports, role_reports_generated = (
                     self.analysis_pipeline.ensure_role_reports(signals)
                 )
@@ -1223,7 +1227,7 @@ class BashAgentRunner:
                     role_reports,
                     state_portrait,
                 )
-            if self.analysis_enabled:
+            if analysis_due:
                 if not self._experiment_logs().has_performance_event(
                     "analysis_week", sim_day
                 ):
@@ -1244,8 +1248,13 @@ class BashAgentRunner:
                 stable_checkpoint = self._save_checkpoint(sim_day)
 
             # Agent Loop：只要本周的决策尚未结束，就持续执行
-            observation = self.analysis_pipeline.decision_observation(
-                dashboard, analysis_brief
+            # 首周没有历史经营数据，day 0 与 Baseline 一样只读 Dashboard。
+            observation = (
+                self.analysis_pipeline.decision_observation(
+                    dashboard, analysis_brief
+                )
+                if analysis_due
+                else dashboard
             )
             brief_path = self.analysis_pipeline.brief_path(sim_day)
             self._pending_decision_context = {
