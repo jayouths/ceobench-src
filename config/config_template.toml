@@ -22,7 +22,6 @@ role_report_concurrency = 4             # 必填：四角色报告并发数，�
 
 # 决策 Agent：读取 Dashboard/战略简报并调用经营工具。
 [models.decision_agent]
-provider = "openai"                     # 必填：当前主实验只支持 OpenAI SDK
 api_type = "openai_chat_completions"    # 必填：openai_chat_completions | openai_responses
 tool_choice = "auto"                    # 必填：auto | required；需与目标端点能力一致
 model = "REPLACE_DECISION_MODEL"        # 必填：发送给 Provider 的模型名
@@ -50,7 +49,6 @@ output_cost_per_million = 0.0           # 必填：输出单价；推理 Token �
 
 # 社交环境 LLM：生成客户、宏观和竞争对手帖子，并评估 Agent 帖子。
 [models.social_llm]
-provider = "openai"                     # 必填：当前仅支持 OpenAI SDK
 api_type = "openai_chat_completions"    # 必填：openai_chat_completions | openai_responses
 model = "REPLACE_SOCIAL_MODEL"          # 必填：发送给 Provider 的模型名
 base_url = "https://provider.example/v1" # 可选：模型端点
@@ -93,7 +91,6 @@ max_output_tokens = 150                # 可选：覆盖客户回复任务的输
 # Analysis LLM：四角色报告和经营状态重构。
 # modules.analysis.enabled = false 时可删除整个 models.analysis 配置块。
 [models.analysis]
-provider = "openai"                     # 开启 Analysis 时必填
 api_type = "openai_chat_completions"    # 开启 Analysis 时必填
 model = "REPLACE_ANALYSIS_MODEL"        # 开启 Analysis 时必填
 base_url = "https://provider.example/v1" # 可选：模型端点

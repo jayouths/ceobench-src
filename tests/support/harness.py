@@ -91,6 +91,7 @@ class RecordingResponses:
         self.calls.append(kwargs)
         return SimpleNamespace(
             output_text="response",
+            model="social-test",
             usage=SimpleNamespace(input_tokens=11, output_tokens=7),
         )
 
@@ -139,7 +140,6 @@ def make_checkpoint_runner(tmp_path):
         env_vars={},
     )
     runner.model = "model"
-    runner.provider = "openai"
     runner.api_type = "openai_responses"
     runner.base_url = None
     runner.reasoning_effort = None

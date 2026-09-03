@@ -605,7 +605,7 @@ class BashAgent(BaseAgent):
 
                 assistant_msg = response.choices[0].message
 
-                # Log reasoning_content if present (e.g. GLM-5 reasoning model)
+                # DeepSeek 等兼容端点会在扩展字段中返回思考内容。
                 reasoning_content = getattr(assistant_msg, 'reasoning_content', None)
                 if not reasoning_content:
                     extras = getattr(assistant_msg, 'model_extra', {}) or {}

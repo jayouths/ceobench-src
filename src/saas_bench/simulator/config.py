@@ -663,15 +663,7 @@ class BenchmarkConfig:
     # API cost tracking
     budget_limit_usd: float = 50.0
 
-    # === LLM MODEL CONFIGURATION ===
-    # The main experiment runner requires explicit TOML settings; these defaults
-    # remain for legacy entrypoints that do not participate in our experiments.
-    agent_llm_provider: str = "openai"
-    agent_llm_model: str = "gpt-5.2"
-    agent_llm_reasoning_effort: str = "low"
-
     # Simulator LLM identity is injected from the experiment TOML before startup.
-    social_post_llm_provider: str = ""
     social_post_llm_api_type: str = ""
     social_post_llm_model: str = ""
     social_post_llm_base_url: Optional[str] = None
@@ -686,25 +678,6 @@ class BenchmarkConfig:
     social_post_llm_pricing_model_map: Dict[str, str] = field(default_factory=dict)
     social_post_llm_request_options: Dict[str, Any] = field(default_factory=dict)
     social_post_llm_task_parameters: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-
-    # Temperature settings
-    agent_llm_temperature: float = 0.7  # For agent responses
-
-    # Legacy aliases (kept for compatibility)
-    @property
-    def agent_model(self) -> Optional[str]:
-        return self.agent_llm_model
-
-    @property
-    def agent_reasoning_effort(self) -> Optional[str]:
-        return self.agent_llm_reasoning_effort
-
-    # GPT-5.2 pricing (actual from OpenAI)
-    # $1.75/1M input = $0.00175/1K, $14/1M output = $0.014/1K
-    gpt52_medium_input_cost_per_1k: float = 0.00175  # $/1k input tokens
-    gpt52_medium_output_cost_per_1k: float = 0.014   # $/1k output tokens
-    gpt52_medium_thinking_input_cost_per_1k: float = 0.00175
-    gpt52_medium_thinking_output_cost_per_1k: float = 0.014
 
     # Enterprise negotiation parameters (reply delay now per-group in CustomerGroupConfig)
     enterprise_negotiation_rate_mean: float = 0.3  # LEGACY: exp decay rate (kept for compat)

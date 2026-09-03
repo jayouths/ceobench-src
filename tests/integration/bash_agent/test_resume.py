@@ -35,7 +35,6 @@ def test_resume_loads_the_saved_configuration_without_external_overrides(
         "experiment_name": "baseline",
         "agent_type": "bash_agent",
         "model": "original-model",
-        "provider": "openai",
         "api_type": "openai_responses",
         "base_url": "http://localhost:11434/v1",
         "reasoning_effort": None,

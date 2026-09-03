@@ -26,7 +26,6 @@ from tests.support.harness import (
 def test_simulator_settings_survive_environment_and_session_round_trip(monkeypatch):
     monkeypatch.setenv("LOCAL_LLM_KEY", "test-key")
     overrides = {
-        "social_post_llm_provider": "openai",
         "social_post_llm_api_type": "openai_responses",
         "social_post_llm_model": "social-test",
         "social_post_llm_base_url": "http://social.test/v1",
@@ -60,7 +59,6 @@ def test_simulator_settings_survive_environment_and_session_round_trip(monkeypat
 def test_social_openai_calls_receive_configured_api_parameters():
     social = RecordingOpenAI()
     config = BenchmarkConfig(
-        social_post_llm_provider="openai",
         social_post_llm_api_type="openai_responses",
         social_post_llm_model="social-test",
         social_post_llm_reasoning_effort="none",
@@ -98,7 +96,6 @@ def test_simulator_text_model_rejects_empty_success_response():
     simulator = CustomerSimulator(
         conn=sqlite3.connect(":memory:"),
         config=BenchmarkConfig(
-            social_post_llm_provider="openai",
             social_post_llm_api_type="openai_responses",
             social_post_llm_model="social-test",
             social_post_llm_max_tokens=100,
@@ -112,7 +109,6 @@ def test_simulator_text_model_rejects_empty_success_response():
 def test_task_request_options_merge_without_dropping_model_options():
     social = RecordingOpenAI()
     config = BenchmarkConfig(
-        social_post_llm_provider="openai",
         social_post_llm_api_type="openai_responses",
         social_post_llm_model="social-test",
         social_post_llm_max_tokens=100,
@@ -151,7 +147,6 @@ def test_customer_social_post_preserves_served_model_and_logs_cost(
 ):
     social = RecordingOpenAI()
     config = BenchmarkConfig(
-        social_post_llm_provider="openai",
         social_post_llm_api_type="openai_responses",
         social_post_llm_model="social-test",
         social_post_llm_max_tokens=100,

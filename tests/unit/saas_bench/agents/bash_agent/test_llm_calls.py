@@ -32,7 +32,6 @@ def test_reasoning_token_total_becomes_unknown_after_unreported_call():
 def test_decision_response_cost_uses_the_served_model(tmp_path):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.model = "requested"
-    runner.provider = "openai"
     runner.api_type = "openai_responses"
     runner.pricing = {
         "official": {
@@ -80,7 +79,6 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
 def _make_response_logging_runner(tmp_path, initial_observation, analysis_enabled):
     runner = BashAgentRunner.__new__(BashAgentRunner)
     runner.model = "requested"
-    runner.provider = "openai"
     runner.api_type = "openai_responses"
     runner.pricing = {
         "official": {
@@ -230,7 +228,6 @@ def test_decision_response_status_matches_harness_tool_validation(
 def test_decision_agent_request_builder_uses_config_without_hidden_defaults():
     agent = BashAgent.__new__(BashAgent)
     agent.model = "decision-test"
-    agent.provider = "openai"
     agent.api_type = "openai_responses"
     agent.max_output_tokens = 345
     agent.temperature = 0.51

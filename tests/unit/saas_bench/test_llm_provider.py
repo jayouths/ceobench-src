@@ -28,11 +28,10 @@ def test_tool_choice_is_forwarded_to_openai_protocols(api_type, policy, expected
     assert api_tool_choice(api_type, policy) == expected
 
 
-def test_non_openai_provider_is_rejected():
-    with pytest.raises(ValueError, match="provider must be 'openai'"):
+def test_unknown_api_type_is_rejected_before_client_creation():
+    with pytest.raises(ValueError, match="api_type must be one of"):
         create_llm_client(
-            provider="glm",
-            api_type=API_OPENAI_CHAT,
+            api_type="unknown",
             api_key="test",
             base_url=None,
             timeout_seconds=10,
@@ -128,6 +127,48 @@ def test_openai_chat_request_and_normalized_result():
     assert recorder.calls[0]["top_p"] == pytest.approx(0.8)
 
 
+def test_responses_rejects_missing_served_model():
+    client = SimpleNamespace(responses=Recorder(SimpleNamespace(
+        output_text="text",
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )))
+
+    with pytest.raises(ValueError, match="non-empty model identifier"):
+        call_text_model(
+            client=client,
+            api_type=API_OPENAI_RESPONSES,
+            model="requested",
+            system_prompt="system",
+            user_prompt="user",
+            max_output_tokens=10,
+            temperature=None,
+            top_p=None,
+            reasoning_effort=None,
+        )
+
+
+def test_chat_completions_rejects_empty_served_model():
+    response = SimpleNamespace(
+        model="  ",
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        choices=[SimpleNamespace(message=SimpleNamespace(content="text"))],
+    )
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Recorder(response)))
+
+    with pytest.raises(ValueError, match="non-empty model identifier"):
+        call_text_model(
+            client=client,
+            api_type=API_OPENAI_CHAT,
+            model="requested",
+            system_prompt="system",
+            user_prompt="user",
+            max_output_tokens=10,
+            temperature=None,
+            top_p=None,
+            reasoning_effort=None,
+        )
+
+
 def test_deepseek_chat_cache_hit_tokens_are_normalized():
     usage = SimpleNamespace(
         prompt_tokens=12,
@@ -197,7 +238,7 @@ def test_chat_cache_fields_must_not_disagree():
 
 def test_chat_parameters_and_private_options_are_forwarded():
     params = openai_chat_request_parameters(
-        model="GLM-5.3",
+        model="channel-model",
         max_output_tokens=4096,
         temperature=None,
         top_p=None,
@@ -258,12 +299,12 @@ def test_cost_maps_channel_model_to_canonical_pricing_model():
     }
 
     cost = model_token_cost(
-        "DeepSeek-V4-Pro-0813",
+        "deepseek-v4-pro-0813",
         1_000_000,
         1_000_000,
         250_000,
         pricing,
-        {"DeepSeek-V4-Pro-0813": "deepseek-v4-pro"},
+        {"deepseek-v4-pro-0813": "deepseek-v4-pro"},
     )
 
     assert cost.amount == pytest.approx(4.961)

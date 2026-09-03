@@ -12,7 +12,7 @@ from saas_bench.experiment.experiment_config import load_experiment_config
 
 
 RUN_CONFIG_FIELDS = {
-    "run_id", "experiment_name", "agent_type", "model", "provider", "api_type",
+    "run_id", "experiment_name", "agent_type", "model", "api_type",
     "base_url", "reasoning_effort", "temperature", "top_p", "tool_choice",
     "max_output_tokens", "timeout_seconds", "request_options", "pricing",
     "pricing_model_map", "api_key_env", "api_key_required", "seed", "scenario",
@@ -91,7 +91,6 @@ def create_new_runner(config_path: Path):
     return BashAgentRunner(
         model=decision.model,
         experiment_name=experiment.name,
-        provider=decision.provider,
         api_type=decision.api_type,
         base_url=decision.base_url,
         api_key_env=decision.api_key_env,
@@ -129,7 +128,6 @@ def create_resumed_runner(value: str):
     return BashAgentRunner(
         model=saved["model"],
         experiment_name=saved["experiment_name"],
-        provider=saved["provider"],
         api_type=saved["api_type"],
         base_url=saved["base_url"],
         api_key_env=saved["api_key_env"],

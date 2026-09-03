@@ -2,8 +2,8 @@
 
 This module generates social media posts and reactions from customers.
 
-The provider, API protocol, model, request parameters, and pricing are
-supplied by the experiment configuration.
+The API protocol, endpoint, model, request parameters, and pricing are supplied
+by the experiment configuration.
 """
 
 import sqlite3
@@ -155,7 +155,6 @@ class CustomerSimulator:
         if not getattr(self.config, f"{prefix}_api_key_required"):
             api_key = api_key or "not-required"
         created = create_llm_client(
-            provider=getattr(self.config, f"{prefix}_provider"),
             api_type=getattr(self.config, f"{prefix}_api_type"),
             api_key=api_key,
             base_url=getattr(self.config, f"{prefix}_base_url"),

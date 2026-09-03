@@ -9,6 +9,10 @@ from saas_bench.experiment.experiment_config import load_experiment_config
 from tests.support.harness import TEST_CONFIG
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+AUTODL_DEEPSEEK_CONFIG = PROJECT_ROOT / "config/analysis_autodl_deepseek_14d.toml"
+
+
 def test_experiment_config_loads_all_experiment_and_model_fields():
     config = load_experiment_config(TEST_CONFIG)
 
@@ -55,7 +59,6 @@ def test_analysis_model_is_required_only_when_module_is_enabled(tmp_path):
         + """
 
 [models.analysis]
-provider = "openai"
 api_type = "openai_chat_completions"
 model = "analysis-model"
 base_url = "http://localhost:11434/v1"
@@ -197,22 +200,12 @@ def test_experiment_name_must_be_a_safe_directory_name(tmp_path, name):
         load_experiment_config(path)
 
 
-@pytest.mark.parametrize("provider", ["openai_compatible", "glm", "anthropic", "bedrock"])
-def test_removed_provider_names_are_rejected(tmp_path, provider):
-    text = TEST_CONFIG.read_text()
-    path = tmp_path / f"removed-{provider}.toml"
-    path.write_text(text.replace('provider = "openai"', f'provider = "{provider}"', 1))
-
-    with pytest.raises(ValueError, match="provider must be one of: openai"):
-        load_experiment_config(path)
-
-
 def test_compatible_endpoint_loads_explicit_generation_parameters(tmp_path):
-    path = tmp_path / "glm.toml"
+    path = tmp_path / "compatible.toml"
     path.write_text(
         """
 [experiment]
-name = "glm"
+name = "compatible"
 max_decision_turns_per_batch = 100
 max_invalid_responses_per_turn = 3
 
@@ -223,10 +216,9 @@ max_enterprise_threads = 50
 role_report_concurrency = 1
 
 [models.decision_agent]
-provider = "openai"
 api_type = "openai_chat_completions"
 tool_choice = "required"
-model = "GLM-5.3"
+model = "channel-model"
 base_url = "https://www.autodl.art/api/v1"
 api_key_env = "AUTODL_API_KEY"
 reasoning_effort = "low"
@@ -238,14 +230,13 @@ stream = false
 thinking = { type = "enabled", clear_thinking = true }
 response_format = { type = "text" }
 
-[models.decision_agent.pricing."GLM-5.3"]
+[models.decision_agent.pricing.channel-model]
 currency = "CNY"
 uncached_input_cost_per_million = 8.0
 cached_input_cost_per_million = 2.0
 output_cost_per_million = 28.0
 
 [models.social_llm]
-provider = "openai"
 api_type = "openai_chat_completions"
 model = "social-test"
 base_url = "http://localhost:11434/v1"
@@ -262,14 +253,44 @@ output_cost_per_million = 0.0
 
     config = load_experiment_config(path)
 
-    assert config.decision_agent.provider == "openai"
-    assert config.decision_agent.model == "GLM-5.3"
+    assert config.decision_agent.model == "channel-model"
     assert config.decision_agent.reasoning_effort == "low"
     assert config.decision_agent.base_url == "https://www.autodl.art/api/v1"
     assert config.decision_agent.request_options["extra_body"]["thinking"] == {
         "type": "enabled",
         "clear_thinking": True,
     }
+
+
+def test_autodl_deepseek_config_uses_verified_model_names_and_official_prices():
+    config = load_experiment_config(AUTODL_DEEPSEEK_CONFIG)
+
+    decision = config.decision_agent
+    assert decision.model == "DeepSeek-V4-Pro"
+    assert decision.pricing_model_map == {
+        "DeepSeek-V4-Pro": "deepseek-v4-pro",
+        "deepseek-v4-pro-0813": "deepseek-v4-pro",
+    }
+    assert decision.pricing["deepseek-v4-pro"] == {
+        "currency": "USD",
+        "uncached_input_cost_per_million": pytest.approx(1.32),
+        "cached_input_cost_per_million": pytest.approx(0.044),
+        "output_cost_per_million": pytest.approx(3.96),
+    }
+
+    for model in (config.social_llm, config.analysis):
+        assert model is not None
+        assert model.model == "DeepSeek-V4-Flash"
+        assert model.pricing_model_map == {
+            "DeepSeek-V4-Flash": "deepseek-v4-flash",
+            "deepseek-v4-flash-0731": "deepseek-v4-flash",
+        }
+        assert model.pricing["deepseek-v4-flash"] == {
+            "currency": "USD",
+            "uncached_input_cost_per_million": pytest.approx(0.44),
+            "cached_input_cost_per_million": pytest.approx(0.014),
+            "output_cost_per_million": pytest.approx(1.32),
+        }
 
 @pytest.mark.parametrize(
     ("config_text", "message"),
@@ -280,7 +301,7 @@ output_cost_per_million = 0.0
         ),
         (
             "[experiment]\nname = 'baseline'\nmax_decision_turns_per_batch = 100\nmax_invalid_responses_per_turn = 3\n"
-            "[models.decision_agent]\nprovider = 'openai'\napi_type = 'openai_responses'\ntool_choice = 'required'\nmodel = 'decision'\nmax_output_tokens = 100\napi_key_required = false\n[models.decision_agent.pricing.decision]\ncurrency = 'USD'\nuncached_input_cost_per_million = 0\ncached_input_cost_per_million = 0\noutput_cost_per_million = 0\n",
+            "[models.decision_agent]\napi_type = 'openai_responses'\ntool_choice = 'required'\nmodel = 'decision'\nmax_output_tokens = 100\napi_key_required = false\n[models.decision_agent.pricing.decision]\ncurrency = 'USD'\nuncached_input_cost_per_million = 0\ncached_input_cost_per_million = 0\noutput_cost_per_million = 0\n",
             "models.social_llm must be explicitly configured",
         ),
     ],
@@ -345,10 +366,8 @@ def test_experiment_config_rejects_unknown_settings(tmp_path):
 seed = 42
 unknown = true
 [models.decision_agent]
-provider = "openai"
 model = "decision"
 [models.social_llm]
-provider = "openai"
 model = "social"
 """
     )

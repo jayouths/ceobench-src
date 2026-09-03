@@ -203,7 +203,6 @@ class AnalysisPipeline:
             response_text=response.text,
             raw_response=self._jsonable_response(response.raw_response),
             elapsed_seconds=elapsed,
-            provider=config["provider"],
             api_type=config["api_type"],
             requested_model=config["model"],
             served_model=response.model,

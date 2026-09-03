@@ -43,7 +43,6 @@ from saas_bench.runtime.docs_generator import initialize_workspace
 
 
 _SIMULATOR_LLM_CONFIG_FIELDS = (
-    "social_post_llm_provider",
     "social_post_llm_api_type",
     "social_post_llm_model",
     "social_post_llm_base_url",
@@ -136,14 +135,13 @@ def _resolve_session(base: Path, session_id: Optional[str]) -> str:
 
 
 def _apply_simulator_llm_config(config: BenchmarkConfig) -> dict:
-    """Validate and serialize simulator-side LLM provider/model config."""
-    from saas_bench.experiment.llm_provider import validate_provider_api_type
+    """Validate and serialize simulator-side LLM protocol/model config."""
+    from saas_bench.experiment.llm_provider import validate_api_type
 
     for prefix in ("social_post_llm",):
-        provider = getattr(config, f"{prefix}_provider")
         api_type = getattr(config, f"{prefix}_api_type")
         try:
-            validate_provider_api_type(provider, api_type, prefix)
+            validate_api_type(api_type, prefix)
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -181,8 +179,7 @@ def _apply_simulator_llm_config(config: BenchmarkConfig) -> dict:
         api_key_required = getattr(config, f"{prefix}_api_key_required")
         if api_key_required and (not api_key_env or not os.environ.get(api_key_env)):
             print(
-                f"Error: {prefix} provider {provider!r} requires environment "
-                f"variable {api_key_env!r}.",
+                f"Error: {prefix} requires environment variable {api_key_env!r}.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -217,14 +214,12 @@ def _restore_simulator_llm_config(config: BenchmarkConfig, meta: dict) -> None:
 def _create_simulator_llm_client(config: BenchmarkConfig, prefix: str):
     from saas_bench.experiment.llm_provider import create_llm_client
 
-    provider = getattr(config, f"{prefix}_provider")
     api_key_env = getattr(config, f"{prefix}_api_key_env")
     api_key_required = getattr(config, f"{prefix}_api_key_required")
     api_key = os.environ.get(api_key_env) if api_key_env else None
     if not api_key_required:
         api_key = api_key or "not-required"
     return create_llm_client(
-        provider=provider,
         api_type=getattr(config, f"{prefix}_api_type"),
         api_key=api_key,
         base_url=getattr(config, f"{prefix}_base_url"),

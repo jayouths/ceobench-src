@@ -20,7 +20,6 @@ max_enterprise_threads = 50
 role_report_concurrency = 1
 
 [models.decision_agent]
-provider = "openai"
 api_type = "openai_chat_completions"
 tool_choice = "required"
 model = "qwen3.8:27b-q4_K_M"
@@ -39,7 +38,6 @@ cached_input_cost_per_million = 0.0
 output_cost_per_million = 0.0
 
 [models.social_llm]
-provider = "openai"
 api_type = "openai_chat_completions"
 model = "qwen3.8:27b-q4_K_M"
 base_url = "http://127.0.0.1:11434/v1"
@@ -74,7 +72,6 @@ temperature = 0.9
 max_output_tokens = 150
 
 [models.analysis]
-provider = "openai"
 api_type = "openai_chat_completions"
 model = "qwen3.8:27b-q4_K_M"
 base_url = "http://127.0.0.1:11434/v1"

@@ -23,7 +23,7 @@
 
 1. 新实验必须通过 `--config config/<experiment>.toml` 显式传入完整配置。不要重新增加模型、Provider 或实验参数的 CLI 覆盖项。
 2. 决策 Agent、社交环境 LLM 和已启用创新模块的模型必须显式配置。代码不得为缺失的模型名称、端点或价格静默兜底。
-3. `provider`、`api_type`、模型名、最大输出 Token 和计价信息必须在 TOML 中明确。当前主实验只支持 OpenAI SDK，协议显式选择 `openai_chat_completions` 或 `openai_responses`，不得根据 URL 猜测。
+3. `api_type`、模型名、最大输出 Token 和计价信息必须在 TOML 中明确。当前主实验统一使用 OpenAI SDK 及其兼容端点，协议显式选择 `openai_chat_completions` 或 `openai_responses`，不得根据 URL 猜测。
 4. `reasoning_effort`、`temperature`、`top_p` 等可选参数遵循“未配置就不发送，配置后原样透传”。不得把未配置静默转换成 `none`、`low` 或供应商默认值。
 5. 厂商私有参数只能通过 `request_options` 显式配置，并根据官方文档验证实际请求与返回。仅仅请求成功不代表参数已经生效。
 6. 模型计价必须通过请求模型名和服务端返回模型名映射到明确的官方计价模型。缺少价格时应中止实验，不得套用其他模型的默认单价。
@@ -66,8 +66,8 @@
 
 ## 5. LLM 调用与成本口径
 
-1. 当前主实验的统一兼容层位于 `src/saas_bench/experiment/llm_provider.py`。新增 Provider 差异时优先在该层归一化，不要在每个调用点分别打补丁。
-2. 决策 Agent 的 Provider `tool_choice` 与 Harness 的业务约束是两个层次。修改工具调用规则时必须同时检查请求参数、模型返回和 ReAct 循环行为。
+1. 当前主实验的统一兼容层位于 `src/saas_bench/experiment/llm_provider.py`。主链只配置 API 协议和端点，不增加恒定、无路由作用的 Provider 名称；新增协议差异时优先在该层归一化。
+2. 决策 Agent 的 API `tool_choice` 与 Harness 的业务约束是两个层次。修改工具调用规则时必须同时检查请求参数、模型返回和 ReAct 循环行为。
 3. 用量字段口径固定为：
 
    - `input_tokens`：计费总输入。

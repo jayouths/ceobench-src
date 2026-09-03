@@ -1,4 +1,4 @@
-"""OpenAI SDK client creation and response normalization for main experiments."""
+"""OpenAI-compatible client creation and response normalization."""
 
 from __future__ import annotations
 
@@ -57,9 +57,8 @@ class TokenCost:
         }
 
 
-def validate_provider_api_type(provider: str, api_type: str, section: str) -> None:
-    if provider != "openai":
-        raise ValueError(f"{section}.provider must be 'openai'")
+def validate_api_type(api_type: str, section: str) -> None:
+    """验证实验显式选择的 OpenAI 协议，不根据网址猜测。"""
     if api_type not in SUPPORTED_API_TYPES:
         allowed = ", ".join(sorted(SUPPORTED_API_TYPES))
         raise ValueError(f"{section}.api_type must be one of: {allowed}")
@@ -120,14 +119,13 @@ def openai_chat_request_parameters(
 
 def create_llm_client(
     *,
-    provider: str,
     api_type: str,
     api_key: Optional[str],
     base_url: Optional[str],
     timeout_seconds: float,
 ):
     """Create the SDK client required by the explicitly selected API type."""
-    validate_provider_api_type(provider, api_type, "model")
+    validate_api_type(api_type, "model")
     from openai import OpenAI
 
     kwargs: dict[str, Any] = {
@@ -137,6 +135,14 @@ def create_llm_client(
     if base_url:
         kwargs["base_url"] = base_url
     return OpenAI(**kwargs)
+
+
+def _required_response_model(response: Any) -> str:
+    """回执模型名是实验身份和计价的依据，禁止用请求名静默代替。"""
+    model = getattr(response, "model", None)
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("LLM response must include a non-empty model identifier")
+    return model.strip()
 
 
 def call_text_model(
@@ -176,10 +182,11 @@ def call_text_model(
         if reasoning_effort is not None:
             kwargs["reasoning"] = {"effort": reasoning_effort}
         response = client.responses.create(**kwargs)
+        served_model = _required_response_model(response)
         usage = getattr(response, "usage", None)
         return TextLLMResult(
             text=str(getattr(response, "output_text", "") or "").strip(),
-            model=str(getattr(response, "model", None) or model),
+            model=served_model,
             input_tokens=_int_attr(usage, "input_tokens"),
             output_tokens=_int_attr(usage, "output_tokens"),
             cached_tokens=_nested_int_attr(
@@ -202,12 +209,13 @@ def call_text_model(
         )
         kwargs["messages"] = messages
         response = client.chat.completions.create(**kwargs)
+        served_model = _required_response_model(response)
         usage = getattr(response, "usage", None)
         choices = getattr(response, "choices", None) or []
         message = getattr(choices[0], "message", None) if choices else None
         return TextLLMResult(
             text=str(getattr(message, "content", "") or "").strip(),
-            model=str(getattr(response, "model", None) or model),
+            model=served_model,
             input_tokens=_int_attr(usage, "prompt_tokens"),
             output_tokens=_int_attr(usage, "completion_tokens"),
             cached_tokens=openai_chat_cached_tokens(usage),

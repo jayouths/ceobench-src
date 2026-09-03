@@ -16,15 +16,6 @@ def test_runner_rejects_missing_decision_model_identity():
     with pytest.raises(ValueError, match="model must be explicitly configured"):
         BashAgentRunner(
             model=None,
-            provider="openai",
-            api_type="openai_responses",
-            max_output_tokens=100,
-            max_decision_turns_per_batch=100,
-        )
-    with pytest.raises(ValueError, match="provider must be explicitly configured"):
-        BashAgentRunner(
-            model="decision",
-            provider=None,
             api_type="openai_responses",
             max_output_tokens=100,
             max_decision_turns_per_batch=100,
@@ -34,7 +25,6 @@ def test_runner_rejects_missing_decision_request_limit():
     with pytest.raises(ValueError, match="max_output_tokens must be configured"):
         BashAgentRunner(
             model="decision",
-            provider="openai",
             api_type="openai_responses",
             tool_choice="required",
             max_decision_turns_per_batch=100,
@@ -54,7 +44,6 @@ def test_short_experiment_is_allowed_and_runner_rounds_to_zero(tmp_path):
     runner = BashAgentRunner(
         experiment_name="test",
         model=config.decision_agent.model,
-        provider=config.decision_agent.provider,
         api_type=config.decision_agent.api_type,
         tool_choice=config.decision_agent.tool_choice,
         base_url=config.decision_agent.base_url,
@@ -77,7 +66,6 @@ def test_runner_preserves_reasoning_configuration():
     omitted = BashAgentRunner(
         experiment_name="test",
         model="test-model",
-        provider="openai",
         api_type="openai_responses",
         tool_choice="required",
         base_url="http://localhost:11434/v1",
@@ -90,7 +78,6 @@ def test_runner_preserves_reasoning_configuration():
     disabled = BashAgentRunner(
         experiment_name="test",
         model="test-model",
-        provider="openai",
         api_type="openai_responses",
         tool_choice="required",
         base_url="http://localhost:11434/v1",
@@ -111,7 +98,6 @@ def test_runner_preserves_sampling_configuration():
     runner = BashAgentRunner(
         experiment_name="test",
         model="test-model",
-        provider="openai",
         api_type="openai_responses",
         tool_choice="required",
         base_url="http://localhost:11434/v1",

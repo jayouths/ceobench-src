@@ -8,10 +8,9 @@ import re
 from typing import Any, Mapping, Optional
 import tomllib
 
-_SUPPORTED_PROVIDERS = {"openai"}
 _REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 _MODEL_KEYS = {
-    "provider", "api_type", "model", "base_url", "api_key_env", "api_key_required", "reasoning_effort",
+    "api_type", "model", "base_url", "api_key_env", "api_key_required", "reasoning_effort",
     "temperature", "top_p", "tool_choice", "max_output_tokens", "timeout_seconds",
     "pricing", "pricing_model_map", "request_options", "tasks",
 }
@@ -48,7 +47,6 @@ class ExperimentSettings:
 
 @dataclass(frozen=True)
 class ModelSettings:
-    provider: str
     api_type: str
     model: str
     max_output_tokens: int
@@ -255,7 +253,7 @@ def _load_model(
     require_tool_choice: bool = False,
 ) -> ModelSettings:
     _reject_unknown(raw, _MODEL_KEYS, section)
-    required = {"provider", "api_type", "model", "max_output_tokens"}
+    required = {"api_type", "model", "max_output_tokens"}
     if require_tool_choice:
         required.add("tool_choice")
     missing = sorted(required - set(raw))
@@ -264,21 +262,17 @@ def _load_model(
             f"{section} must explicitly configure: {', '.join(missing)}"
         )
 
-    provider = raw["provider"]
-    if provider not in _SUPPORTED_PROVIDERS:
-        allowed = ", ".join(sorted(_SUPPORTED_PROVIDERS))
-        raise ValueError(f"{section}.provider must be one of: {allowed}")
     if not isinstance(raw["model"], str) or not raw["model"]:
         raise ValueError(f"{section}.model must be a non-empty string")
     api_type = raw["api_type"]
     if not isinstance(api_type, str):
         raise ValueError(f"{section}.api_type must be a string")
     from .llm_provider import (
-        validate_provider_api_type,
+        validate_api_type,
         validate_reasoning_effort,
         validate_tool_choice,
     )
-    validate_provider_api_type(provider, api_type, section)
+    validate_api_type(api_type, section)
 
     pricing = _load_pricing(raw.get("pricing"), section)
     pricing_model_map = _load_pricing_model_map(
@@ -292,7 +286,6 @@ def _load_model(
         )
 
     values = {
-        "provider": provider,
         "api_type": api_type,
         "model": raw["model"],
         "base_url": raw.get("base_url"),
@@ -356,7 +349,6 @@ def _load_model(
 
 def _model_overrides(prefix: str, settings: ModelSettings) -> dict[str, Any]:
     return {
-        f"{prefix}_provider": settings.provider,
         f"{prefix}_api_type": settings.api_type,
         f"{prefix}_model": settings.model,
         f"{prefix}_base_url": settings.base_url,

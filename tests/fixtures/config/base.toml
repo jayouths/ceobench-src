@@ -15,7 +15,6 @@ max_enterprise_threads = 50
 role_report_concurrency = 1
 
 [models.decision_agent]
-provider = "openai"
 api_type = "openai_responses"
 tool_choice = "required"
 model = "test-decision-model"
@@ -33,7 +32,6 @@ cached_input_cost_per_million = 0.0
 output_cost_per_million = 0.0
 
 [models.social_llm]
-provider = "openai"
 api_type = "openai_responses"
 model = "test-social-model"
 base_url = "http://localhost:11434/v1"

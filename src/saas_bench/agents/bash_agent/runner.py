@@ -1,6 +1,6 @@
 """Bash Agent 主实验编排、断点恢复和产物记录。
 
-This script runs a simulation using the bash_agent with any supported LLM provider.
+This script runs a simulation using the bash_agent through an OpenAI-compatible API.
 The agent uses bash/file tools and interacts with the simulator via
 novamind_api (Python library) and ./novamind-operation (CLI).
 
@@ -31,7 +31,7 @@ if str(package_root) not in sys.path:
 from saas_bench.experiment.llm_provider import (
     create_llm_client,
     model_token_cost,
-    validate_provider_api_type,
+    validate_api_type,
     validate_reasoning_effort,
     validate_tool_choice,
 )
@@ -77,7 +77,6 @@ class BashAgentRunner:
     def __init__(
         self,
         model: Optional[str] = None,
-        provider: Optional[str] = None,
         api_type: Optional[str] = None,
         base_url: Optional[str] = None,
         seed: int = 42,
@@ -107,15 +106,12 @@ class BashAgentRunner:
     ):
         if not model:
             raise ValueError("decision-agent model must be explicitly configured")
-        if not provider:
-            raise ValueError("decision-agent provider must be explicitly configured")
         if not api_type:
             raise ValueError("decision-agent api_type must be explicitly configured")
-        validate_provider_api_type(provider, api_type, "models.decision_agent")
+        validate_api_type(api_type, "models.decision_agent")
         validate_reasoning_effort(api_type, reasoning_effort, "models.decision_agent")
         validate_tool_choice(tool_choice, "models.decision_agent")
         self.model = model
-        self.provider = provider
         self.api_type = api_type
         self.seed = seed
         self.scenario = scenario
@@ -294,12 +290,13 @@ class BashAgentRunner:
         if not self.api_key and not self.api_key_required:
             self.api_key = "not-required"
         if not self.api_key:
-            raise ValueError(f"No API key found for provider {self.provider}")
+            raise ValueError(
+                f"No API key found in environment variable {self.api_key_env!r}"
+            )
 
         self.base_url = base_url
 
         self.client = create_llm_client(
-            provider=self.provider,
             api_type=self.api_type,
             api_key=self.api_key,
             base_url=self.base_url,
@@ -327,12 +324,11 @@ class BashAgentRunner:
         config = self.analysis_model_config
         if config is None:
             raise ValueError("analysis model config is required")
-        provider = config.get("provider")
         api_type = config.get("api_type")
         model = config.get("model")
-        if not all(isinstance(value, str) and value for value in (provider, api_type, model)):
-            raise ValueError("analysis provider, api_type, and model must be configured")
-        validate_provider_api_type(provider, api_type, "models.analysis")
+        if not all(isinstance(value, str) and value for value in (api_type, model)):
+            raise ValueError("analysis api_type and model must be configured")
+        validate_api_type(api_type, "models.analysis")
         validate_reasoning_effort(
             api_type,
             config.get("reasoning_effort"),
@@ -364,11 +360,10 @@ class BashAgentRunner:
             api_key = "not-required"
         if not api_key:
             raise ValueError(
-                f"No API key found for analysis provider {provider!r} "
-                f"from environment variable {api_key_env!r}"
+                "No API key found for analysis model "
+                f"in environment variable {api_key_env!r}"
             )
         return create_llm_client(
-            provider=provider,
             api_type=api_type,
             api_key=api_key,
             base_url=config.get("base_url"),
@@ -583,7 +578,6 @@ class BashAgentRunner:
             "status": status,
             "returned_tool_call_count": tool_call_count,
             "elapsed_seconds": elapsed_seconds,
-            "provider": self.provider,
             "api_type": self.api_type,
             "requested_model": self.model,
             "input_tokens": input_tokens,
@@ -925,7 +919,6 @@ class BashAgentRunner:
             'experiment_name': self.experiment_name,
             'agent_type': 'bash_agent',
             'model': self.model,
-            'provider': self.provider,
             'api_type': self.api_type,
             'base_url': self.base_url,
             'reasoning_effort': self.reasoning_effort,
@@ -1150,7 +1143,7 @@ class BashAgentRunner:
             print(f"Starting Bash Agent Run")
             print(f"Run ID: {self.run_id}")
             print(f"Model: {self.model}")
-            print(f"Provider: {self.provider}")
+            print(f"API Type: {self.api_type}")
             print(f"Seed: {self.seed}")
             print(f"API Server Port: {self.simulator_server.port}")
             print(f"Agent Workspace: {self.agent_workspace}")
