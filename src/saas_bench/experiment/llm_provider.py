@@ -256,18 +256,18 @@ def token_cost(
 
 
 def model_token_cost(
-    model: str,
+    requested_model: str,
     input_tokens: int,
     output_tokens: int,
     cached_tokens: int,
     pricing: Mapping[str, Mapping[str, Any]],
     pricing_model_map: Optional[Mapping[str, str]] = None,
 ) -> TokenCost:
-    # 渠道请求名和服务端返回名可能不同，统一映射到官方模型后计价。
-    pricing_model = (pricing_model_map or {}).get(model, model)
+    # 成本只由实验配置中的请求模型决定，不受渠道回执名称影响。
+    pricing_model = (pricing_model_map or {}).get(requested_model, requested_model)
     if pricing_model not in pricing:
         raise MissingModelPricingError(
-            f"No token pricing configured for served model {model!r} "
+            f"No token pricing configured for requested model {requested_model!r} "
             f"(resolved pricing model {pricing_model!r})"
         )
     price = pricing[pricing_model]

@@ -26,7 +26,7 @@
 3. `api_type`、模型名、最大输出 Token 和计价信息必须在 TOML 中明确。当前主实验统一使用 OpenAI SDK 及其兼容端点，协议显式选择 `openai_chat_completions` 或 `openai_responses`，不得根据 URL 猜测。
 4. `reasoning_effort`、`temperature`、`top_p` 等可选参数遵循“未配置就不发送，配置后原样透传”。不得把未配置静默转换成 `none`、`low` 或供应商默认值。
 5. 厂商私有参数只能通过 `request_options` 显式配置，并根据官方文档验证实际请求与返回。仅仅请求成功不代表参数已经生效。
-6. 模型计价必须通过请求模型名和服务端返回模型名映射到明确的官方计价模型。缺少价格时应中止实验，不得套用其他模型的默认单价。
+6. 模型计价必须通过请求模型名映射到明确的官方计价模型；服务端回执模型名只用于审计，不参与计价。缺少价格时应中止实验，不得套用其他模型的默认单价。
 7. 恢复实验只能使用 `--resume <run_id-or-directory>`，并读取原运行目录中的 `config.json`。不得用当前 TOML 或 CLI 参数覆盖断点实验的原配置。
 
 完整配置结构见 [config/config_template.toml](config/config_template.toml) 和 [docs/engineering/configuration.md](docs/engineering/configuration.md)。

@@ -264,7 +264,7 @@ def test_chat_parameters_and_private_options_are_forwarded():
     }
 
 
-def test_cost_uses_served_model_and_rejects_unknown_model():
+def test_cost_uses_requested_model_and_rejects_unknown_model():
     pricing = {
         "requested": {
             "currency": "USD",
@@ -288,9 +288,9 @@ def test_cost_uses_served_model_and_rejects_unknown_model():
         model_token_cost("unlisted", 1, 1, 0, pricing)
 
 
-def test_cost_maps_channel_model_to_canonical_pricing_model():
+def test_cost_maps_request_model_to_official_pricing_model():
     pricing = {
-        "deepseek-v4-pro": {
+        "DeepSeek-V4-Pro": {
             "currency": "USD",
             "uncached_input_cost_per_million": 1.32,
             "cached_input_cost_per_million": 0.044,
@@ -299,17 +299,17 @@ def test_cost_maps_channel_model_to_canonical_pricing_model():
     }
 
     cost = model_token_cost(
-        "deepseek-v4-pro-0813",
+        "DeepSeek-V4-Pro",
         1_000_000,
         1_000_000,
         250_000,
         pricing,
-        {"deepseek-v4-pro-0813": "deepseek-v4-pro"},
+        {"DeepSeek-V4-Pro": "DeepSeek-V4-Pro"},
     )
 
     assert cost.amount == pytest.approx(4.961)
     assert cost.currency == "USD"
-    assert cost.pricing_model == "deepseek-v4-pro"
+    assert cost.pricing_model == "DeepSeek-V4-Pro"
 
 
 @pytest.mark.parametrize(

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from saas_bench.experiment.experiment_config import load_experiment_config
+from saas_bench.experiment.experiment_config import RequestModel, load_experiment_config
 from tests.support.harness import TEST_CONFIG
 
 
@@ -32,17 +32,17 @@ def test_experiment_config_loads_all_experiment_and_model_fields():
     assert config.modules.analysis.max_enterprise_threads == 50
     assert config.modules.analysis.role_report_concurrency == 1
     assert config.analysis is None
-    assert config.decision_agent.model == "test-decision-model"
+    assert config.decision_agent.model is RequestModel.DEEPSEEK_V4_PRO
     assert config.decision_agent.tool_choice == "required"
     assert config.decision_agent.reasoning_effort is None
     assert config.decision_agent.temperature == pytest.approx(0.7)
-    assert config.decision_agent.pricing["test-decision-model"] == {
+    assert config.decision_agent.pricing["DeepSeek-V4-Pro"] == {
         "currency": "USD",
         "uncached_input_cost_per_million": 0.0,
         "cached_input_cost_per_million": 0.0,
         "output_cost_per_million": 0.0,
     }
-    assert config.social_llm.model == "test-social-model"
+    assert config.social_llm.model is RequestModel.DEEPSEEK_V4_FLASH
     assert config.social_llm.base_url == "http://localhost:11434/v1"
     assert config.social_llm.max_output_tokens == 1000
 
@@ -65,7 +65,7 @@ def test_analysis_model_is_required_only_when_module_is_enabled(tmp_path):
 
 [models.analysis]
 api_type = "openai_chat_completions"
-model = "analysis-model"
+model = "DeepSeek-V4-Flash"
 base_url = "http://localhost:11434/v1"
 api_key_required = false
 reasoning_effort = "none"
@@ -73,7 +73,7 @@ temperature = 0.2
 max_output_tokens = 2000
 timeout_seconds = 600
 
-[models.analysis.pricing."analysis-model"]
+[models.analysis.pricing.DeepSeek-V4-Flash]
 currency = "CNY"
 uncached_input_cost_per_million = 0.0
 cached_input_cost_per_million = 0.0
@@ -91,7 +91,7 @@ max_output_tokens = 2000
 
     assert config.modules.analysis.enabled is True
     assert config.analysis is not None
-    assert config.analysis.model == "analysis-model"
+    assert config.analysis.model is RequestModel.DEEPSEEK_V4_FLASH
     assert config.analysis.tasks["role_report"]["max_output_tokens"] == 1500
     assert config.analysis.tasks["state_reconstruction"]["max_output_tokens"] == 2000
 
@@ -223,7 +223,7 @@ role_report_concurrency = 1
 [models.decision_agent]
 api_type = "openai_chat_completions"
 tool_choice = "required"
-model = "channel-model"
+model = "DeepSeek-V4-Pro"
 base_url = "https://www.autodl.art/api/v1"
 api_key_env = "AUTODL_API_KEY"
 reasoning_effort = "low"
@@ -235,7 +235,7 @@ stream = false
 thinking = { type = "enabled", clear_thinking = true }
 response_format = { type = "text" }
 
-[models.decision_agent.pricing.channel-model]
+[models.decision_agent.pricing.DeepSeek-V4-Pro]
 currency = "CNY"
 uncached_input_cost_per_million = 8.0
 cached_input_cost_per_million = 2.0
@@ -243,12 +243,12 @@ output_cost_per_million = 28.0
 
 [models.social_llm]
 api_type = "openai_chat_completions"
-model = "social-test"
+model = "DeepSeek-V4-Flash"
 base_url = "http://localhost:11434/v1"
 api_key_required = false
 max_output_tokens = 1000
 
-[models.social_llm.pricing.social-test]
+[models.social_llm.pricing.DeepSeek-V4-Flash]
 currency = "CNY"
 uncached_input_cost_per_million = 0.0
 cached_input_cost_per_million = 0.0
@@ -258,7 +258,7 @@ output_cost_per_million = 0.0
 
     config = load_experiment_config(path)
 
-    assert config.decision_agent.model == "channel-model"
+    assert config.decision_agent.model is RequestModel.DEEPSEEK_V4_PRO
     assert config.decision_agent.reasoning_effort == "low"
     assert config.decision_agent.base_url == "https://www.autodl.art/api/v1"
     assert config.decision_agent.request_options["extra_body"]["thinking"] == {
@@ -271,13 +271,11 @@ def test_autodl_deepseek_config_uses_verified_model_names_and_official_prices():
     config = load_experiment_config(FORMAL_ANALYSIS_CONFIG)
 
     decision = config.decision_agent
-    assert decision.model == "DeepSeek-V4-Pro"
+    assert decision.model is RequestModel.DEEPSEEK_V4_PRO
     assert decision.pricing_model_map == {
-        "DeepSeek-V4-Pro": "deepseek-v4-pro",
-        "DeepSeek-V4-Pro-0813": "deepseek-v4-pro",
-        "deepseek-v4-pro-0813": "deepseek-v4-pro",
+        "DeepSeek-V4-Pro": "DeepSeek-V4-Pro",
     }
-    assert decision.pricing["deepseek-v4-pro"] == {
+    assert decision.pricing["DeepSeek-V4-Pro"] == {
         "currency": "USD",
         "uncached_input_cost_per_million": pytest.approx(1.32),
         "cached_input_cost_per_million": pytest.approx(0.044),
@@ -286,13 +284,11 @@ def test_autodl_deepseek_config_uses_verified_model_names_and_official_prices():
 
     for model in (config.social_llm, config.analysis):
         assert model is not None
-        assert model.model == "DeepSeek-V4-Flash"
+        assert model.model is RequestModel.DEEPSEEK_V4_FLASH
         assert model.pricing_model_map == {
-            "DeepSeek-V4-Flash": "deepseek-v4-flash",
-            "DeepSeek-V4-Flash-0731": "deepseek-v4-flash",
-            "deepseek-v4-flash-0731": "deepseek-v4-flash",
+            "DeepSeek-V4-Flash": "DeepSeek-V4-Flash",
         }
-        assert model.pricing["deepseek-v4-flash"] == {
+        assert model.pricing["DeepSeek-V4-Flash"] == {
             "currency": "USD",
             "uncached_input_cost_per_million": pytest.approx(0.44),
             "cached_input_cost_per_million": pytest.approx(0.014),
@@ -331,7 +327,7 @@ def test_formal_baseline_and_analysis_configs_only_differ_by_ablation():
         ),
         (
             "[experiment]\nname = 'baseline'\nmax_decision_turns_per_batch = 100\nmax_invalid_responses_per_turn = 3\n"
-            "[models.decision_agent]\napi_type = 'openai_responses'\ntool_choice = 'required'\nmodel = 'decision'\nmax_output_tokens = 100\napi_key_required = false\n[models.decision_agent.pricing.decision]\ncurrency = 'USD'\nuncached_input_cost_per_million = 0\ncached_input_cost_per_million = 0\noutput_cost_per_million = 0\n",
+            "[models.decision_agent]\napi_type = 'openai_responses'\ntool_choice = 'required'\nmodel = 'DeepSeek-V4-Pro'\nmax_output_tokens = 100\napi_key_required = false\n[models.decision_agent.pricing.DeepSeek-V4-Pro]\ncurrency = 'USD'\nuncached_input_cost_per_million = 0\ncached_input_cost_per_million = 0\noutput_cost_per_million = 0\n",
             "models.social_llm must be explicitly configured",
         ),
     ],
@@ -415,19 +411,33 @@ def test_model_costs_must_be_configured_as_a_pair(tmp_path):
     with pytest.raises(ValueError, match="explicitly configure: output_cost_per_million"):
         load_experiment_config(path)
 
-def test_pricing_model_map_must_target_configured_official_price(tmp_path):
+def test_pricing_model_map_must_use_supported_pricing_model(tmp_path):
     text = TEST_CONFIG.read_text()
-    pricing_header = '[models.decision_agent.pricing."test-decision-model"]'
+    pricing_header = '[models.decision_agent.pricing.DeepSeek-V4-Pro]'
     path = tmp_path / "invalid-pricing-map.toml"
     path.write_text(text.replace(
         pricing_header,
         '[models.decision_agent.pricing_model_map]\n'
-        '"test-decision-model" = "missing-official-model"\n\n'
+        '"DeepSeek-V4-Pro" = "missing-official-model"\n\n'
         + pricing_header,
         1,
     ))
 
-    with pytest.raises(ValueError, match="targets unknown pricing model"):
+    with pytest.raises(ValueError, match="pricing_model_map values must be one of"):
+        load_experiment_config(path)
+
+
+def test_request_model_must_be_a_supported_enum_value(tmp_path):
+    path = tmp_path / "unknown-model.toml"
+    path.write_text(
+        TEST_CONFIG.read_text().replace(
+            'model = "DeepSeek-V4-Pro"',
+            'model = "DeepSeek-V4-Pro-0813"',
+            1,
+        )
+    )
+
+    with pytest.raises(ValueError, match="model must be one of"):
         load_experiment_config(path)
 
 @pytest.mark.parametrize(

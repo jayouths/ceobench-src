@@ -24,7 +24,7 @@ role_report_concurrency = 4             # 必填：四角色报告并发数，�
 [models.decision_agent]
 api_type = "openai_chat_completions"    # 必填：openai_chat_completions | openai_responses
 tool_choice = "auto"                    # 必填：auto | required；需与目标端点能力一致
-model = "REPLACE_DECISION_MODEL"        # 必填：发送给 Provider 的模型名
+model = "DeepSeek-V4-Pro"               # 必填：DeepSeek-V4-Pro | DeepSeek-V4-Flash
 base_url = "https://provider.example/v1" # 可选：自定义或 OpenAI-compatible 端点
 api_key_env = "REPLACE_API_KEY_ENV"     # 开启鉴权时必填：存放 API Key 的环境变量名
 api_key_required = true                 # 可选，默认 true；仅本地无鉴权端点设为 false
@@ -34,14 +34,13 @@ api_key_required = true                 # 可选，默认 true；仅本地无鉴
 max_output_tokens = 16384               # 必填：单次决策调用的最大输出 Token
 timeout_seconds = 600                   # 可选，默认 600：单次请求超时秒数
 
-# 可选：将渠道请求名和可能的服务端返回名统一映射到论文计价模型。
+# 请求模型到官方计价模型的映射；服务端回执名不参与计价。
 [models.decision_agent.pricing_model_map]
-"REPLACE_DECISION_MODEL" = "REPLACE_OFFICIAL_DECISION_MODEL"         # 请求模型名 -> 官方计价模型
-"REPLACE_SERVED_DECISION_MODEL" = "REPLACE_OFFICIAL_DECISION_MODEL"  # 服务端返回名 -> 官方计价模型
+"DeepSeek-V4-Pro" = "DeepSeek-V4-Pro"
 
 # 必填：论文使用的官方单价，金额为每百万 Token。
 # 具体实验配置必须在此记录价格来源、价格生效日期和采用的高峰/低谷口径。
-[models.decision_agent.pricing."REPLACE_OFFICIAL_DECISION_MODEL"]
+[models.decision_agent.pricing.DeepSeek-V4-Pro]
 currency = "USD"                       # 必填：三位大写币种代码
 uncached_input_cost_per_million = 0.0   # 必填：未命中缓存的输入单价
 cached_input_cost_per_million = 0.0     # 必填：命中缓存的输入单价
@@ -50,7 +49,7 @@ output_cost_per_million = 0.0           # 必填：输出单价；推理 Token �
 # 社交环境 LLM：生成客户、宏观和竞争对手帖子，并评估 Agent 帖子。
 [models.social_llm]
 api_type = "openai_chat_completions"    # 必填：openai_chat_completions | openai_responses
-model = "REPLACE_SOCIAL_MODEL"          # 必填：发送给 Provider 的模型名
+model = "DeepSeek-V4-Flash"             # 必填：DeepSeek-V4-Pro | DeepSeek-V4-Flash
 base_url = "https://provider.example/v1" # 可选：模型端点
 api_key_env = "REPLACE_API_KEY_ENV"     # 开启鉴权时必填
 api_key_required = true                 # 可选，默认 true
@@ -61,10 +60,9 @@ max_output_tokens = 1000                # 必填：任务未单独覆盖时的�
 timeout_seconds = 600                   # 可选，默认 600
 
 [models.social_llm.pricing_model_map]
-"REPLACE_SOCIAL_MODEL" = "REPLACE_OFFICIAL_SOCIAL_MODEL"         # 请求模型名 -> 官方计价模型
-"REPLACE_SERVED_SOCIAL_MODEL" = "REPLACE_OFFICIAL_SOCIAL_MODEL"  # 服务端返回名 -> 官方计价模型
+"DeepSeek-V4-Flash" = "DeepSeek-V4-Flash"
 
-[models.social_llm.pricing."REPLACE_OFFICIAL_SOCIAL_MODEL"]
+[models.social_llm.pricing.DeepSeek-V4-Flash]
 currency = "USD"                       # 必填：三位大写币种代码
 uncached_input_cost_per_million = 0.0   # 必填：未命中缓存的输入单价
 cached_input_cost_per_million = 0.0     # 必填：命中缓存的输入单价
@@ -92,7 +90,7 @@ max_output_tokens = 150                # 可选：覆盖客户回复任务的输
 # modules.analysis.enabled = false 时可删除整个 models.analysis 配置块。
 [models.analysis]
 api_type = "openai_chat_completions"    # 开启 Analysis 时必填
-model = "REPLACE_ANALYSIS_MODEL"        # 开启 Analysis 时必填
+model = "DeepSeek-V4-Flash"             # 开启 Analysis 时必填：DeepSeek-V4-Pro | DeepSeek-V4-Flash
 base_url = "https://provider.example/v1" # 可选：模型端点
 api_key_env = "REPLACE_API_KEY_ENV"     # 开启鉴权时必填
 api_key_required = true                 # 可选，默认 true
@@ -102,10 +100,9 @@ max_output_tokens = 5000                # 必填：任务未覆盖时的输出�
 timeout_seconds = 600                   # 可选，默认 600
 
 [models.analysis.pricing_model_map]
-"REPLACE_ANALYSIS_MODEL" = "REPLACE_OFFICIAL_ANALYSIS_MODEL"         # 请求模型名 -> 官方计价模型
-"REPLACE_SERVED_ANALYSIS_MODEL" = "REPLACE_OFFICIAL_ANALYSIS_MODEL"  # 服务端返回名 -> 官方计价模型
+"DeepSeek-V4-Flash" = "DeepSeek-V4-Flash"
 
-[models.analysis.pricing."REPLACE_OFFICIAL_ANALYSIS_MODEL"]
+[models.analysis.pricing.DeepSeek-V4-Flash]
 currency = "USD"                       # 必填：三位大写币种代码
 uncached_input_cost_per_million = 0.0   # 必填：未命中缓存的输入单价
 cached_input_cost_per_million = 0.0     # 必填：命中缓存的输入单价

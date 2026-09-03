@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from enum import StrEnum
 from pathlib import Path
 import re
 from typing import Any, Mapping, Optional
@@ -33,6 +34,26 @@ _ANALYSIS_MODULE_KEYS = {
 }
 
 
+class RequestModel(StrEnum):
+    """主实验允许发送给 Provider 的模型名。"""
+
+    DEEPSEEK_V4_PRO = "DeepSeek-V4-Pro"
+    DEEPSEEK_V4_FLASH = "DeepSeek-V4-Flash"
+
+
+class PricingModel(StrEnum):
+    """论文成本统计使用的官方模型名。"""
+
+    DEEPSEEK_V4_PRO = "DeepSeek-V4-Pro"
+    DEEPSEEK_V4_FLASH = "DeepSeek-V4-Flash"
+
+
+REQUEST_MODEL_PRICING = {
+    RequestModel.DEEPSEEK_V4_PRO: PricingModel.DEEPSEEK_V4_PRO,
+    RequestModel.DEEPSEEK_V4_FLASH: PricingModel.DEEPSEEK_V4_FLASH,
+}
+
+
 @dataclass(frozen=True)
 class ExperimentSettings:
     name: str = ""
@@ -48,7 +69,7 @@ class ExperimentSettings:
 @dataclass(frozen=True)
 class ModelSettings:
     api_type: str
-    model: str
+    model: RequestModel
     max_output_tokens: int
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
@@ -264,6 +285,11 @@ def _load_model(
 
     if not isinstance(raw["model"], str) or not raw["model"]:
         raise ValueError(f"{section}.model must be a non-empty string")
+    try:
+        request_model = RequestModel(raw["model"])
+    except ValueError as exc:
+        allowed = ", ".join(model.value for model in RequestModel)
+        raise ValueError(f"{section}.model must be one of: {allowed}") from exc
     api_type = raw["api_type"]
     if not isinstance(api_type, str):
         raise ValueError(f"{section}.api_type must be a string")
@@ -278,16 +304,19 @@ def _load_model(
     pricing_model_map = _load_pricing_model_map(
         raw.get("pricing_model_map"), section, pricing
     )
-    configured_pricing_model = pricing_model_map.get(raw["model"], raw["model"])
+    configured_pricing_model = pricing_model_map.get(
+        request_model.value,
+        REQUEST_MODEL_PRICING[request_model].value,
+    )
     if configured_pricing_model not in pricing:
         raise ValueError(
-            f"{section} model {raw['model']!r} resolves to pricing model "
+            f"{section} model {request_model.value!r} resolves to pricing model "
             f"{configured_pricing_model!r}, which is missing from {section}.pricing"
         )
 
     values = {
         "api_type": api_type,
-        "model": raw["model"],
+        "model": request_model,
         "base_url": raw.get("base_url"),
         "api_key_env": raw.get("api_key_env"),
         "api_key_required": raw.get("api_key_required", True),
@@ -425,6 +454,13 @@ def _load_pricing(value: Any, section: str) -> dict[str, dict[str, Any]]:
     raw = _required_table(value, f"{section}.pricing")
     result: dict[str, dict[str, Any]] = {}
     for model, raw_price in raw.items():
+        try:
+            pricing_model = PricingModel(model)
+        except ValueError as exc:
+            allowed = ", ".join(item.value for item in PricingModel)
+            raise ValueError(
+                f"{section}.pricing model must be one of: {allowed}"
+            ) from exc
         price_section = f"{section}.pricing.{model}"
         price = dict(_table(raw_price, price_section))
         keys = {
@@ -454,7 +490,7 @@ def _load_pricing(value: Any, section: str) -> dict[str, dict[str, Any]]:
         for key in numeric_keys:
             if not isinstance(price[key], (int, float)) or price[key] < 0:
                 raise ValueError(f"{price_section}.{key} must be non-negative")
-        result[str(model)] = {
+        result[pricing_model.value] = {
             "currency": currency,
             **{key: float(price[key]) for key in numeric_keys},
         }
@@ -479,12 +515,32 @@ def _load_pricing_model_map(
             raise ValueError(
                 f"{section}.pricing_model_map.{channel_model} must be a non-empty string"
             )
-        if official_model not in pricing:
+        try:
+            request_model = RequestModel(channel_model)
+        except ValueError as exc:
+            allowed = ", ".join(item.value for item in RequestModel)
+            raise ValueError(
+                f"{section}.pricing_model_map keys must be one of: {allowed}"
+            ) from exc
+        try:
+            pricing_model = PricingModel(official_model)
+        except ValueError as exc:
+            allowed = ", ".join(item.value for item in PricingModel)
+            raise ValueError(
+                f"{section}.pricing_model_map values must be one of: {allowed}"
+            ) from exc
+        expected = REQUEST_MODEL_PRICING[request_model]
+        if pricing_model is not expected:
+            raise ValueError(
+                f"{section}.pricing_model_map.{channel_model} must map to "
+                f"{expected.value!r}"
+            )
+        if pricing_model.value not in pricing:
             raise ValueError(
                 f"{section}.pricing_model_map.{channel_model} targets unknown "
-                f"pricing model {official_model!r}"
+                f"pricing model {pricing_model.value!r}"
             )
-        result[channel_model] = official_model
+        result[request_model.value] = pricing_model.value
     return result
 
 

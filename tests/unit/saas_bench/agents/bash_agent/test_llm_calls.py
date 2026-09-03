@@ -29,12 +29,12 @@ def test_reasoning_token_total_becomes_unknown_after_unreported_call():
     assert agent.total_reasoning_tokens is None
 
 
-def test_decision_response_cost_uses_the_served_model(tmp_path):
+def test_decision_response_cost_uses_the_requested_model(tmp_path):
     runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.model = "requested"
+    runner.model = "DeepSeek-V4-Pro"
     runner.api_type = "openai_responses"
     runner.pricing = {
-        "official": {
+        "DeepSeek-V4-Pro": {
             "currency": "CNY",
             "uncached_input_cost_per_million": 3.0,
             "cached_input_cost_per_million": 0.25,
@@ -42,8 +42,7 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
         },
     }
     runner.pricing_model_map = {
-        "requested": "official",
-        "served": "official",
+        "DeepSeek-V4-Pro": "DeepSeek-V4-Pro",
     }
     runner.total_decision_agent_cost_by_currency = {}
     runner.run_id = "test"
@@ -66,7 +65,8 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
     assert entry["react_round"] == 1
     assert entry["elapsed_seconds"] == pytest.approx(1.25)
     assert entry["served_model"] == "served"
-    assert entry["pricing_model"] == "official"
+    assert entry["requested_model"] == "DeepSeek-V4-Pro"
+    assert entry["pricing_model"] == "DeepSeek-V4-Pro"
     assert entry["cached_tokens"] == 250_000
     assert entry["reasoning_tokens"] == 125_000
     assert entry["cost_amount"] == pytest.approx(6.3125)
@@ -78,17 +78,17 @@ def test_decision_response_cost_uses_the_served_model(tmp_path):
 
 def _make_response_logging_runner(tmp_path, initial_observation, analysis_enabled):
     runner = BashAgentRunner.__new__(BashAgentRunner)
-    runner.model = "requested"
+    runner.model = "DeepSeek-V4-Pro"
     runner.api_type = "openai_responses"
     runner.pricing = {
-        "official": {
+        "DeepSeek-V4-Pro": {
             "currency": "USD",
             "uncached_input_cost_per_million": 1.0,
             "cached_input_cost_per_million": 0.0,
             "output_cost_per_million": 1.0,
         },
     }
-    runner.pricing_model_map = {"served": "official"}
+    runner.pricing_model_map = {"DeepSeek-V4-Pro": "DeepSeek-V4-Pro"}
     runner.total_decision_agent_cost_by_currency = {}
     runner.run_id = "test"
     runner.workspace_dir = tmp_path

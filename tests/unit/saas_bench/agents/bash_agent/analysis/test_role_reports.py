@@ -239,16 +239,16 @@ def test_pipeline_records_analysis_call_in_trajectory_with_official_cost(
 ):
     model_config = {
         "api_type": "openai_chat_completions",
-        "model": "channel-model",
+        "model": "DeepSeek-V4-Flash",
         "max_output_tokens": 1000,
         "temperature": 0.2,
         "top_p": None,
         "reasoning_effort": "none",
         "request_options": {},
         "tasks": {},
-        "pricing_model_map": {"served-model": "official-model"},
+        "pricing_model_map": {"DeepSeek-V4-Flash": "DeepSeek-V4-Flash"},
         "pricing": {
-            "official-model": {
+            "DeepSeek-V4-Flash": {
                 "currency": "USD",
                 "uncached_input_cost_per_million": 1.0,
                 "cached_input_cost_per_million": 0.1,
@@ -291,7 +291,7 @@ def test_pipeline_records_analysis_call_in_trajectory_with_official_cost(
     )
 
     event = events[0]
-    assert outcome.usage.pricing_model == "official-model"
+    assert outcome.usage.pricing_model == "DeepSeek-V4-Flash"
     assert outcome.usage.cost_amount == pytest.approx(0.000131)
     assert event["component"] == "analysis"
     assert event["raw_response"] == {"id": "raw-response"}

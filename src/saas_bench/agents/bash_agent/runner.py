@@ -538,7 +538,7 @@ class BashAgentRunner:
         reasoning_tokens = self.agent.last_reasoning_tokens if self.agent else None
         served_model = self.agent.last_serving_model if self.agent else self.model
         cost = model_token_cost(
-            served_model,
+            self.model,
             input_tokens,
             output_tokens,
             cached_tokens,

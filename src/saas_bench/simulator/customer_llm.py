@@ -226,15 +226,14 @@ class CustomerSimulator:
         input_tokens: int,
         output_tokens: int,
         cached_tokens: int,
-        model: str = None,
         purpose: Optional[str] = None,
     ):
-        """Calculate cost based on model used."""
-        if not model:
-            raise ValueError("model is required for simulator LLM cost accounting")
-        used_model = model
+        """按配置中的请求模型计算成本，不使用渠道回执名。"""
+        requested_model = self.config.social_post_llm_model
+        if not requested_model:
+            raise ValueError("social LLM request model is required for cost accounting")
         return model_token_cost(
-            used_model,
+            requested_model,
             input_tokens,
             output_tokens,
             cached_tokens,
@@ -249,18 +248,17 @@ class CustomerSimulator:
         """Log API cost to database and event logger."""
         if not model:
             raise ValueError("model is required for simulator LLM cost logging")
-        used_model = model
+        served_model = model
         cost = self._calculate_cost(
             input_tokens,
             output_tokens,
             cached_tokens,
-            model=used_model,
             purpose=purpose,
         )
         add_api_cost(
             self.conn,
             day,
-            used_model,
+            served_model,
             purpose,
             input_tokens,
             cached_tokens,
@@ -275,13 +273,17 @@ class CustomerSimulator:
             self.event_logger.log_llm_call(
                 day=day,
                 purpose=purpose,
-                model=used_model,
+                model=served_model,
                 input_tokens=input_tokens,
                 cached_tokens=cached_tokens,
                 output_tokens=output_tokens,
                 cost_amount=cost.amount,
                 currency=cost.currency,
-                details={"pricing_model": cost.pricing_model},
+                details={
+                    "requested_model": self.config.social_post_llm_model,
+                    "served_model": served_model,
+                    "pricing_model": cost.pricing_model,
+                },
             )
 
     # =========================================================================

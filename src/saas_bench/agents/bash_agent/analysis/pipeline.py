@@ -177,7 +177,7 @@ class AnalysisPipeline:
         )
         elapsed = time.monotonic() - started
         cost = model_token_cost(
-            response.model,
+            config["model"],
             response.input_tokens,
             response.output_tokens,
             response.cached_tokens,

@@ -241,7 +241,8 @@ def test_successful_zero_token_social_call_is_still_logged(make_initialized_sim)
 
 def test_local_model_cost_is_zero_when_explicitly_configured():
     config = BenchmarkConfig(
-        social_post_llm_pricing={"qwen3-coder:30b": {
+        social_post_llm_model="DeepSeek-V4-Flash",
+        social_post_llm_pricing={"DeepSeek-V4-Flash": {
             "currency": "CNY",
             "uncached_input_cost_per_million": 0.0,
             "cached_input_cost_per_million": 0.0,
@@ -254,8 +255,7 @@ def test_local_model_cost_is_zero_when_explicitly_configured():
     )
 
     cost = simulator._calculate_cost(
-        1_000_000, 1_000_000, 0,
-        model="qwen3-coder:30b", purpose="customer_social_post"
+        1_000_000, 1_000_000, 0, purpose="customer_social_post"
     )
     assert cost.amount == 0.0
     assert cost.currency == "CNY"
@@ -263,10 +263,8 @@ def test_local_model_cost_is_zero_when_explicitly_configured():
 def test_unknown_model_cost_requires_explicit_pricing():
     simulator = CustomerSimulator(
         conn=sqlite3.connect(":memory:"),
-        config=BenchmarkConfig(),
+        config=BenchmarkConfig(social_post_llm_model="unknown-model"),
     )
 
     with pytest.raises(ValueError, match="No token pricing configured"):
-        simulator._calculate_cost(
-            1, 1, 0, model="unknown-model", purpose="customer_social_post"
-        )
+        simulator._calculate_cost(1, 1, 0, purpose="customer_social_post")
