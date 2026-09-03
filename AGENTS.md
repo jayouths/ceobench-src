@@ -41,6 +41,7 @@
 
 2. **不得让依赖安装命令重写 `uv.lock`。** 切换镜像只允许改变下载来源，不能重新解析或更新锁文件。若锁文件被意外修改而依赖定义没有变化，应恢复锁文件，不需要重建 `.venv`。
 3. 执行任何 `uv` 依赖命令后都要检查 `git diff -- uv.lock`。若差异只把公开 PyPI URL 改成公司或其他镜像 URL，必须立即恢复，禁止提交；除非 `pyproject.toml` 的依赖定义确实发生了预期变化，否则不得更新锁文件。
+4. 确需更新依赖和锁文件时，当前 `uv` 应使用 `uv lock --no-config --default-index https://pypi.org/simple`。不要使用已废弃的 `UV_INDEX_URL` 覆盖本机 `default-index`，其优先级不足，仍可能把锁文件改写为公司镜像。
 4. `src/` 是实现源代码，`public/` 是构建生成的 Agent 可见产物。不要把手工修改 `public/` 当作源代码修改。
 5. 修改 Agent 可见的模拟器、API 客户端、工具说明或运行内容后，执行：
 
