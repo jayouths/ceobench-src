@@ -7,6 +7,7 @@ import pytest
 
 from saas_bench.agents.bash_agent.analysis import pipeline as pipeline_module
 from saas_bench.agents.bash_agent.analysis.models import (
+    Direction,
     Role,
     AnalysisCallKind,
     RoleCallUsage,
@@ -19,6 +20,10 @@ from saas_bench.agents.bash_agent.analysis.role_reports import (
     RoleReportGenerator,
 )
 from saas_bench.agents.bash_agent.analysis.signals import SignalCollector
+from saas_bench.agents.bash_agent.analysis.signal_models import (
+    ConfigurationChange,
+    DataStatus,
+)
 from saas_bench.simulator.public_week_snapshot import build_public_week_snapshot
 from saas_bench.experiment.llm_provider import TextLLMResult
 from tests.support.harness import make_analysis_pipeline
@@ -262,6 +267,68 @@ def test_generator_rejects_invented_direction_for_point_in_time_metric(
 
     assert len(artifact.calls) == 5
     assert "expected 'insufficient_data', got 'up'" in observed[2]
+
+
+def test_generator_accepts_direction_when_all_configuration_changes_match(
+    day_zero_signals,
+):
+    configuration = day_zero_signals.product.configuration.model_copy(
+        update={
+            "previous_week": day_zero_signals.product.configuration.current,
+            "changes": [
+                ConfigurationChange(
+                    day=0,
+                    field="tier_a",
+                    previous=1,
+                    current=2,
+                ),
+                ConfigurationChange(
+                    day=0,
+                    field="daily_development_spend",
+                    previous=0,
+                    current=3000,
+                ),
+            ],
+            "comparison_status": DataStatus.AVAILABLE,
+        }
+    )
+    signals = day_zero_signals.model_copy(
+        update={
+            "product": day_zero_signals.product.model_copy(
+                update={"configuration": configuration}
+            )
+        }
+    )
+
+    def call_model(day, role, attempt, call_kind, system_prompt, user_prompt):
+        text = _valid_response(role)
+        if role is Role.PRODUCT:
+            payload = json.loads(text)
+            payload["evidence"][0].update({
+                "metric": "product.configuration.changes",
+                "direction": "up",
+            })
+            text = json.dumps(payload, ensure_ascii=False)
+        return RoleCallOutcome(text=text, usage=_usage(role, attempt, call_kind))
+
+    artifact = RoleReportGenerator(
+        call_model,
+        max_schema_retries=0,
+    ).generate(signals)
+
+    product = next(report for report in artifact.reports if report.role is Role.PRODUCT)
+    assert product.evidence[0].direction is Direction.UP
+
+
+def test_mixed_configuration_changes_have_no_single_direction():
+    target = [
+        {"field": "tier_a", "previous": 1, "current": 2},
+        {"field": "daily_development_spend", "previous": 3000, "current": 1000},
+    ]
+
+    assert RoleReportGenerator._configuration_changes_direction(target) == (
+        Direction.INSUFFICIENT_DATA.value
+    )
 
 
 def test_pipeline_writes_reuses_and_summarizes_role_reports(

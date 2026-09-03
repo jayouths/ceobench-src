@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from dataclasses import dataclass
 from json import JSONDecodeError
+from numbers import Real
 
 from pydantic import ValidationError
 
@@ -163,9 +164,10 @@ class RoleReportGenerator:
             # 只有确定性信号层已经计算出 direction 的环比对象，
             # 才允许角色报告声称 up/down/flat。单点值、文本和配置值
             # 都不能自行推断趋势，否则会把当前状态误写成变化方向。
-            expected_direction = Direction.INSUFFICIENT_DATA.value
-            if isinstance(target, dict) and "direction" in target:
-                expected_direction = target["direction"]
+            expected_direction = RoleReportGenerator._expected_direction(
+                evidence.metric,
+                target,
+            )
             if evidence.direction.value != expected_direction:
                 errors.append(
                     f"metric direction mismatch for {evidence.metric!r}: "
@@ -173,3 +175,42 @@ class RoleReportGenerator:
                 )
         if errors:
             raise ValueError("; ".join(errors))
+
+    @staticmethod
+    def _expected_direction(metric: str, target: object) -> str:
+        if isinstance(target, dict) and "direction" in target:
+            return str(target["direction"])
+        if metric == "product.configuration.changes":
+            return RoleReportGenerator._configuration_changes_direction(target)
+        return Direction.INSUFFICIENT_DATA.value
+
+    @staticmethod
+    def _configuration_changes_direction(target: object) -> str:
+        """仅在全部配置变更同向时，为变更列表确定一个整体方向。"""
+        if not isinstance(target, list) or not target:
+            return Direction.INSUFFICIENT_DATA.value
+
+        directions: set[str] = set()
+        for change in target:
+            if not isinstance(change, dict):
+                return Direction.INSUFFICIENT_DATA.value
+            previous = change.get("previous")
+            current = change.get("current")
+            if (
+                not isinstance(previous, Real)
+                or isinstance(previous, bool)
+                or not isinstance(current, Real)
+                or isinstance(current, bool)
+            ):
+                return Direction.INSUFFICIENT_DATA.value
+            if current > previous:
+                directions.add(Direction.UP.value)
+            elif current < previous:
+                directions.add(Direction.DOWN.value)
+            else:
+                directions.add(Direction.FLAT.value)
+
+        if len(directions) == 1:
+            return directions.pop()
+        # 配置项量纲不同，升降混合时不存在可解释的单一总体方向。
+        return Direction.INSUFFICIENT_DATA.value
