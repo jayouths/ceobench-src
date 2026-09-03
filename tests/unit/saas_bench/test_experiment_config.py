@@ -10,7 +10,6 @@ from tests.support.harness import TEST_CONFIG
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-AUTODL_DEEPSEEK_CONFIG = PROJECT_ROOT / "config/analysis_autodl_deepseek_14d.toml"
 FORMAL_BASELINE_CONFIG = (
     PROJECT_ROOT / "config/baseline_autodl_deepseek_497d.toml"
 )
@@ -269,7 +268,7 @@ output_cost_per_million = 0.0
 
 
 def test_autodl_deepseek_config_uses_verified_model_names_and_official_prices():
-    config = load_experiment_config(AUTODL_DEEPSEEK_CONFIG)
+    config = load_experiment_config(FORMAL_ANALYSIS_CONFIG)
 
     decision = config.decision_agent
     assert decision.model == "DeepSeek-V4-Pro"
