@@ -11,6 +11,12 @@ from tests.support.harness import TEST_CONFIG
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 AUTODL_DEEPSEEK_CONFIG = PROJECT_ROOT / "config/analysis_autodl_deepseek_14d.toml"
+FORMAL_BASELINE_CONFIG = (
+    PROJECT_ROOT / "config/baseline_autodl_deepseek_497d.toml"
+)
+FORMAL_ANALYSIS_CONFIG = (
+    PROJECT_ROOT / "config/analysis_autodl_deepseek_497d.toml"
+)
 
 
 def test_experiment_config_loads_all_experiment_and_model_fields():
@@ -291,6 +297,29 @@ def test_autodl_deepseek_config_uses_verified_model_names_and_official_prices():
             "cached_input_cost_per_million": pytest.approx(0.014),
             "output_cost_per_million": pytest.approx(1.32),
         }
+
+
+def test_formal_baseline_and_analysis_configs_only_differ_by_ablation():
+    baseline = load_experiment_config(FORMAL_BASELINE_CONFIG)
+    analysis = load_experiment_config(FORMAL_ANALYSIS_CONFIG)
+
+    assert baseline.experiment.name == "baseline"
+    assert analysis.experiment.name == "analysis"
+    assert {
+        **baseline.experiment.__dict__,
+        "name": "paired",
+    } == {
+        **analysis.experiment.__dict__,
+        "name": "paired",
+    }
+    assert baseline.decision_agent == analysis.decision_agent
+    assert baseline.social_llm == analysis.social_llm
+    assert baseline.modules.analysis.__dict__ == {
+        **analysis.modules.analysis.__dict__,
+        "enabled": False,
+    }
+    assert baseline.analysis is None
+    assert analysis.analysis is not None
 
 @pytest.mark.parametrize(
     ("config_text", "message"),

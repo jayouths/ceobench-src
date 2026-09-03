@@ -1,0 +1,108 @@
+# 497 天 Analysis 正式实验，seed=42。
+#
+# 与 baseline_autodl_deepseek_497d.toml 共用决策模型、环境模型、
+# 随机种子和模拟器设置，只额外开启 Analysis 模块。
+
+[experiment]
+name = "analysis"
+seed = 42
+days = 497
+scenario = "default"
+initial_cash = 1000000.0
+workspace = "outputs/runs"
+max_decision_turns_per_batch = 100
+max_invalid_responses_per_turn = 3
+
+[modules.analysis]
+enabled = true
+max_schema_retries = 1
+max_enterprise_threads = 50
+role_report_concurrency = 4
+
+[models.decision_agent]
+api_type = "openai_chat_completions"
+tool_choice = "required"
+model = "DeepSeek-V4-Pro"
+base_url = "https://www.autodl.art/api/v1"
+api_key_env = "AUTODL_API_KEY"
+api_key_required = true
+reasoning_effort = "low"
+max_output_tokens = 16384
+timeout_seconds = 600
+
+[models.decision_agent.pricing_model_map]
+"DeepSeek-V4-Pro" = "deepseek-v4-pro"
+"deepseek-v4-pro-0813" = "deepseek-v4-pro"
+
+# DeepSeek 官方高峰时段价格，作为两组统一的保守理论计价口径。
+# 来源：https://api-docs.deepseek.com/quick_start/pricing
+[models.decision_agent.pricing.deepseek-v4-pro]
+currency = "USD"
+uncached_input_cost_per_million = 1.32
+cached_input_cost_per_million = 0.044
+output_cost_per_million = 3.96
+
+[models.social_llm]
+api_type = "openai_chat_completions"
+model = "DeepSeek-V4-Flash"
+base_url = "https://www.autodl.art/api/v1"
+api_key_env = "AUTODL_API_KEY"
+api_key_required = true
+reasoning_effort = "none"
+temperature = 0.95
+max_output_tokens = 1000
+timeout_seconds = 600
+
+[models.social_llm.pricing_model_map]
+"DeepSeek-V4-Flash" = "deepseek-v4-flash"
+"deepseek-v4-flash-0731" = "deepseek-v4-flash"
+
+[models.social_llm.pricing.deepseek-v4-flash]
+currency = "USD"
+uncached_input_cost_per_million = 0.44
+cached_input_cost_per_million = 0.014
+output_cost_per_million = 1.32
+
+[models.social_llm.tasks.customer_post]
+max_output_tokens = 1000
+
+[models.social_llm.tasks.macro_post]
+max_output_tokens = 300
+
+[models.social_llm.tasks.competitor_post]
+max_output_tokens = 300
+
+[models.social_llm.tasks.agent_post_judge]
+temperature = 0.3
+max_output_tokens = 100
+
+[models.social_llm.tasks.agent_post_reply]
+temperature = 0.9
+max_output_tokens = 150
+
+[models.analysis]
+api_type = "openai_chat_completions"
+model = "DeepSeek-V4-Flash"
+base_url = "https://www.autodl.art/api/v1"
+api_key_env = "AUTODL_API_KEY"
+api_key_required = true
+reasoning_effort = "none"
+temperature = 0.2
+max_output_tokens = 5000
+timeout_seconds = 600
+
+[models.analysis.pricing_model_map]
+"DeepSeek-V4-Flash" = "deepseek-v4-flash"
+"deepseek-v4-flash-0731" = "deepseek-v4-flash"
+
+[models.analysis.pricing.deepseek-v4-flash]
+currency = "USD"
+uncached_input_cost_per_million = 0.44
+cached_input_cost_per_million = 0.014
+output_cost_per_million = 1.32
+
+[models.analysis.tasks.role_report]
+max_output_tokens = 3000
+
+[models.analysis.tasks.state_reconstruction]
+max_output_tokens = 4000
