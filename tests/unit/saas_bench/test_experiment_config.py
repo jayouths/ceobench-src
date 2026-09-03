@@ -274,6 +274,7 @@ def test_autodl_deepseek_config_uses_verified_model_names_and_official_prices():
     assert decision.model == "DeepSeek-V4-Pro"
     assert decision.pricing_model_map == {
         "DeepSeek-V4-Pro": "deepseek-v4-pro",
+        "DeepSeek-V4-Pro-0813": "deepseek-v4-pro",
         "deepseek-v4-pro-0813": "deepseek-v4-pro",
     }
     assert decision.pricing["deepseek-v4-pro"] == {
@@ -288,6 +289,7 @@ def test_autodl_deepseek_config_uses_verified_model_names_and_official_prices():
         assert model.model == "DeepSeek-V4-Flash"
         assert model.pricing_model_map == {
             "DeepSeek-V4-Flash": "deepseek-v4-flash",
+            "DeepSeek-V4-Flash-0731": "deepseek-v4-flash",
             "deepseek-v4-flash-0731": "deepseek-v4-flash",
         }
         assert model.pricing["deepseek-v4-flash"] == {
