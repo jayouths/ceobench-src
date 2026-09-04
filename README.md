@@ -115,7 +115,9 @@ docs/
 ├── engineering/                      # 工程实现和开发约定
 │   ├── code-structure.md            # 代码模块职责和依赖边界
 │   ├── configuration.md             # 实验配置使用方式
+│   ├── experiment-progress-reporting.md # 正式实验进度与成本汇报口径
 │   ├── testing.md                   # 测试分层、入口和编写规则
+│   ├── simulator-p0-audit.md        # 模拟世界 P0 只读审查记录
 │   └── database-encryption.md       # world.nmdb 加密与解密说明
 ├── modules/                          # 论文创新模块设计
 │   └── analysis.md                  # Analysis 模块设计
@@ -135,8 +137,10 @@ docs/
 | 文档 | 作用 |
 |---|---|
 | [实验配置](docs/engineering/configuration.md) | 说明配置模板、新实验启动和断点恢复方式 |
+| [实验进度汇报](docs/engineering/experiment-progress-reporting.md) | 固定可比节点、运行阻塞、经营风险和成本对账口径 |
 | [测试体系](docs/engineering/testing.md) | 说明测试分层、固定命令入口和编写规则 |
 | [代码结构](docs/engineering/code-structure.md) | 说明 `src/saas_bench/` 中各模块职责、Harness 文件分工和 Legacy 边界 |
+| [模拟世界 P0 审查](docs/engineering/simulator-p0-audit.md) | 记录已经验证的实验正确性问题，不在审查阶段直接修改规则 |
 | [Analysis 模块设计](docs/modules/analysis.md) | 记录第一个创新模块的数据边界、执行流程和消融设计 |
 | [运行产物分析指南](docs/experiments/analyze-trajectory.md) | 说明如何解密和分析 `world.nmdb` 及运行日志 |
 | [数据库加密](docs/engineering/database-encryption.md) | 记录 SQLCipher 的使用方式和安全边界 |

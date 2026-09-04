@@ -92,6 +92,7 @@ outputs/evaluation/opening/
 | 方案 | 独立价值成立的条件 | 状态 |
 |---|---|---|
 | [客户与持续收入轨迹](figures/business-growth-trajectory.md) | 两组增长阶段或转折点存在稳定差异 | 候选 |
+| [每日实际收入轨迹](figures/daily-revenue-trajectory.md) | 需要解释 MRR、实际收款与现金流为何不同 | 候选 |
 | [经营支出策略](figures/spending-strategy.md) | 投入时点和结构能够解释现金差额 | 候选 |
 | [服务可靠性](figures/service-reliability.md) | Analysis 能稳定改善过载、宕机、错误率或延迟表现 | 候选 |
 
