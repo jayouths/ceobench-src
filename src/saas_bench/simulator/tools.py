@@ -3049,7 +3049,8 @@ class AgentTools:
           • days_open: How many days the issue has been open
           • status: Current state - 'open' or 'resolved'
           • resolved_day: Simulation day when resolved (NULL if still open)
-          • resolution_type: How it was resolved - 'ops_resolved' (via operations spend)
+          • resolution_type: How it was closed - 'ops_resolved' (via operations spend)
+            or 'customer_churned' (customer no longer has an active subscription)
 
         PRE-LOADED VARIABLES (use these directly, don't redefine):
         ----------------------------------------------------------
@@ -3091,7 +3092,7 @@ class AgentTools:
         print(rows("SELECT group_id, COUNT(*) as open_issues, AVG(days_open) as avg_days FROM issues WHERE status='open' GROUP BY group_id"))
 
         # Get issue resolution stats
-        print(rows("SELECT group_id, COUNT(*) as resolved, AVG(days_open) as avg_resolution_days FROM issues WHERE status='resolved' GROUP BY group_id"))
+        print(rows("SELECT group_id, resolution_type, COUNT(*) as closed, AVG(days_open) as avg_days_open FROM issues WHERE status='resolved' GROUP BY group_id, resolution_type"))
 
         ENTERPRISE THREAD QUERIES:
         --------------------------

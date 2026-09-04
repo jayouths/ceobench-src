@@ -11,6 +11,7 @@ from saas_bench.agents.bash_agent.analysis.signals import (
     SignalCollector,
     build_analysis_windows,
 )
+from saas_bench.agents.bash_agent.analysis.signal_queries import issue_summary
 from saas_bench.simulator.public_week_snapshot import build_public_week_snapshot
 from tests.support.harness import make_analysis_pipeline
 
@@ -52,6 +53,42 @@ def test_day_zero_signals_use_null_instead_of_false_zero(make_initialized_sim):
     assert signals.finance.runway.cash_runway_days.status is DataStatus.INSUFFICIENT_DATA
     assert signals.customer.issues.open_issues.value == 0
     assert signals.customer.issues.average_open_age_days.status is DataStatus.NOT_APPLICABLE
+
+
+def test_issue_resolution_signals_exclude_churn_closures(make_initialized_sim):
+    conn, _, _ = make_initialized_sim()
+    customer_ids = []
+    for _ in range(2):
+        cursor = conn.execute(
+            """
+            INSERT INTO customers (
+                customer_type, group_id, created_day,
+                steepness_left, steepness_right, c_max, usage_demand,
+                quality_sensitivity, price_sensitivity, willingness_to_pay,
+                usage_scale, patience, seat_count
+            )
+            VALUES ('small', 'S1', 1, 0.01, 0.01, 100.0, 10.0,
+                    0.5, 0.5, 100.0, 1.0, 0.5, 1)
+            """
+        )
+        customer_ids.append(cursor.lastrowid)
+    conn.executemany(
+        """
+        INSERT INTO issues (
+            customer_id, group_id, open_day, days_open,
+            status, resolved_day, resolution_type
+        ) VALUES (?, 'S1', ?, ?, 'resolved', ?, ?)
+        """,
+        [
+            (customer_ids[0], 3, 2, 5, "ops_resolved"),
+            (customer_ids[1], 1, 4, 5, "customer_churned"),
+        ],
+    )
+
+    row = conn.execute(issue_summary(1, 7, -6, 0)).fetchone()
+
+    assert row["current_resolved"] == 1
+    assert row["current_resolution_days"] == pytest.approx(2.0)
 
 
 def test_four_week_signal_pipeline_computes_all_roles(

@@ -127,10 +127,10 @@ def issue_summary(
           COALESCE(SUM(CASE WHEN status = 'open' AND days_open > 14 THEN 1 ELSE 0 END), 0) AS over_14,
           COALESCE(SUM(CASE WHEN open_day BETWEEN {current_start} AND {current_end} THEN 1 ELSE 0 END), 0) AS current_opened,
           COALESCE(SUM(CASE WHEN open_day BETWEEN {previous_start} AND {previous_end} THEN 1 ELSE 0 END), 0) AS previous_opened,
-          COALESCE(SUM(CASE WHEN resolved_day BETWEEN {current_start} AND {current_end} THEN 1 ELSE 0 END), 0) AS current_resolved,
-          COALESCE(SUM(CASE WHEN resolved_day BETWEEN {previous_start} AND {previous_end} THEN 1 ELSE 0 END), 0) AS previous_resolved,
-          AVG(CASE WHEN resolved_day BETWEEN {current_start} AND {current_end} THEN resolved_day - open_day END) AS current_resolution_days,
-          AVG(CASE WHEN resolved_day BETWEEN {previous_start} AND {previous_end} THEN resolved_day - open_day END) AS previous_resolution_days
+          COALESCE(SUM(CASE WHEN resolution_type = 'ops_resolved' AND resolved_day BETWEEN {current_start} AND {current_end} THEN 1 ELSE 0 END), 0) AS current_resolved,
+          COALESCE(SUM(CASE WHEN resolution_type = 'ops_resolved' AND resolved_day BETWEEN {previous_start} AND {previous_end} THEN 1 ELSE 0 END), 0) AS previous_resolved,
+          AVG(CASE WHEN resolution_type = 'ops_resolved' AND resolved_day BETWEEN {current_start} AND {current_end} THEN resolved_day - open_day END) AS current_resolution_days,
+          AVG(CASE WHEN resolution_type = 'ops_resolved' AND resolved_day BETWEEN {previous_start} AND {previous_end} THEN resolved_day - open_day END) AS previous_resolution_days
         FROM issues
     """
 

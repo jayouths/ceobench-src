@@ -289,7 +289,10 @@ TABLE_DOCS = {
             'days_open': 'INTEGER — How many days the issue has been open (increments daily)',
             'status': "TEXT — 'open' or 'resolved'",
             'resolved_day': 'INTEGER — Simulation day when resolved (NULL if still open)',
-            'resolution_type': "TEXT — How resolved: 'ops_resolved' (via operations spend)",
+            'resolution_type': (
+                "TEXT — How closed: 'ops_resolved' (via operations spend) or "
+                "'customer_churned' (customer no longer has an active subscription)"
+            ),
         }
     },
     'ads_revenue': {
@@ -847,9 +850,40 @@ def init_database(db_path: Path) -> sqlite3.Connection:
             days_open INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
             resolved_day INTEGER,
-            resolution_type TEXT,  -- 'ops_resolved', 'auto_resolved', 'outage_caused'
+            resolution_type TEXT,  -- 'ops_resolved' or lifecycle close such as 'customer_churned'
             FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
         );
+
+        -- 客户最后一个有效订阅结束后，工单已失去服务对象，不应继续占用
+        -- 待处理存量。通过触发器覆盖所有流失入口，并保持 issues 与
+        -- customer_state 的工单状态一致。
+        CREATE TRIGGER IF NOT EXISTS close_issues_after_last_subscription_ends
+        AFTER UPDATE OF status ON subscriptions
+        WHEN OLD.status = 'subscribed'
+         AND NEW.status <> 'subscribed'
+         AND NOT EXISTS (
+             SELECT 1
+             FROM subscriptions AS active_subscription
+             WHERE active_subscription.customer_id = NEW.customer_id
+               AND active_subscription.status = 'subscribed'
+               AND active_subscription.end_day IS NULL
+         )
+        BEGIN
+            UPDATE issues
+            SET status = 'resolved',
+                resolved_day = COALESCE(
+                    (SELECT MAX(day) FROM service_day),
+                    NEW.end_day,
+                    NEW.start_day
+                ),
+                resolution_type = 'customer_churned'
+            WHERE customer_id = NEW.customer_id
+              AND status = 'open';
+
+            UPDATE customer_state
+            SET open_issue_days = 0
+            WHERE customer_id = NEW.customer_id;
+        END;
 
         -- =====================================================================
         -- V2.1: Config Overrides Table (queryable by agent)
