@@ -2,10 +2,13 @@
 
 import sqlite3
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 import json
 
 from ..evaluation.schema import initialize_evaluation_schema
+
+if TYPE_CHECKING:
+    from .config import BenchmarkConfig
 
 
 # =====================================================================
@@ -2207,3 +2210,95 @@ def record_config_override(conn: sqlite3.Connection, day: int, tool_name: str,
         "INSERT INTO config_overrides (day, tool_name, setting_type, settings_json) VALUES (?, ?, ?, ?)",
         (day, tool_name, setting_type, json.dumps(settings))
     )
+
+
+_CONFIG_OVERRIDE_FIELDS = {
+    'targeted_ad_spend': {
+        'targeted_spend': 'targeted_ad_spend',
+    },
+    'targeted_ops_spend': {
+        'by_group': 'targeted_ops_spend',
+        'by_plan': 'targeted_ops_spend_by_plan',
+        'by_group_plan': 'targeted_ops_spend_by_group_plan',
+        'by_customer': 'targeted_ops_spend_by_customer',
+    },
+    'targeted_dev_spend': {
+        'targeted_spend': 'targeted_dev_spend',
+    },
+    'ads_strength': {
+        'global': 'ads_strength_global',
+        'by_group': 'ads_strength_by_group',
+        'by_customer': 'ads_strength_by_customer',
+    },
+    'lead_promotion': {
+        'global': 'lead_promotion_global',
+        'by_group': 'lead_promotion_by_group',
+        'by_channel': 'lead_promotion_by_channel',
+        'by_channel_group': 'lead_promotion_by_channel_group',
+    },
+    'promotion': {
+        'global': 'promotion_global',
+        'by_group': 'promotion_by_group',
+        'by_customer': 'promotion_by_customer',
+        'by_group_plan': 'promotion_by_group_plan',
+    },
+}
+_INT_KEYED_CONFIG_FIELDS = {
+    'targeted_ops_spend_by_customer',
+    'ads_strength_by_customer',
+    'promotion_by_customer',
+}
+
+
+def restore_config_overrides(
+    conn: sqlite3.Connection,
+    config: "BenchmarkConfig",
+) -> None:
+    """Restore the latest successful snapshot for every advanced setting."""
+    rows = conn.execute(
+        """
+        SELECT current.id, current.setting_type, current.settings_json
+        FROM config_overrides AS current
+        JOIN (
+            SELECT setting_type, MAX(id) AS latest_id
+            FROM config_overrides
+            GROUP BY setting_type
+        ) AS latest ON latest.latest_id = current.id
+        ORDER BY current.id
+        """
+    ).fetchall()
+
+    for row in rows:
+        setting_type = row['setting_type']
+        field_map = _CONFIG_OVERRIDE_FIELDS.get(setting_type)
+        if field_map is None:
+            raise RuntimeError(
+                f"Cannot restore unknown config override type: {setting_type!r}"
+            )
+        try:
+            snapshot = json.loads(row['settings_json'])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Cannot restore config override row {row['id']}: invalid JSON"
+            ) from exc
+        if not isinstance(snapshot, dict) or set(snapshot) != set(field_map):
+            raise RuntimeError(
+                f"Cannot restore config override row {row['id']}: "
+                f"invalid {setting_type!r} snapshot fields"
+            )
+
+        # JSON 对象的键始终是字符串，客户级配置恢复后必须转回整数 ID，
+        # 否则模拟器使用 customer_id 查询时无法命中。
+        for snapshot_field, config_field in field_map.items():
+            value: Any = snapshot[snapshot_field]
+            if config_field in _INT_KEYED_CONFIG_FIELDS:
+                if not isinstance(value, dict):
+                    raise RuntimeError(
+                        f"Cannot restore config override row {row['id']}: "
+                        f"{snapshot_field!r} must be an object"
+                    )
+                value = {
+                    int(customer_id): amount
+                    for customer_id, amount in value.items()
+                }
+            setattr(config, config_field, value)

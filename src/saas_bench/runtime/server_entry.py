@@ -25,7 +25,11 @@ from typing import Optional
 from numpy.random import Generator, PCG64
 
 from saas_bench.simulator.config import BenchmarkConfig, SCENARIO_PACKS, ScenarioPack
-from saas_bench.simulator.database import get_total_api_costs, init_database
+from saas_bench.simulator.database import (
+    get_total_api_costs,
+    init_database,
+    restore_config_overrides,
+)
 from saas_bench.simulator.simulation import Simulator
 from saas_bench.simulator.customer_llm import CustomerSimulator
 from saas_bench.simulator.tools import AgentTools
@@ -211,6 +215,20 @@ def _restore_simulator_llm_config(config: BenchmarkConfig, meta: dict) -> None:
             setattr(config, attr, simulator_llm[attr])
 
 
+def _build_resumed_config(conn, meta: dict) -> BenchmarkConfig:
+    """Rebuild every persistent simulator setting from the saved session."""
+    config = BenchmarkConfig(
+        seed=meta["seed"],
+        total_days=meta["total_days"],
+        initial_cash=meta["initial_cash"],
+    )
+    _restore_simulator_llm_config(config, meta)
+    # 高级经营配置只存在数据库历史中；启动服务前必须先恢复，
+    # 保证连续运行与断点恢复使用同一组经营决策。
+    restore_config_overrides(conn, config)
+    return config
+
+
 def _create_simulator_llm_client(config: BenchmarkConfig, prefix: str):
     from saas_bench.experiment.llm_provider import create_llm_client
 
@@ -332,12 +350,7 @@ def cmd_start_server(args, base: Path):
 
     # Reconstruct simulator state
     rng = Generator(PCG64(seed))
-    config = BenchmarkConfig(
-        seed=seed,
-        total_days=total_days,
-        initial_cash=meta["initial_cash"],
-    )
-    _restore_simulator_llm_config(config, meta)
+    config = _build_resumed_config(conn, meta)
     meta["simulator_llm"] = _apply_simulator_llm_config(config)
 
     customer_sim = CustomerSimulator(
