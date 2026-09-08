@@ -1244,9 +1244,8 @@ MACRO_SENSITIVITY: Dict[str, Dict[str, float]] = {
 # achieve via dev spending alone (dev spending saturates logarithmically).
 # The agent MUST invest in R&D to keep pace with competitor events.
 #
-# 10 independent tiers — no dependencies. Any tier can be started at any time.
-# Tiers are REPEATABLE — the same tier can be started multiple times.
-# Cost grows linearly ($100K/tier); delay and quality boost grow non-linearly.
+# Configured tiers are independent and repeatable; any tier can start directly.
+# Each tier's cost, duration and quality distribution is defined below.
 # HIGH VARIANCE: both duration and quality are sampled from Normal distributions
 # with large standard deviations (~50% CV for quality, ~40-50% CV for delay).
 #
@@ -1259,7 +1258,7 @@ MACRO_SENSITIVITY: Dict[str, Dict[str, float]] = {
 @dataclass
 class ResearchTier:
     """A research tier the agent can invest in."""
-    tier: int                    # Tier number (1-20)
+    tier: int                    # Configured tier identifier
     name: str                    # Human-readable name
     description: str             # What this tier achieves
     cost: float                  # One-time cost to start ($)
@@ -1267,6 +1266,11 @@ class ResearchTier:
     std_days: int                # Std deviation of duration in days
     mean_quality_boost: float    # Mean permanent quality improvement
     std_quality_boost: float     # Std deviation of quality improvement
+
+
+# 研发抽样的硬下限属于项目规则，不能只隐藏在启动工具实现中。
+MIN_RESEARCH_DURATION_DAYS = 30
+MIN_RESEARCH_QUALITY_BOOST = 0.001
 
 
 RESEARCH_TIERS: List[ResearchTier] = [

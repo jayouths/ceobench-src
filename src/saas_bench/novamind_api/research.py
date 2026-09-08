@@ -7,12 +7,12 @@ from . import _client
 def start_research_project(tier: int) -> Dict:
     """Start an R&D research project.
 
-    20 independent tiers, no dependencies. Tiers 1-10: $100K per tier.
-    Tiers 11-20: frontier moonshots ($1.5M-$15M, longer timelines, higher variance, better quality/$).
-    Duration and quality boost are randomly sampled on start.
+    Tiers are independent and repeatable. Use list_research_projects() for
+    the current costs and duration/quality distributions. Duration and quality
+    boost are randomly sampled when a project starts.
 
     Args:
-        tier: Research tier (1-20).
+        tier: Research tier returned by list_research_projects().
 
     Returns:
         Dict with project start confirmation.

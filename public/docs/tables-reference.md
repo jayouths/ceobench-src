@@ -245,7 +245,7 @@ Cash forecasts submitted by the agent at each next-week call. Populated by the 1
 
 ## `research_projects`
 
-R&D research tier invocations (in-progress, completed). 20 independent tiers, repeatable — same tier can be started multiple times. Tiers 1-10: standard R&D. Tiers 11-20: frontier moonshots (higher cost, longer timelines, more variance, better quality/$).
+R&D research tier invocations (in-progress, completed). 20 independent and repeatable tiers.
 
 | Column | Description |
 |--------|-------------|

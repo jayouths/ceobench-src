@@ -7,7 +7,7 @@ from typing import Dict, Optional, List, Any
 from pathlib import Path
 from numpy.random import Generator, default_rng
 
-from .config import MODEL_TIERS, CAPACITY_TIERS, CUSTOMER_GROUPS, INITIAL_CUSTOMER_GROUPS, AD_CHANNELS, BenchmarkConfig, RESEARCH_TIERS, RESEARCH_TIERS_BY_ID, ResearchTier, REPUTATION_INFLUENCE_MATRIX, REPUTATION_INFLUENCE_RATE, NETWORK_INFLUENCE_MATRIX, DEFAULT_INDIVIDUAL_OPS_SCALE, DEFAULT_ENTERPRISE_OPS_SCALE, ENTERPRISE_RESPONSE_TIMEOUT_DAYS
+from .config import MODEL_TIERS, CAPACITY_TIERS, CUSTOMER_GROUPS, INITIAL_CUSTOMER_GROUPS, AD_CHANNELS, BenchmarkConfig, RESEARCH_TIERS, RESEARCH_TIERS_BY_ID, ResearchTier, REPUTATION_INFLUENCE_MATRIX, REPUTATION_INFLUENCE_RATE, NETWORK_INFLUENCE_MATRIX, DEFAULT_INDIVIDUAL_OPS_SCALE, DEFAULT_ENTERPRISE_OPS_SCALE, ENTERPRISE_RESPONSE_TIMEOUT_DAYS, MIN_RESEARCH_DURATION_DAYS, MIN_RESEARCH_QUALITY_BOOST
 from .database import (
     add_ledger_entry, get_recent_social_posts, get_posts_by_sentiment,
     get_world_context, get_all_world_context,
@@ -666,7 +666,7 @@ TOOL_DOCS = {
                 "social_media_posts": "Customer social media posts. Sentiment is HIDDEN \u2014 must infer from content.",
                 "enterprise_turns": "Enterprise customer negotiation turns. Each row is one turn in a conversation thread.",
                 "notifications": "Agent inbox \u2014 simple string notifications. Columns: notification_id, day, type, message.",
-                "research_projects": "R&D research tiers (20 independent tiers, available/in-progress/completed).",
+                "research_projects": f"R&D research tiers ({len(RESEARCH_TIERS)} independent tiers, available/in-progress/completed).",
                 "ad_channel_leads": "Advertising channel effectiveness history.",
                 "group_info_levels": "Customer group discovery and research levels.",
                 "issues": "Individual customer support issues with lifecycle tracking. Columns: issue_id, customer_id, group_id, open_day, days_open, status ('open'/'resolved'), resolved_day, resolution_type. Query to analyze issue patterns by group, resolution speed, and operational effectiveness."
@@ -1418,14 +1418,14 @@ TOOL_DOCS = {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "tier": {"type": "integer", "description": "Tier number to start (1-20)"}
+                "tier": {"type": "integer", "description": f"Tier number to start (1-{len(RESEARCH_TIERS)})"}
             },
             "required": ["tier"]
         },
         "parameters": {
             "tier": {
                 "type": "integer",
-                "description": "The research tier to start (1-20). Use list_research_projects() to see all tiers and their status."
+                "description": f"The research tier to start (1-{len(RESEARCH_TIERS)}). Use list_research_projects() to see all tiers and their status."
             }
         },
         "returns": {
@@ -1435,11 +1435,11 @@ TOOL_DOCS = {
             "error_funds": "Insufficient cash for tier cost"
         },
         "mechanics": {
-            "cost": "One-time cost deducted immediately. Tiers 1-10: $250K to $2.5M. Tiers 11-20: $3.75M to $37.5M.",
-            "duration": "Sampled from Normal(mean_days, std_days), minimum 30 days. Tiers 1-10: 35d-380d mean (~40-50% CV). Tiers 11-20: 420d-1400d mean (~55-80% CV).",
-            "quality_boost": "Sampled from Normal(mean_quality, std_quality), minimum 0.001. Tiers 1-10: +0.04 to +0.85 mean (~50% CV). Tiers 11-20: +1.1 to +8.0 mean (~55-80% CV). Frontier tiers are cheaper per quality point but much riskier.",
+            "cost": "One-time configured cost deducted immediately. Call list_research_projects() for the exact cost of every tier.",
+            "duration": f"max({MIN_RESEARCH_DURATION_DAYS}, int(Normal(mean_days, std_days))). Call list_research_projects() for each tier's distribution parameters.",
+            "quality_boost": f"max({MIN_RESEARCH_QUALITY_BOOST:g}, Normal(mean_quality_boost, std_quality_boost)). Call list_research_projects() for each tier's distribution parameters.",
             "repeatability": "Same tier can be started multiple times. Each invocation gets independent samples. Only one invocation per tier can be in-progress at a time.",
-            "independence": "20 independent tiers — no dependencies. Any tier can be started at any time."
+            "independence": f"{len(RESEARCH_TIERS)} independent tiers — no dependencies. Any tier can be started at any time."
         },
         "output_schema": {
             "project_id": "str — invocation ID (e.g., 't3_1')",
@@ -1456,46 +1456,43 @@ TOOL_DOCS = {
             "tool": "start_research_project",
             "arguments": {"tier": 1},
         },
-        "sample_io": {
-            "success": [
-                {"label": "Start tier 1", "input": {"tier": 1}, "output": "=== R&D Tier Started ===\nTier 1: Prompt Engineering Optimization (invocation t1_1)\nCost: $100,000 (deducted)\nExpected completion: ~day 42 (42 days)\nExpected quality boost: +0.048\nDescription: Systematic prompt tuning and output consistency improvements"},
-                {"label": "Repeat tier 1", "input": {"tier": 1}, "output": "=== R&D Tier Started ===\nTier 1: Prompt Engineering Optimization (invocation t1_2)\nCost: $100,000 (deducted)\nExpected completion: ~day 185 (33 days)\nExpected quality boost: +0.029\nDescription: Systematic prompt tuning and output consistency improvements"}
-            ],
-            "failure": [
-                {"label": "Already in progress", "input": {"tier": 1}, "output": "Tier 1 ('Prompt Engineering Optimization') already has an in-progress invocation. Wait for it to complete before starting another."},
-                {"label": "Insufficient funds", "input": {"tier": 5}, "output": "Insufficient funds. Tier 5 costs $500,000. Available: $18,000"}
-            ]
-        }
     },
 
     "list_research_projects": {
         "name": "list_research_projects",
         "category": "R&D Research Projects",
-        "description": "List all 10 R&D research tiers with their status. Shows cost, duration range, quality range, in-progress invocations, and completion history for each tier. Tiers are repeatable.",
+        "description": f"List all {len(RESEARCH_TIERS)} R&D research tiers with their status. Shows cost, duration distribution, quality distribution, in-progress invocations, and completion history for each tier. Tiers are repeatable.",
         "inputSchema": {"type": "object", "properties": {}},
         "parameters": {},
         "returns": {
-            "output": "All 10 tiers with: cost, duration mean±std, quality mean±std, current status (not started / in progress / completed Nx with total quality)",
+            "output": f"All {len(RESEARCH_TIERS)} tiers with: cost, duration mean/std/minimum, quality mean/std/minimum, and current status",
             "data": {
-                "tiers": [{"tier": 1, "name": "Prompt Engineering Optimization", "cost": 100000, "mean_days": 35, "mean_quality_boost": 0.04, "in_progress": 0, "completed": 0, "total_quality_boost": 0}]
+                "tiers": [{
+                    "tier": RESEARCH_TIERS[0].tier,
+                    "name": RESEARCH_TIERS[0].name,
+                    "cost": RESEARCH_TIERS[0].cost,
+                    "mean_days": RESEARCH_TIERS[0].mean_days,
+                    "std_days": RESEARCH_TIERS[0].std_days,
+                    "minimum_duration_days": MIN_RESEARCH_DURATION_DAYS,
+                    "mean_quality_boost": RESEARCH_TIERS[0].mean_quality_boost,
+                    "std_quality_boost": RESEARCH_TIERS[0].std_quality_boost,
+                    "minimum_quality_boost": MIN_RESEARCH_QUALITY_BOOST,
+                    "in_progress": 0,
+                    "completed": 0,
+                    "total_quality_boost": 0,
+                }]
             }
         },
         "output_schema": {
-            "tiers": "List[Dict] — each tier: tier (int), name (str), cost (float), mean_days (int), mean_quality_boost (float), in_progress (int), completed (int), total_quality_boost (float)",
+            "tiers": "List[Dict] — each tier includes configured cost, duration distribution, quality distribution, sampling minimums, and current status",
             "_access": "for t in result['tiers']: print(t['tier'], t['name'], t['cost'])"
         },
-        "total_tiers": 20,
+        "total_tiers": len(RESEARCH_TIERS),
         "impact": "Read-only. No cost. Use to plan R&D investments.",
         "example_call": {
             "tool": "list_research_projects",
             "arguments": {},
         },
-        "sample_io": {
-            "success": [
-                {"label": "With mixed statuses", "input": {}, "output": "=== R&D Research Tiers ===\nTiers are repeatable — same tier can be started again after completion.\n\nALL TIERS:\n  Tier 1: Prompt Engineering Optimization — $100,000, ~35d ±12d, +0.04 ±0.02 quality\n    Status: completed 2x, total +0.079 quality\n  Tier 2: Evaluation & Testing Pipeline — $200,000, ~50d ±20d, +0.07 ±0.04 quality\n    Status: IN PROGRESS (~12d left)\n  Tier 3: Caching & Latency Optimization — $300,000, ~70d ±30d, +0.11 ±0.06 quality\n    Status: not started\n  ..."},
-                {"label": "Early game", "input": {}, "output": "=== R&D Research Tiers ===\nTiers are repeatable — same tier can be started again after completion.\n\nALL TIERS:\n  Tier 1: Prompt Engineering Optimization — $100,000, ~35d ±12d, +0.04 ±0.02 quality\n    Status: not started\n  ...\n  Tier 10: Self-Evolving Model Ecosystem — $1,000,000, ~380d ±185d, +0.85 ±0.43 quality\n    Status: not started\n\nAll tiers independent and repeatable. Use start_research_project(tier=N) to begin."}
-            ]
-        }
     },
 
     "list_all_tables": {
@@ -4839,11 +4836,15 @@ os.chdir('{self.workspace_path}')
         Each invocation gets a unique ID and independently sampled duration/quality.
 
         Args:
-            tier: The tier number to start (1-20)
+            tier: A configured research tier number.
         """
         rt = RESEARCH_TIERS_BY_ID.get(tier)
         if not rt:
-            return ToolResult(False, f"Unknown tier {tier}. Valid tiers: 1-20.")
+            return ToolResult(
+                False,
+                f"Unknown tier {tier}. Valid tiers: "
+                f"{min(RESEARCH_TIERS_BY_ID)}-{max(RESEARCH_TIERS_BY_ID)}.",
+            )
 
         # Check if this tier already has an in_progress invocation
         in_progress = self.conn.execute(
@@ -4875,12 +4876,17 @@ os.chdir('{self.workspace_path}')
         research_seed = hash((self.seed, "research", tier, count)) % (2**31)
         research_rng = default_rng(research_seed)
 
-        # Sample duration from Normal(mean_days, std_days), minimum 30 days
-        sampled_duration = max(30, int(research_rng.normal(rt.mean_days, rt.std_days)))
+        # 工期与质量按档位分布抽样，并使用公开的统一下限截断极端低值。
+        sampled_duration = max(
+            MIN_RESEARCH_DURATION_DAYS,
+            int(research_rng.normal(rt.mean_days, rt.std_days)),
+        )
         completion_day = self.current_day + sampled_duration
 
-        # Sample quality boost from Normal(mean_quality_boost, std_quality_boost), minimum 0.001
-        sampled_quality = max(0.001, research_rng.normal(rt.mean_quality_boost, rt.std_quality_boost))
+        sampled_quality = max(
+            MIN_RESEARCH_QUALITY_BOOST,
+            research_rng.normal(rt.mean_quality_boost, rt.std_quality_boost),
+        )
 
         # Create record
         self.conn.execute("""
@@ -4909,7 +4915,7 @@ os.chdir('{self.workspace_path}')
         )
 
     def list_research_projects(self) -> ToolResult:
-        """List all 10 R&D research tiers with their status."""
+        """List every configured R&D research tier with its status."""
         # Get all invocations from DB
         rows = self.conn.execute("SELECT * FROM research_projects ORDER BY tier, started_day").fetchall()
 
@@ -4925,8 +4931,12 @@ os.chdir('{self.workspace_path}')
 
         output = "=== R&D Research Tiers ===\n"
         output += "Tiers are repeatable — same tier can be started again after completion.\n\n"
+        output += (
+            f"Duration = max({MIN_RESEARCH_DURATION_DAYS}, int(Normal(mean, std))); "
+            f"quality = max({MIN_RESEARCH_QUALITY_BOOST:g}, Normal(mean, std)).\n\n"
+        )
 
-        # Show all 10 tiers with their status
+        # 配置列表是档位数量和经济参数的唯一来源。
         output += "ALL TIERS:\n"
         for rt in RESEARCH_TIERS:
             t = rt.tier
@@ -4944,7 +4954,7 @@ os.chdir('{self.workspace_path}')
 
             status_str = " | ".join(status_parts) if status_parts else "not started"
 
-            output += f"  Tier {t}: {rt.name} — ${rt.cost:,.0f}, ~{rt.mean_days}d ±{rt.std_days}d, +{rt.mean_quality_boost:.2f} ±{rt.std_quality_boost:.2f} quality\n"
+            output += f"  Tier {t}: {rt.name} — ${rt.cost:,.0f}, duration Normal({rt.mean_days}, {rt.std_days}), quality Normal({rt.mean_quality_boost:.2f}, {rt.std_quality_boost:.2f})\n"
             output += f"    Status: {status_str}\n"
 
         output += f"\nAll tiers independent and repeatable. Use start_research_project(tier=N) to begin."
@@ -4960,7 +4970,11 @@ os.chdir('{self.workspace_path}')
                 'name': rt.name,
                 'cost': rt.cost,
                 'mean_days': rt.mean_days,
+                'std_days': rt.std_days,
+                'minimum_duration_days': MIN_RESEARCH_DURATION_DAYS,
                 'mean_quality_boost': rt.mean_quality_boost,
+                'std_quality_boost': rt.std_quality_boost,
+                'minimum_quality_boost': MIN_RESEARCH_QUALITY_BOOST,
                 'in_progress': len(in_prog),
                 'completed': len(done),
                 'total_quality_boost': round(total_q, 4),

@@ -11,7 +11,10 @@ from saas_bench.simulator.config import (
     DEFAULT_ENTERPRISE_OPS_SCALE,
     DEFAULT_INDIVIDUAL_OPS_SCALE,
     ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
+    MIN_RESEARCH_DURATION_DAYS,
+    MIN_RESEARCH_QUALITY_BOOST,
     MODEL_TIERS,
+    RESEARCH_TIERS,
 )
 from saas_bench.simulator.tools import TOOL_DOCS, get_tool_descriptions
 from saas_bench.simulator.database import TABLE_DOCS, init_database
@@ -88,6 +91,26 @@ def test_enterprise_timeout_docs_follow_simulator_rule(tmp_path):
     instructions = (output_dir / "simulator-instructions.md").read_text()
     assert f"{timeout}-day timeout" in instructions
     assert "{enterprise_response_timeout_days}" not in instructions
+
+
+def test_research_docs_follow_configured_tiers(tmp_path):
+    """研发工具和公开说明不得再维护另一套档位参数。"""
+    list_docs = TOOL_DOCS["list_research_projects"]
+    assert str(len(RESEARCH_TIERS)) in list_docs["description"]
+    assert list_docs["returns"]["data"]["tiers"][0]["cost"] == (
+        RESEARCH_TIERS[0].cost
+    )
+    mechanics = TOOL_DOCS["start_research_project"]["mechanics"]
+    assert str(MIN_RESEARCH_DURATION_DAYS) in mechanics["duration"]
+    assert f"{MIN_RESEARCH_QUALITY_BOOST:g}" in mechanics["quality_boost"]
+
+    output_dir = tmp_path / "docs"
+    generate_public_docs(output_dir)
+    instructions = (output_dir / "simulator-instructions.md").read_text()
+    assert f"{len(RESEARCH_TIERS)} independent tiers" in instructions
+    assert "{research_tier_count}" not in instructions
+    assert "35–380" not in instructions
+    assert "+0.04 to +0.85" not in instructions
 
 
 def test_complete_public_docs_generator_writes_every_stable_entry(tmp_path):

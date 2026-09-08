@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 import json
 
 from ..evaluation.schema import initialize_evaluation_schema
+from .config import RESEARCH_TIERS
 
 if TYPE_CHECKING:
     from .config import BenchmarkConfig
@@ -227,10 +228,10 @@ TABLE_DOCS = {
         }
     },
     'research_projects': {
-        'description': 'R&D research tier invocations (in-progress, completed). 20 independent tiers, repeatable — same tier can be started multiple times. Tiers 1-10: standard R&D. Tiers 11-20: frontier moonshots (higher cost, longer timelines, more variance, better quality/$).',
+        'description': f'R&D research tier invocations (in-progress, completed). {len(RESEARCH_TIERS)} independent and repeatable tiers.',
         'columns': {
             'project_id': 'TEXT PRIMARY KEY — Unique invocation ID (e.g., "t1_1", "t1_2", "t3_1")',
-            'tier': 'INTEGER — Tier number (1-20)',
+            'tier': f'INTEGER — Tier number (1-{len(RESEARCH_TIERS)})',
             'status': "TEXT — 'in_progress', 'completed'",
             'started_day': 'INTEGER — Day this invocation was started',
             'expected_completion_day': 'INTEGER — Expected completion day (sampled from Normal distribution)',
@@ -760,10 +761,10 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         );
 
 
-        -- R&D Research Tiers (20 independent, repeatable tiers)
+        -- R&D Research Tiers (independent, repeatable tiers)
         CREATE TABLE IF NOT EXISTS research_projects (
             project_id TEXT PRIMARY KEY,          -- Unique invocation ID (e.g., "t1_1", "t3_2")
-            tier INTEGER NOT NULL,                -- Tier number (1-20)
+            tier INTEGER NOT NULL,                -- Configured tier identifier
             status TEXT DEFAULT 'in_progress',    -- 'in_progress', 'completed'
             started_day INTEGER,
             expected_completion_day INTEGER,

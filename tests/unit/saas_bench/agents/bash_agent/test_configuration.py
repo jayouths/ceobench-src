@@ -9,7 +9,10 @@ from saas_bench.agents.bash_agent.agent import BashAgent
 from saas_bench.agents.bash_agent.runner import BashAgentRunner
 
 from saas_bench.experiment.experiment_config import load_experiment_config
-from saas_bench.simulator.config import ENTERPRISE_RESPONSE_TIMEOUT_DAYS
+from saas_bench.simulator.config import (
+    ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
+    RESEARCH_TIERS,
+)
 from tests.support.harness import TEST_CONFIG
 
 
@@ -47,6 +50,18 @@ def test_agent_prompt_uses_enterprise_response_timeout_constant(monkeypatch):
 
     assert f"{ENTERPRISE_RESPONSE_TIMEOUT_DAYS}-day timeout" in prompt
     assert "{enterprise_response_timeout_days}" not in prompt
+
+
+def test_agent_prompt_uses_configured_research_tier_count(monkeypatch):
+    """决策 Agent 主说明中的研发档位数量必须来自真实配置。"""
+    monkeypatch.delenv("ORACLE_MODE", raising=False)
+    agent = BashAgent.__new__(BashAgent)
+    agent.total_days = 497
+
+    prompt = agent._default_system_prompt()
+
+    assert f"{len(RESEARCH_TIERS)} independent tiers" in prompt
+    assert "{research_tier_count}" not in prompt
 
 def test_short_experiment_is_allowed_and_runner_rounds_to_zero(tmp_path):
     text = TEST_CONFIG.read_text()

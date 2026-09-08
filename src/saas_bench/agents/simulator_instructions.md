@@ -85,7 +85,7 @@ Each customer has a personal quality-price curve:
 - Development spending improves quality: global improvement = 0.0045 × ln(1 + global_spend/5000), targeted per-group improvement = 0.0225 × ln(1 + targeted_spend/5000) (5× coefficient, stacks with global)
 - Customer expected quality drifts upward over time (global drift + per-group drift)
 - Competitor events occur randomly and raise customer quality expectations across all groups — these are permanent upward shifts that cannot be reversed, only offset via dev spending or R&D breakthroughs. Different customer groups react to the same competitor event with different magnitudes (some groups are highly trend-sensitive; others — e.g. compliance-bound enterprises — barely move), so the expectation gap widens unevenly across your book. Competitor activity is visible in the social media feed (`get_social_posts`), so you can monitor rival launches/announcements there.
-- R&D research tiers provide permanent quality boosts (10 independent tiers)
+- R&D research tiers provide permanent quality boosts ({research_tier_count} independent tiers)
 
 ### Churn & Plan Changes
 - Billing evaluation every 30 days per customer
@@ -151,11 +151,10 @@ Daily costs: capacity tier + compute (usage × tier cost) + advertising + operat
 
 ## R&D Research Tiers
 
-- 10 independent tiers — no dependencies, any tier can be started at any time
+- {research_tier_count} independent tiers — no dependencies, any tier can be started at any time
 - *Repeatable:* each tier can be started multiple times (one in-progress invocation per tier at a time)
 - Cost grows with tier (use `list_research_projects` to see exact costs per tier)
-- Duration grows non-linearly (35–380 days mean) with high variance (~40-50% CV)
-- Quality boost grows non-linearly (+0.04 to +0.85 mean) with high variance (~50% CV)
+- Duration and quality boost are sampled from tier-specific distributions; use `list_research_projects` for exact parameters and sampling minimums
 - Both duration and quality are sampled from Normal distributions when you start — results vary!
 - R&D provides quality jumps that are *impossible* to achieve through dev spending alone (log saturation)
 - Use `start_research_project(tier=N)` to begin, `list_research_projects` to see all tiers and status

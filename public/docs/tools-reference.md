@@ -32,7 +32,7 @@ and run scripts with `./novamind-operation python <script.py>` or
 | `get_market_overview` | Get an overview of all known customer segments, their info levels, how many segments remain undiscovered, and latest published macroeconomic conditions (ISM PMI — published monthly with ~30 day delay, showing average PMI over the measurement period). |
 | `get_group_insights` | Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() again (costs money, results after delay). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only. |
 | `start_research_project` | Start an R&D research tier. Costs deducted immediately. Completes after sampled duration with sampled quality boost. Tiers are REPEATABLE — same tier can be started again after completion. Only one invocation per tier can be in-progress at a time. Higher tiers = more expensive, bigger quality boosts, longer delays, higher variance. |
-| `list_research_projects` | List all 10 R&D research tiers with their status. Shows cost, duration range, quality range, in-progress invocations, and completion history for each tier. Tiers are repeatable. |
+| `list_research_projects` | List all 20 R&D research tiers with their status. Shows cost, duration distribution, quality distribution, in-progress invocations, and completion history for each tier. Tiers are repeatable. |
 | `list_all_tables` | List all available database tables with their descriptions. Quick overview of what data is available — use describe_tables() for detailed column schemas. |
 | `describe_tables` | Get descriptions of visible columns for specified database tables. Returns column names, types, and descriptions. Useful for understanding schemas before writing SQL queries via python_exec(). |
 | `get_tool_documentation` | Get detailed documentation for environment tools including parameters, examples, and expected outputs. |
@@ -1189,11 +1189,11 @@ Set ADDITIONAL operations spending targeted at specific scopes (group, plan, gro
 
 **Python:** `novamind_api.research.list_research_projects(...)`
 
-List all 10 R&D research tiers with their status. Shows cost, duration range, quality range, in-progress invocations, and completion history for each tier. Tiers are repeatable.
+List all 20 R&D research tiers with their status. Shows cost, duration distribution, quality distribution, in-progress invocations, and completion history for each tier. Tiers are repeatable.
 
 **Returns:**
-- output: All 10 tiers with: cost, duration mean±std, quality mean±std, current status (not started / in progress / completed Nx with total quality)
-- data: {'tiers': [{'tier': 1, 'name': 'Prompt Engineering Optimization', 'cost': 100000, 'mean_days': 35, 'mean_quality_boost': 0.04, 'in_progress': 0, 'completed': 0, 'total_quality_boost': 0}]}
+- output: All 20 tiers with: cost, duration mean/std/minimum, quality mean/std/minimum, and current status
+- data: {'tiers': [{'tier': 1, 'name': 'Prompt Engineering Optimization', 'cost': 166667, 'mean_days': 12, 'std_days': 12, 'minimum_duration_days': 30, 'mean_quality_boost': 0.04, 'std_quality_boost': 0.02, 'minimum_quality_boost': 0.001, 'in_progress': 0, 'completed': 0, 'total_quality_boost': 0}]}
 
 **Impact:** Read-only. No cost. Use to plan R&D investments.
 
