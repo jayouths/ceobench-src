@@ -11,10 +11,12 @@ from saas_bench.simulator.config import (
     DEFAULT_ENTERPRISE_OPS_SCALE,
     DEFAULT_INDIVIDUAL_OPS_SCALE,
     ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
+    INITIAL_CUSTOMER_GROUPS,
     MIN_RESEARCH_DURATION_DAYS,
     MIN_RESEARCH_QUALITY_BOOST,
     MODEL_TIERS,
     RESEARCH_TIERS,
+    get_info_level_noise_label,
 )
 from saas_bench.simulator.tools import TOOL_DOCS, get_tool_descriptions
 from saas_bench.simulator.database import TABLE_DOCS, init_database
@@ -111,6 +113,45 @@ def test_research_docs_follow_configured_tiers(tmp_path):
     assert "{research_tier_count}" not in instructions
     assert "35–380" not in instructions
     assert "+0.04 to +0.85" not in instructions
+
+
+def test_market_tool_examples_match_default_information_levels():
+    """工具示例可以是假设场景，但等级与误差必须符合默认规则。"""
+    config = BenchmarkConfig()
+    level_one = get_info_level_noise_label(config, 1)
+
+    overview_docs = TOOL_DOCS["get_market_overview"]
+    early_game = overview_docs["sample_io"]["success"][0]["output"]
+    for group_id in INITIAL_CUSTOMER_GROUPS:
+        group_line = next(
+            line for line in early_game.splitlines()
+            if line.strip().startswith(f"{group_id}:")
+        )
+        assert f"Level 1 ({level_one})" in group_line
+
+    insight_examples = TOOL_DOCS["get_group_insights"]["sample_io"]["success"]
+    initial_example = next(
+        example for example in insight_examples
+        if example["label"] == "Initial group before research"
+    )
+    assert f"Info Level: 1 ({level_one})" in initial_example["output"]
+    assert "full accuracy" not in str(insight_examples).lower()
+
+    docs_text = json.dumps(
+        {
+            "overview": overview_docs,
+            "insights": TOOL_DOCS["get_group_insights"],
+        },
+        ensure_ascii=False,
+    )
+    noise_labels = {
+        get_info_level_noise_label(config, level) for level in range(1, 6)
+    }
+    for level in range(1, 6):
+        expected = get_info_level_noise_label(config, level)
+        for wrong_label in noise_labels - {expected}:
+            assert f"Level {level} ({wrong_label})" not in docs_text
+            assert f"Info Level: {level} ({wrong_label})" not in docs_text
 
 
 def test_complete_public_docs_generator_writes_every_stable_entry(tmp_path):

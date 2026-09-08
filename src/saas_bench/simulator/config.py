@@ -934,6 +934,18 @@ class BenchmarkConfig:
     # [Calibrated: 2-8 posts every 5-20 days ≈ 4-50 macro posts/month, matching news volume]
 
 
+def get_info_level_noise(config: BenchmarkConfig, info_level: int) -> float:
+    """读取客群信息等级对应的参数误差上限。"""
+    if info_level not in range(1, 6):
+        raise ValueError(f"Info level must be between 1 and 5: {info_level}")
+    return float(getattr(config, f"info_noise_level_{info_level}"))
+
+
+def get_info_level_noise_label(config: BenchmarkConfig, info_level: int) -> str:
+    """统一生成 Agent 可见的误差标签，避免各链路手写百分比。"""
+    return f"±{get_info_level_noise(config, info_level):.0%}"
+
+
 # =============================================================================
 # MACROECONOMIC SENSITIVITY COEFFICIENTS (per customer group)
 # =============================================================================

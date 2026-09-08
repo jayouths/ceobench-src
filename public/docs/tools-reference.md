@@ -731,7 +731,7 @@ Note: All estimates have ±40% uncertainty at Level 2.
 Use research_group('D_S01') to upgrade to Level 3 (±25%).
 - data: {'group_id': 'S1', 'group_name': 'Price-Sensitive Individuals', 'segment': 'Individual', 'info_level': 1, 'noise': '±65%', 'estimates': {'willingness_to_pay': 25.86, 'usage_volume': 91.0, 'quality_floor_q_min': 0.452, 'contract_lockin_aversion': 0.0045, 'market_cap': 802000, 'annual_market_cap_growth_rate': 0.035}, 'network_influence': {'self_referral': 0.0015, 'outgoing': {'S3': 0.002}, 'incoming': {'S2': 0.001}}, 'reputation_influence': {'outgoing': {'E1': 0.36}, 'incoming': {}}, '_enterprise_extra_fields': ['seat_range', 'negotiation_rounds', 'negotiation_pace_days']}
 
-**Impact:** Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() again (costs money, updated after delay). Also shows network and reputation influence relationships between discovered groups.
+**Impact:** Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() again (costs money, updated after delay). Info levels are dynamic; use the current tool result rather than sample values as the source of truth. Also shows network and reputation influence relationships between discovered groups.
 
 **Example:**
 ```json
@@ -755,18 +755,18 @@ Get an overview of all known customer segments, their info levels, how many segm
 - example: === Market Overview ===
 
 Known Segments:
-  S1: Price-Sensitive Individuals — Individual (initial) — Level 4 (±5%)
-  S2: Quality-Focused Individuals — Individual (initial) — Level 4 (±5%)
-  E1: Small Enterprise — Enterprise (initial) — Level 4 (±5%)
-  D_S01: Niche Creators — Individual — Level 2 (±25%)
-  D_E01: Government Agencies — Enterprise — Level 1 (±50%)
+  S1: Price-Sensitive Individuals — Individual (initial) — Level 4 (±15%)
+  S2: Quality-Focused Individuals — Individual (initial) — Level 4 (±15%)
+  E1: Small Enterprise — Enterprise (initial) — Level 4 (±15%)
+  D_S01: Niche Creators — Individual — Level 2 (±40%)
+  D_E01: Government Agencies — Enterprise — Level 1 (±65%)
 
 Undiscovered segments: 15
 Use research_market() to discover new segments ($25K/attempt).
 Use research_group(group_id) to improve accuracy.
 - data: {'known_groups': [{'group_id': 'S1', 'group_name': 'Price-Sensitive Individuals', 'segment': 'Individual', 'info_level': 1, 'noise': '±65%'}], 'undiscovered_count': 14, 'macroeconomic': {'ism_pmi': 54.2, 'change': 1.3, 'phase': 'expansion', 'cycle': 'recovering'}}
 
-**Impact:** Read-only. No cost.
+**Impact:** Read-only. No cost. Info levels are dynamic; use the current tool result rather than sample values as the source of truth.
 
 **Example:**
 ```json

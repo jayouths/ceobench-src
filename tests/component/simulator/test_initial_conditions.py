@@ -1,7 +1,10 @@
 """Regression tests for CEOBench startup state and initial visibility."""
 
 import pytest
-from saas_bench.simulator.config import INITIAL_CUSTOMER_GROUPS
+from saas_bench.simulator.config import (
+    INITIAL_CUSTOMER_GROUPS,
+    get_info_level_noise_label,
+)
 from saas_bench.simulator.database import (
     get_cash,
     get_global_state,
@@ -71,3 +74,30 @@ def test_initial_state_matches_benchmark_defaults(make_initialized_sim):
     assert len(get_undiscovered_groups(conn)) == (
         config.discoverable_individual_count + config.discoverable_enterprise_count
     )
+
+
+def test_initial_market_tools_report_level_one_information(
+    make_initialized_sim,
+    make_agent_tools,
+):
+    """Day 0 的数据库等级和 Agent 实际查询结果必须一致。"""
+    conn, _sim, config = make_initialized_sim()
+    tools = make_agent_tools(conn, config)
+    expected_noise = get_info_level_noise_label(config, 1)
+
+    overview = tools.get_market_overview()
+    assert overview.success
+    assert overview.data["undiscovered_count"] == (
+        config.discoverable_individual_count + config.discoverable_enterprise_count
+    )
+    initial_groups = {
+        group["group_id"]: group for group in overview.data["known_groups"]
+    }
+    for group_id in INITIAL_CUSTOMER_GROUPS:
+        assert initial_groups[group_id]["info_level"] == 1
+        assert initial_groups[group_id]["noise"] == expected_noise
+
+    insight = tools.get_group_insights("S1")
+    assert insight.success
+    assert insight.data["info_level"] == 1
+    assert insight.data["noise"] == expected_noise

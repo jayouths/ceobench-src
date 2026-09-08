@@ -2,7 +2,11 @@
 
 import pytest
 
-from saas_bench.simulator.config import CUSTOMER_GROUPS
+from saas_bench.simulator.config import (
+    BenchmarkConfig,
+    CUSTOMER_GROUPS,
+    get_info_level_noise_label,
+)
 from saas_bench.simulator.database import get_cash, get_group_info_level
 
 
@@ -10,13 +14,16 @@ def test_group_research_is_delayed_and_updates_visibility_on_completion(
     make_initialized_sim,
     make_agent_tools,
 ):
-    conn, sim, config = make_initialized_sim()
+    config = BenchmarkConfig(info_noise_level_2=0.37)
+    conn, sim, config = make_initialized_sim(config=config)
     tools = make_agent_tools(conn, config)
 
     cash_before = get_cash(conn)
     result = tools.research_group("S1", target_level=2)
 
     assert result.success
+    expected_noise = get_info_level_noise_label(config, 2)
+    assert expected_noise in result.message
     assert get_cash(conn) == pytest.approx(cash_before - config.research_cost_level_2)
     assert get_group_info_level(conn, "S1") == 1
 
@@ -47,6 +54,15 @@ def test_group_research_is_delayed_and_updates_visibility_on_completion(
         "SELECT status FROM pending_group_research WHERE group_id = 'S1'"
     ).fetchone()
     assert completed["status"] == "completed"
+
+    notification = conn.execute(
+        """
+        SELECT message FROM notifications
+        WHERE type = 'group_research_complete'
+        ORDER BY notification_id DESC LIMIT 1
+        """
+    ).fetchone()
+    assert expected_noise in notification["message"]
 
     group_cfg = CUSTOMER_GROUPS["S1"]
     snapshot = conn.execute(

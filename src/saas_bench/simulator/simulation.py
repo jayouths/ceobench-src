@@ -37,6 +37,7 @@ from .config import (
     # v2.1: Churn Reason Enum
     ChurnReason,
     compute_quota_quality_factor,
+    get_info_level_noise_label,
     # v2.2: Term sheet options
 )
 from .database import (
@@ -4847,19 +4848,19 @@ class Simulator:
             """, (row['id'],))
 
             # Create inbox notification with results (always — both upgrade and refresh)
+            # 研究通知与查询工具共用同一份等级误差配置。
+            noise_label = get_info_level_noise_label(self.config, to_level)
             if is_refresh:
-                noise_map = {1: '±65%', 2: '±40%', 3: '±25%', 4: '±15%', 5: '±5%'}
                 add_notification(
                     self.conn, self.current_day, 'group_research_complete',
-                    f'Group research complete (refresh): {group_id} — Level {to_level} ({noise_map.get(to_level, "?")}). '
+                    f'Group research complete (refresh): {group_id} — Level {to_level} ({noise_label}). '
                     f'Market insights updated to day {self.current_day} conditions. '
                     f'Use get_group_insights(\'{group_id}\') to see updated estimates.'
                 )
             else:
-                noise_map = {1: '±65%', 2: '±40%', 3: '±25%', 4: '±15%', 5: '±5%'}
                 add_notification(
                     self.conn, self.current_day, 'group_research_complete',
-                    f'Group research complete: {group_id} — upgraded to Level {to_level} ({noise_map.get(to_level, "?")}). '
+                    f'Group research complete: {group_id} — upgraded to Level {to_level} ({noise_label}). '
                     f'Market insights updated to day {self.current_day} conditions. '
                     f'Use get_group_insights(\'{group_id}\') to see updated estimates.'
                 )

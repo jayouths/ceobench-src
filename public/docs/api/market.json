@@ -106,7 +106,7 @@
       "properties": {}
     },
     "returns": {
-      "example": "=== Market Overview ===\n\nKnown Segments:\n  S1: Price-Sensitive Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b15%)\n  S2: Quality-Focused Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b15%)\n  E1: Small Enterprise \u2014 Enterprise (initial) \u2014 Level 4 (\u00b15%)\n  D_S01: Niche Creators \u2014 Individual \u2014 Level 2 (\u00b125%)\n  D_E01: Government Agencies \u2014 Enterprise \u2014 Level 1 (\u00b150%)\n\nUndiscovered segments: 15\nUse research_market() to discover new segments ($25K/attempt).\nUse research_group(group_id) to improve accuracy.",
+      "example": "=== Market Overview ===\n\nKnown Segments:\n  S1: Price-Sensitive Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  S2: Quality-Focused Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  E1: Small Enterprise \u2014 Enterprise (initial) \u2014 Level 4 (\u00b115%)\n  D_S01: Niche Creators \u2014 Individual \u2014 Level 2 (\u00b140%)\n  D_E01: Government Agencies \u2014 Enterprise \u2014 Level 1 (\u00b165%)\n\nUndiscovered segments: 15\nUse research_market() to discover new segments ($25K/attempt).\nUse research_group(group_id) to improve accuracy.",
       "data": {
         "known_groups": [
           {
@@ -133,7 +133,7 @@
       "_access": "for g in result['known_groups']: print(g['group_id'], g['group_name'])",
       "_warning": "Key is 'known_groups' NOT 'groups'"
     },
-    "impact": "Read-only. No cost.",
+    "impact": "Read-only. No cost. Info levels are dynamic; use the current tool result rather than sample values as the source of truth.",
     "example_call": {
       "tool": "get_market_overview",
       "arguments": {}
@@ -216,7 +216,7 @@
       "reputation_influence": "Dict \u2014 keys: outgoing (Dict[str,float]), incoming (Dict[str,float]) \u2014 influence weights 0-1",
       "_access": "result['estimates']['willingness_to_pay'] \u2192 group's WTP"
     },
-    "impact": "Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() again (costs money, updated after delay). Also shows network and reputation influence relationships between discovered groups.",
+    "impact": "Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() again (costs money, updated after delay). Info levels are dynamic; use the current tool result rather than sample values as the source of truth. Also shows network and reputation influence relationships between discovered groups.",
     "example_call": {
       "tool": "get_group_insights",
       "arguments": {

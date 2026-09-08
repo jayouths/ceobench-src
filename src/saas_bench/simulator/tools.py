@@ -7,7 +7,7 @@ from typing import Dict, Optional, List, Any
 from pathlib import Path
 from numpy.random import Generator, default_rng
 
-from .config import MODEL_TIERS, CAPACITY_TIERS, CUSTOMER_GROUPS, INITIAL_CUSTOMER_GROUPS, AD_CHANNELS, BenchmarkConfig, RESEARCH_TIERS, RESEARCH_TIERS_BY_ID, ResearchTier, REPUTATION_INFLUENCE_MATRIX, REPUTATION_INFLUENCE_RATE, NETWORK_INFLUENCE_MATRIX, DEFAULT_INDIVIDUAL_OPS_SCALE, DEFAULT_ENTERPRISE_OPS_SCALE, ENTERPRISE_RESPONSE_TIMEOUT_DAYS, MIN_RESEARCH_DURATION_DAYS, MIN_RESEARCH_QUALITY_BOOST
+from .config import MODEL_TIERS, CAPACITY_TIERS, CUSTOMER_GROUPS, INITIAL_CUSTOMER_GROUPS, AD_CHANNELS, BenchmarkConfig, RESEARCH_TIERS, RESEARCH_TIERS_BY_ID, ResearchTier, REPUTATION_INFLUENCE_MATRIX, REPUTATION_INFLUENCE_RATE, NETWORK_INFLUENCE_MATRIX, DEFAULT_INDIVIDUAL_OPS_SCALE, DEFAULT_ENTERPRISE_OPS_SCALE, ENTERPRISE_RESPONSE_TIMEOUT_DAYS, MIN_RESEARCH_DURATION_DAYS, MIN_RESEARCH_QUALITY_BOOST, get_info_level_noise, get_info_level_noise_label
 from .database import (
     add_ledger_entry, get_recent_social_posts, get_posts_by_sentiment,
     get_world_context, get_all_world_context,
@@ -1311,7 +1311,7 @@ TOOL_DOCS = {
         "inputSchema": {"type": "object", "properties": {}},
         "parameters": {},
         "returns": {
-            "example": "=== Market Overview ===\n\nKnown Segments:\n  S1: Price-Sensitive Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b15%)\n  S2: Quality-Focused Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b15%)\n  E1: Small Enterprise \u2014 Enterprise (initial) \u2014 Level 4 (\u00b15%)\n  D_S01: Niche Creators \u2014 Individual \u2014 Level 2 (\u00b125%)\n  D_E01: Government Agencies \u2014 Enterprise \u2014 Level 1 (\u00b150%)\n\nUndiscovered segments: 15\nUse research_market() to discover new segments ($25K/attempt).\nUse research_group(group_id) to improve accuracy.",
+            "example": "=== Market Overview ===\n\nKnown Segments:\n  S1: Price-Sensitive Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  S2: Quality-Focused Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  E1: Small Enterprise \u2014 Enterprise (initial) \u2014 Level 4 (\u00b115%)\n  D_S01: Niche Creators \u2014 Individual \u2014 Level 2 (\u00b140%)\n  D_E01: Government Agencies \u2014 Enterprise \u2014 Level 1 (\u00b165%)\n\nUndiscovered segments: 15\nUse research_market() to discover new segments ($25K/attempt).\nUse research_group(group_id) to improve accuracy.",
             "data": {
                 "known_groups": [{"group_id": "S1", "group_name": "Price-Sensitive Individuals", "segment": "Individual", "info_level": 1, "noise": "±65%"}],
                 "undiscovered_count": 14,
@@ -1325,15 +1325,15 @@ TOOL_DOCS = {
             "_access": "for g in result['known_groups']: print(g['group_id'], g['group_name'])",
             "_warning": "Key is 'known_groups' NOT 'groups'"
         },
-        "impact": "Read-only. No cost.",
+        "impact": "Read-only. No cost. Info levels are dynamic; use the current tool result rather than sample values as the source of truth.",
         "example_call": {
             "tool": "get_market_overview",
             "arguments": {},
         },
         "sample_io": {
             "success": [
-                {"label": "Early game (6 groups)", "input": {}, "output": "=== Market Overview ===\n\nKnown Segments (6):\n  S1: Price-Sensitive Individuals — Individual (initial) — Level 5 (±5%)\n  S2: Quality-Focused Individuals — Individual (initial) — Level 5 (±5%)\n  S3: Balanced Individuals — Individual (initial) — Level 5 (±5%)\n  E1: Small Enterprise — Enterprise (initial) — Level 5 (±5%)\n  E2: Mid Enterprise — Enterprise (initial) — Level 5 (±5%)\n  E3: Large Enterprise — Enterprise (initial) — Level 5 (±5%)\n\nUndiscovered segments: 20\nUse research_market() to discover ($25K, 30% success).\n\n--- Macroeconomic Conditions ---\n  ISM PMI: 54.2  (expansion)\n  Change: +1.3  |  Cycle: recovering\n  Economy in expansion phase. Business confidence rising.\nQuery macroeconomic_conditions table for historical PMI data."},
-                {"label": "After discoveries", "input": {}, "output": "=== Market Overview ===\n\nKnown Segments (8):\n  S1-S3, E1-E3: (initial groups, Level 5)\n  D_S01: Niche Creators — Individual — Level 2 (±40%)\n  D_E01: Government Agencies — Enterprise — Level 1 (±65%)\n\nUndiscovered segments: 18\n\n--- Macroeconomic Conditions ---\n  ISM PMI: 47.8  (contraction)\n  Change: -2.1  |  Cycle: declining\n  Economy contracting. Budget tightening across sectors.\nQuery macroeconomic_conditions table for historical PMI data."}
+                {"label": "Early game (6 groups)", "input": {}, "output": "=== Market Overview ===\n\nKnown Segments (6):\n  S1: Price-Sensitive Individuals — Individual (initial) — Level 1 (±65%)\n  S2: Quality-Focused Individuals — Individual (initial) — Level 1 (±65%)\n  S3: Balanced Individuals — Individual (initial) — Level 1 (±65%)\n  E1: Small Enterprise — Enterprise (initial) — Level 1 (±65%)\n  E2: Mid Enterprise — Enterprise (initial) — Level 1 (±65%)\n  E3: Large Enterprise — Enterprise (initial) — Level 1 (±65%)\n\nUndiscovered segments: 20\nUse research_market() to discover ($25K, 30% success).\n\n--- Macroeconomic Conditions ---\n  ISM PMI: 54.2  (expansion)\n  Change: +1.3  |  Cycle: recovering\n  Economy in expansion phase. Business confidence rising.\nQuery macroeconomic_conditions table for historical PMI data."},
+                {"label": "After discoveries, before group upgrades", "input": {}, "output": "=== Market Overview ===\n\nKnown Segments (8):\n  S1-S3, E1-E3: (initial groups, Level 1, ±65%)\n  D_S01: Niche Creators — Individual — Level 2 (±40%)\n  D_E01: Government Agencies — Enterprise — Level 1 (±65%)\n\nUndiscovered segments: 18\n\n--- Macroeconomic Conditions ---\n  ISM PMI: 47.8  (contraction)\n  Change: -2.1  |  Cycle: declining\n  Economy contracting. Budget tightening across sectors.\nQuery macroeconomic_conditions table for historical PMI data."}
             ]
         }
     },
@@ -1393,7 +1393,7 @@ TOOL_DOCS = {
             "reputation_influence": "Dict — keys: outgoing (Dict[str,float]), incoming (Dict[str,float]) — influence weights 0-1",
             "_access": "result['estimates']['willingness_to_pay'] → group's WTP"
         },
-        "impact": "Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() again (costs money, updated after delay). Also shows network and reputation influence relationships between discovered groups.",
+        "impact": "Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() again (costs money, updated after delay). Info levels are dynamic; use the current tool result rather than sample values as the source of truth. Also shows network and reputation influence relationships between discovered groups.",
         "example_call": {
             "tool": "get_group_insights",
             "arguments": {"group_id": "D_S01"},
@@ -1401,8 +1401,8 @@ TOOL_DOCS = {
         "sample_io": {
             "success": [
                 {"label": "Individual group", "input": {"group_id": "D_S01"}, "output": "=== Group Insights: Niche Creators (D_S01) ===\nSegment: Individual\nInfo Level: 2 (±40%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$92/mo\n  Usage volume:          ~38 units/day\n  Quality expectations:  ~0.61\n  Contract lock-in aversion: ~0.0072/month\n  Market cap:            ~185,000\n  Growth:                ~9.2%/year\n\nNetwork Influence:\n  Self-referral: ~4.2 leads/1000 subs/day\n  Outgoing: → D_S10: ~1.8, → S1: ~0.9\n  Incoming: ← S1: ~1.3"},
-                {"label": "Enterprise group", "input": {"group_id": "E1"}, "output": "=== Group Insights: Small Enterprise (E1) ===\nSegment: Enterprise\nInfo Level: 5 (±5%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$22/seat/mo\n  Seat range:            10-50 seats\n  Usage volume:          ~25 units/day/seat\n  Quality expectations:  ~0.65\n  Contract lock-in aversion: ~0.0048/month\n  Market cap:            ~45,000\n  Decision rounds:       ~3\n  Avg response days:     ~2.5\n\nNetwork Influence:\n  Self-referral: ~2.1 leads/1000 subs/day\n  Outgoing: → E2: ~1.2, → S1: ~0.5"},
-                {"label": "Initial group at full accuracy", "input": {"group_id": "S1"}, "output": "=== Group Insights: Price-Sensitive Individuals (S1) ===\nSegment: Individual\nInfo Level: 5 (±5%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$45/mo\n  Usage volume:          ~20 units/day\n  Quality expectations:  ~0.50\n  Contract lock-in aversion: ~0.0078/month\n  Market cap:            ~500,000\n  Growth:                ~5.0%/year"}
+                {"label": "Enterprise group after Level 5 research", "input": {"group_id": "E1"}, "output": "=== Group Insights: Small Enterprise (E1) ===\nSegment: Enterprise\nInfo Level: 5 (±5%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$22/seat/mo\n  Seat range:            10-50 seats\n  Usage volume:          ~25 units/day/seat\n  Quality expectations:  ~0.65\n  Contract lock-in aversion: ~0.0048/month\n  Market cap:            ~45,000\n  Decision rounds:       ~3\n  Avg response days:     ~2.5\n\nNetwork Influence:\n  Self-referral: ~2.1 leads/1000 subs/day\n  Outgoing: → E2: ~1.2, → S1: ~0.5"},
+                {"label": "Initial group before research", "input": {"group_id": "S1"}, "output": "=== Group Insights: Price-Sensitive Individuals (S1) ===\nSegment: Individual\nInfo Level: 1 (±65%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$45/mo\n  Usage volume:          ~20 units/day\n  Quality expectations:  ~0.50\n  Contract lock-in aversion: ~0.0078/month\n  Market cap:            ~500,000\n  Growth:                ~5.0%/year"}
             ],
             "failure": [
                 {"label": "Unknown group", "input": {"group_id": "X99"}, "output": "Group 'X99' not found. Known groups: S1, S2, S3, E1, E2, E3, D_S01, D_E01"},
@@ -4409,8 +4409,6 @@ os.chdir('{self.workspace_path}')
         }
         cost = cost_map[target_level]
         delay = delay_map[target_level]
-        noise_map = {1: '±65%', 2: '±40%', 3: '±25%', 4: '±15%', 5: '±5%'}
-
         cash = get_cash(self.conn)
         if cash < cost:
             return ToolResult(False, f"Insufficient funds. Research Level {target_level} costs ${cost:,.0f}. Available: ${cash:,.0f}")
@@ -4468,7 +4466,8 @@ os.chdir('{self.workspace_path}')
                 f"Expected completion: day {expected_completion_day} (~{delay} days)\n"
                 f"Results will be delivered to your inbox when complete.\n"
                 f"Market insights will be updated to conditions at completion time.\n"
-                f"New parameter accuracy will be: {noise_map[target_level]}",
+                f"New parameter accuracy will be: "
+                f"{get_info_level_noise_label(self.config, target_level)}",
                 data={'group_id': group_id, 'new_level': target_level,
                       'expected_completion_day': expected_completion_day, 'is_refresh': False}
             )
@@ -4491,7 +4490,7 @@ os.chdir('{self.workspace_path}')
             group_cfg = CUSTOMER_GROUPS.get(gid)
             if not group_cfg:
                 continue
-            noise = {1: '±65%', 2: '±40%', 3: '±25%', 4: '±15%', 5: '±5%'}.get(level, '?')
+            noise = get_info_level_noise_label(self.config, level)
             segment = 'Enterprise' if group_cfg.is_enterprise else 'Individual'
             initial = '' if gid.startswith('D_') else ' (initial)'
             output += f"  {gid}: {group_cfg.group_name} — {segment}{initial} — Level {level} ({noise})\n"
@@ -4524,7 +4523,7 @@ os.chdir('{self.workspace_path}')
             group_cfg = CUSTOMER_GROUPS.get(gid)
             if not group_cfg:
                 continue
-            noise = {1: '±65%', 2: '±40%', 3: '±25%', 4: '±15%', 5: '±5%'}.get(level, '?')
+            noise = get_info_level_noise_label(self.config, level)
             segment = 'Enterprise' if group_cfg.is_enterprise else 'Individual'
             known_groups.append({
                 'group_id': gid,
@@ -4573,15 +4572,8 @@ os.chdir('{self.workspace_path}')
         if not group_cfg:
             return ToolResult(False, f"Unknown group: '{group_id}'")
 
-        # Noise percentage based on info level
-        noise_map = {
-            1: self.config.info_noise_level_1,
-            2: self.config.info_noise_level_2,
-            3: self.config.info_noise_level_3,
-            4: self.config.info_noise_level_4,
-            5: self.config.info_noise_level_5,
-        }
-        noise_pct = noise_map.get(info_level, 0.65)
+        # 真实数值和可见标签必须使用同一份实验配置。
+        noise_pct = get_info_level_noise(self.config, info_level)
 
         # Use snapshot from last research_group call (frozen market data)
         # If no snapshot exists (e.g. initial groups before any research), use current data
@@ -4618,7 +4610,7 @@ os.chdir('{self.workspace_path}')
             return true_val * (1 + noise)
 
         # Build insights with ONLY realistically observable parameters
-        noise_label = f"±{int(noise_pct * 100)}%"
+        noise_label = get_info_level_noise_label(self.config, info_level)
         segment = 'Enterprise' if group_cfg.is_enterprise else 'Individual'
 
         output = f"=== Group Insights: {group_cfg.group_name} ({group_id}) ===\n"
