@@ -3,7 +3,6 @@
 Run: uv run python -m pytest tests/test_docs_coverage.py -v
 """
 import json
-import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -20,17 +19,6 @@ from saas_bench.runtime.docs_generator import (
     generate_public_docs,
 )
 from saas_bench.runtime._public_cli import _build_parser, get_cli_docs
-
-
-# ── Full hidden tables list (must be kept in sync with tools.py _HIDDEN_TABLES) ──
-_HIDDEN_TABLES = {
-    'events', 'api_costs', 'customer_state', 'group_reputation',
-    'group_awareness', 'reputation_history', 'global_state', 'feature_tests',
-    'test_assignments', 'customer_personas', 'customer_persona_map',
-    'group_characteristics', 'enterprise_thread_counter', 'world_context',
-    'pending_group_research', 'group_parameters', 'competitor_events',
-    'group_insight_snapshots', 'global_drift_state',
-}
 
 
 def test_cli_docs_follow_public_parser():
@@ -108,44 +96,6 @@ def test_no_stale_excluded_tools():
         assert tool_name in TOOL_DOCS, (
             f"Tool '{tool_name}' in _EXCLUDED_TOOLS but not in TOOL_DOCS. Remove it or add the tool."
         )
-
-
-def test_no_hidden_tables_in_table_docs():
-    """Hidden tables must NOT have TABLE_DOCS entries (agent can't query them)."""
-    hidden_with_docs = [t for t in TABLE_DOCS if t in _HIDDEN_TABLES]
-    assert not hidden_with_docs, (
-        f"Hidden tables have TABLE_DOCS entries (remove them): {hidden_with_docs}"
-    )
-
-
-def test_all_queryable_tables_have_docs():
-    """Every non-hidden, non-internal table in the DB must have a TABLE_DOCS entry."""
-    tmpdir = tempfile.mkdtemp()
-    try:
-        conn = init_database(Path(tmpdir) / 'test.db')
-        tables = [
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-            ).fetchall()
-        ]
-        conn.close()
-
-        missing = []
-        for t in tables:
-            if t.startswith(('_hidden', '_eval', '_tmp', 'sqlite_')):
-                continue
-            if t in _HIDDEN_TABLES:
-                continue
-            if t not in TABLE_DOCS:
-                missing.append(t)
-
-        assert not missing, (
-            f"Queryable tables missing TABLE_DOCS entries: {missing}. "
-            f"Add them to database.py TABLE_DOCS or add to _HIDDEN_TABLES in tools.py."
-        )
-    finally:
-        import shutil
-        shutil.rmtree(tmpdir)
 
 
 def test_table_docs_match_real_tables():

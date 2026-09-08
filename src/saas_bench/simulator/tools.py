@@ -724,7 +724,7 @@ TOOL_DOCS = {
                 "code": "# Comprehensive business health check\nprint('=== Business Health ===')\n\n# Subscribers\nsubs = row('SELECT COUNT(*) FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL')[0]\nmrr = row('SELECT SUM(effective_price) FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL')[0] or 0\nprint(f'Subscribers: {subs}')\nprint(f'MRR: ${mrr:,.0f}')\n\n# By plan\nprint('\\nBy Plan:')\nfor plan, cnt in rows('SELECT plan, COUNT(*) FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL GROUP BY plan'):\n    print(f'  {plan}: {cnt}')\n\n# Cash balance\ncash = row('SELECT SUM(amount) FROM ledger')[0] or 0\nprint(f'\\nCash: ${cash:,.0f}')"
             },
         },
-        "internal_notes": "Hidden columns (_HIDDEN_COLUMNS) are stripped from query results at runtime. Schema introspection (PRAGMA, sqlite_master) is blocked. _HIDDEN_TABLES can't be queried. pandas DataFrames also have hidden columns dropped before display.",
+        "internal_notes": "Only tables registered in TABLE_DOCS are queryable. Hidden source columns are blocked at runtime, and schema introspection (PRAGMA, sqlite_master) is unavailable.",
         "sample_io": {
             "success": [
                 {"label": "Subscriber count", "input": {"code": "print(row('SELECT COUNT(*) FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL')[0])"}, "output": "145"},
@@ -3190,28 +3190,8 @@ def _scrubbed_import(name, *args, **kwargs):
 import builtins
 builtins.__import__ = _scrubbed_import
 
-# Hidden tables that agent cannot query at all
-_HIDDEN_TABLES = {{
-    'events',             # Internal shock/event tracking
-    'api_costs',          # Meta-simulation API cost tracking
-    'customer_state',     # Internal satisfaction/relationship state
-    'group_reputation',   # Internal reputation tracking
-    'group_awareness',    # Internal awareness tracking
-    'reputation_history', # Internal reputation history
-    'global_state',       # Internal simulation state
-    'feature_tests',      # Internal feature test tracking
-    'test_assignments',   # Internal test assignments
-    'customer_personas',  # Internal persona templates
-    'customer_persona_map', # Internal persona mapping
-    'group_characteristics', # Internal group characteristics
-    'enterprise_thread_counter',  # Internal thread ID counter
-    'world_context',      # Internal world context
-    'pending_group_research', # Internal async research tracking
-    'group_parameters',       # V2.1: Internal preference drift tracking (agent must infer from behavior)
-    'competitor_events',      # V4: Hidden — agent should not see internal competitor boost mechanics
-    'group_insight_snapshots', # Internal: frozen market data for get_group_insights (accessed via tool)
-    'global_drift_state',           # Internal: global quality drift accumulator
-}}
+# TABLE_DOCS 是公开表的唯一登记入口；未登记实体表默认不可读取。
+_PUBLIC_TABLES = set({repr(sorted(TABLE_DOCS))})
 
 # Hidden columns that agent should not see (latent customer attributes, internal simulation params)
 # These are internal parameters used by the simulation - agent must infer customer behavior from observable data
@@ -3335,15 +3315,20 @@ def _filter_hidden(result, description, query=None):
     return tuple(v for i, v in enumerate(result) if i not in hidden_indices)
 
 def _public_query_authorizer(action_code, table_name, column_name, database_name, trigger_name):
-    \"\"\"Prevent a public SQL query from reading hidden source columns.\"\"\"
+    \"\"\"Enforce public table, hidden column, and read-only query policy.\"\"\"
     if (
         action_code in _QUERY_CONNECTION_ACTIONS
         or action_code in _QUERY_MUTATION_ACTIONS
     ):
         return sqlite3.SQLITE_DENY
-    if action_code != sqlite3.SQLITE_READ or not table_name or not column_name:
+    if action_code != sqlite3.SQLITE_READ or not table_name:
         return sqlite3.SQLITE_OK
     table = table_name.lower()
+    if table not in _PUBLIC_TABLES:
+        # SQLite 提供真实源表名，SQL 别名和嵌套查询无法绕过。
+        return sqlite3.SQLITE_DENY
+    if not column_name:
+        return sqlite3.SQLITE_OK
     column = column_name.lower()
     if column in _HIDDEN_COLUMNS or column in _TABLE_HIDDEN_COLUMNS.get(table, set()):
         # 在源字段读取阶段替换为 NULL，防止别名、聚合和嵌套查询绕过结果列过滤。
@@ -3360,22 +3345,6 @@ def _is_schema_query(query):
     ]
     return any(p in q for p in blocked_patterns)
 
-def _references_hidden_table(query):
-    \"\"\"Check if query references any hidden table.\"\"\"
-    q = query.lower()
-    # 私有事实表统一按前缀隔离，新增表时无需再维护逐表黑名单。
-    import re
-    private_table = re.search(r'\\b_(?:eval|hidden)_[a-z0-9_]+\\b', q)
-    if private_table:
-        return private_table.group(0)
-    for table in _HIDDEN_TABLES:
-        # Check for table name with common SQL patterns
-        # Match: FROM table, JOIN table, INTO table, UPDATE table, table., "table"
-        pattern = r'\\b' + re.escape(table.lower()) + r'\\b'
-        if re.search(pattern, q):
-            return table
-    return None
-
 def _filter_schema_result(result, query):
     \"\"\"Filter hidden columns from schema query results.\"\"\"
     if not result:
@@ -3389,15 +3358,8 @@ def _filter_schema_result(result, query):
             return [r for r in result if r[1] not in hidden]
     return result
 
-# Valid tables the agent can query
-_VALID_TABLES = {{
-    'customers', 'subscriptions', 'ledger', 'service_day', 'config_history',
-    'social_media_posts', 'enterprise_turns', 'notifications',
-    'ad_channel_leads', 'ads_revenue', 'agent_social_media_posts',
-    'config_overrides', 'daily_usage', 'group_info_levels',
-    'issues', 'macroeconomic_conditions', 'research_projects', 'segment_discovery',
-    'predictions'
-}}
+# Helpful error messages use the same public table registry as authorization.
+_VALID_TABLES = _PUBLIC_TABLES
 
 # Table columns for helpful error messages (generated at sandbox creation time)
 _TABLE_COLUMNS = {repr({table_name: list(table_info['columns'].keys()) for table_name, table_info in TABLE_DOCS.items()})}
@@ -3454,10 +3416,6 @@ class _FilteredConnection:
         # Block schema introspection queries
         if _is_schema_query(query):
             raise PermissionError("Schema introspection is not allowed. Use the documented tables and columns.")
-        # Block queries to hidden tables
-        hidden_table = _references_hidden_table(query)
-        if hidden_table:
-            raise PermissionError(f"Table '{{hidden_table}}' is internal/hidden. Use the documented tables: {{', '.join(sorted(_VALID_TABLES))}}")
         try:
             cursor = self._conn.execute(query, params)
             return _FilteredCursor(cursor, query=query)
@@ -3467,9 +3425,6 @@ class _FilteredConnection:
     def executemany(self, query, params_list):
         if _is_schema_query(query):
             raise PermissionError("Schema introspection is not allowed.")
-        hidden_table = _references_hidden_table(query)
-        if hidden_table:
-            raise PermissionError(f"Table '{{hidden_table}}' is internal/hidden.")
         try:
             return self._conn.executemany(query, params_list)
         except Exception as e:
@@ -3492,9 +3447,6 @@ class _FilteredCursor:
     def execute(self, query, params=()):
         if _is_schema_query(query):
             raise PermissionError("Schema introspection is not allowed. Use the documented tables and columns.")
-        hidden_table = _references_hidden_table(query)
-        if hidden_table:
-            raise PermissionError(f"Table '{{hidden_table}}' is internal/hidden. Use documented tables only.")
         try:
             self._cursor.execute(query, params)
             self._desc = self._cursor.description

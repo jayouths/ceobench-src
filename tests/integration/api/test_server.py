@@ -160,6 +160,7 @@ def test_api_blocks_all_evaluation_fact_tables(
     make_initialized_sim, table_name, monkeypatch
 ):
     conn, _, _ = make_initialized_sim()
+    conn.execute(f"CREATE TABLE IF NOT EXISTS {table_name} (secret TEXT)")
     monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
     server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
     responses = []
@@ -208,12 +209,56 @@ def test_api_blocks_all_hidden_prefix_tables(
     make_initialized_sim, table_name, monkeypatch
 ):
     conn, _, _ = make_initialized_sim()
+    conn.execute(f"CREATE TABLE IF NOT EXISTS {table_name} (secret TEXT)")
     monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
     server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
     responses = []
     handler = _APIHandler.__new__(_APIHandler)
     handler.server = SimpleNamespace(_api_server=server)
     handler._read_body = lambda: {"sql": f"SELECT * FROM {table_name}"}
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 403
+    assert payload == {
+        "success": False,
+        "error": f"Table '{table_name}' is not accessible.",
+    }
+
+
+@pytest.mark.parametrize(
+    ("table_name", "sql"),
+    [
+        ("_rng_states", "SELECT COUNT(*) FROM _rng_states"),
+        (
+            "global_drift_state",
+            (
+                "WITH drift AS (SELECT global_q_bias_total AS leaked "
+                "FROM global_drift_state) SELECT AVG(leaked) FROM drift"
+            ),
+        ),
+        (
+            "group_insight_snapshots",
+            (
+                "SELECT AVG(snapshot_c_max) AS real_budget "
+                "FROM group_insight_snapshots"
+            ),
+        ),
+    ],
+)
+def test_api_blocks_every_undocumented_internal_table(
+    make_initialized_sim, monkeypatch, table_name, sql
+):
+    conn, simulator, _ = make_initialized_sim()
+    simulator.save_rng_states()
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {"sql": sql}
     handler._send_json = lambda data, status=200: responses.append((data, status))
 
     handler._handle_query()

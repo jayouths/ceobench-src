@@ -37,27 +37,10 @@ class _ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStr
     daemon_threads = True
 
 
-# ---- Hidden columns / tables (same policy as python_exec sandbox) ----
+# ---- Public query policy (same policy as python_exec sandbox) ----
 
-_HIDDEN_TABLES: Set[str] = {
-    'events',             # Internal shock/event tracking
-    'api_costs',          # Meta-simulation API cost tracking
-    'customer_state',     # Internal satisfaction/relationship state
-    'group_reputation',   # Internal reputation tracking
-    'group_awareness',    # Internal awareness tracking
-    'reputation_history', # Internal reputation history
-    'global_state',       # Internal simulation state
-    'feature_tests',      # Internal feature test tracking
-    'test_assignments',   # Internal test assignments
-    'customer_personas',  # Internal persona templates
-    'customer_persona_map', # Internal persona mapping
-    'group_characteristics', # Internal group characteristics
-    'enterprise_thread_counter',  # Internal thread ID counter
-    'world_context',      # Internal world context
-    'pending_group_research', # Internal async research tracking
-    'group_parameters',       # V2.1: Internal preference drift tracking
-    'competitor_events',      # V4: Hidden — agent should not see internal competitor boost mechanics
-}
+# TABLE_DOCS 是公开表的唯一登记入口；未登记实体表默认属于模拟器内部状态。
+_PUBLIC_TABLES: Set[str] = set(TABLE_DOCS)
 
 _HIDDEN_COLUMNS: Set[str] = {
     # Social media hidden columns
@@ -164,18 +147,6 @@ def _is_schema_query(query: str) -> bool:
     return any(p in q for p in blocked_patterns)
 
 
-def _references_hidden_table(query: str) -> Optional[str]:
-    """识别普通 Agent 不可读取的模拟器内部表和实验事实表。"""
-    q = query.lower()
-    private_table = re.search(r'\b_(?:eval|hidden)_[a-z0-9_]+\b', q)
-    if private_table:
-        return private_table.group(0)
-    for table in _HIDDEN_TABLES:
-        if re.search(r'\b' + re.escape(table) + r'\b', q):
-            return table
-    return None
-
-
 def _get_effective_hidden(sql: str = None) -> Set[str]:
     """Get the effective set of hidden columns, including table-specific ones."""
     hidden = set(_HIDDEN_COLUMNS)
@@ -194,35 +165,50 @@ def _strip_hidden_columns(rows: List[Dict], columns: List[str], sql: str = None)
     return [{k: row[k] for k in visible if k in row} for row in rows]
 
 
-def _public_query_authorizer(
-    action_code: int,
-    table_name: Optional[str],
-    column_name: Optional[str],
-    database_name: Optional[str],
-    trigger_name: Optional[str],
-) -> int:
-    """Protect hidden columns and shared connection state during SQL queries."""
-    if (
-        action_code in _QUERY_CONNECTION_ACTIONS
-        or action_code in _QUERY_MUTATION_ACTIONS
-    ):
-        return sqlite3.SQLITE_DENY
+class _QueryAuthorizer:
+    """Enforce table, column, write, and connection policy inside SQLite."""
 
-    # Oracle 只放宽数据可见性，不获得修改数据库或连接状态的权限。
-    if _ORACLE_MODE:
+    def __init__(self, *, oracle_mode: bool):
+        self.oracle_mode = oracle_mode
+        self.denied_table: Optional[str] = None
+
+    def __call__(
+        self,
+        action_code: int,
+        table_name: Optional[str],
+        column_name: Optional[str],
+        database_name: Optional[str],
+        trigger_name: Optional[str],
+    ) -> int:
+        if (
+            action_code in _QUERY_CONNECTION_ACTIONS
+            or action_code in _QUERY_MUTATION_ACTIONS
+        ):
+            return sqlite3.SQLITE_DENY
+
+        # Oracle 只放宽数据可见性，不获得修改数据库或连接状态的权限。
+        if self.oracle_mode:
+            return sqlite3.SQLITE_OK
+
+        if action_code != sqlite3.SQLITE_READ or not table_name:
+            return sqlite3.SQLITE_OK
+
+        table = table_name.lower()
+        if table not in _PUBLIC_TABLES:
+            # 在 SQLite 解析出的真实源表上校验，别名、子查询和 CTE 无法绕过。
+            self.denied_table = table
+            return sqlite3.SQLITE_DENY
+
+        if not column_name:
+            return sqlite3.SQLITE_OK
+
+        column = column_name.lower()
+        hidden_for_table = _TABLE_HIDDEN_COLUMNS.get(table, set())
+        if column in _HIDDEN_COLUMNS or column in hidden_for_table:
+            # 在 SQLite 读取源字段时替换为 NULL，别名、聚合、子查询和 CTE
+            # 都无法取得真实值；同时保留 SELECT * 查询公开列的可用性。
+            return sqlite3.SQLITE_IGNORE
         return sqlite3.SQLITE_OK
-
-    if action_code != sqlite3.SQLITE_READ or not table_name or not column_name:
-        return sqlite3.SQLITE_OK
-
-    table = table_name.lower()
-    column = column_name.lower()
-    hidden_for_table = _TABLE_HIDDEN_COLUMNS.get(table, set())
-    if column in _HIDDEN_COLUMNS or column in hidden_for_table:
-        # 在 SQLite 读取源字段时替换为 NULL，别名、聚合、子查询和 CTE
-        # 都无法取得真实值；同时保留 SELECT * 查询公开列的可用性。
-        return sqlite3.SQLITE_IGNORE
-    return sqlite3.SQLITE_OK
 
 
 # Build table→columns mapping for helpful error messages (exclude hidden columns)
@@ -616,6 +602,7 @@ class _APIHandler(BaseHTTPRequestHandler):
         Applies hidden column/table filtering so the agent cannot
         access internal simulation state.
         """
+        query_authorizer: Optional[_QueryAuthorizer] = None
         try:
             body = self._read_body()
             sql = body.get('sql', '').strip()
@@ -630,17 +617,6 @@ class _APIHandler(BaseHTTPRequestHandler):
                     "error": "Schema introspection queries (PRAGMA, sqlite_master) are not allowed. Read docs/tables/ for table schemas.",
                 }, 403)
                 return
-
-            # 普通 Agent 只能读取公开经营数据；Oracle 用于白盒上界实验，
-            # 可以读取模拟器内部状态和 _eval_ 实验事实。
-            if not _ORACLE_MODE:
-                hidden_table = _references_hidden_table(sql)
-                if hidden_table:
-                    self._send_json({
-                        "success": False,
-                        "error": f"Table '{hidden_table}' is not accessible.",
-                    }, 403)
-                    return
 
             # Enforce a row limit to prevent 60MB+ JSON responses from
             # killing the agent's bash command timeout.  If the user's SQL
@@ -659,7 +635,8 @@ class _APIHandler(BaseHTTPRequestHandler):
                     # 子查询或 CTE 等正常查询能力。
                     server.conn.execute("PRAGMA query_only = ON")
                     query_only_enabled = True
-                    server.conn.set_authorizer(_public_query_authorizer)
+                    query_authorizer = _QueryAuthorizer(oracle_mode=_ORACLE_MODE)
+                    server.conn.set_authorizer(query_authorizer)
                     authorizer_installed = True
                     cursor = server.conn.execute(sql)
                     columns = [desc[0] for desc in cursor.description] if cursor.description else []
@@ -731,7 +708,12 @@ class _APIHandler(BaseHTTPRequestHandler):
         except sqlite3.Error as e:
             # SQL errors are deliberately surfaced to the agent (the helper
             # rewrites them into typed hints — no source paths or tracebacks).
-            if "not authorized" in str(e).lower():
+            if query_authorizer and query_authorizer.denied_table:
+                self._send_json({
+                    "success": False,
+                    "error": f"Table '{query_authorizer.denied_table}' is not accessible.",
+                }, 403)
+            elif "not authorized" in str(e).lower():
                 self._send_json({
                     "success": False,
                     "error": "Write queries are not allowed. Use the novamind_api for all actions.",

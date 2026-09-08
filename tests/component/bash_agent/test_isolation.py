@@ -115,7 +115,7 @@ def test_isolated_bash_agent_requires_bubblewrap(tmp_path, monkeypatch):
         executor._build_bwrap_cmd("true", str(workspace), {"PATH": "/usr/bin"})
 
 
-def test_python_exec_direct_database_fallback_hides_aliased_columns(
+def test_python_exec_direct_database_fallback_enforces_query_policy(
     make_initialized_sim,
     make_agent_tools,
 ):
@@ -128,16 +128,21 @@ def test_python_exec_direct_database_fallback_hides_aliased_columns(
         """
 print(row('SELECT c_max AS leaked_c_max FROM customers LIMIT 1'))
 try:
+    row('SELECT COUNT(*) FROM global_drift_state')
+except Exception as exc:
+    print('private:', str(exc))
+try:
     conn.execute('WITH chosen AS (SELECT 1) UPDATE config_history SET price_A = 999')
 except Exception as exc:
-    print(str(exc))
+    print('write:', str(exc))
 """,
         timeout_seconds=30,
     )
 
     assert result.success is True
     assert result.message.splitlines()[0] == "(None,)"
-    assert "not authorized" in result.message.lower()
+    assert "private: sql error: not authorized" in result.message.lower()
+    assert "write: sql error: not authorized" in result.message.lower()
 
 @pytest.mark.slow
 @pytest.mark.linux
