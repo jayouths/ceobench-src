@@ -43,7 +43,7 @@ TABLE_DOCS = {
             'group_id': "TEXT — Customer segment group identifier (e.g., 'S1', 'S2', 'E1')",
         },
         'internal_columns': {
-            'seat_count': 'REAL — Seat count (internal float for drift accumulation; agent sees floored value on subscriptions table)',
+            'seat_count': 'REAL — Internal float accumulator for seat drift; the effective integer value is mirrored to subscriptions',
             'steepness_left': 'REAL — Sigmoid curve steepness for left half (price < c_max/2)',
             'steepness_right': 'REAL — Sigmoid curve steepness for right half (price >= c_max/2)',
             'c_max': 'REAL — Hard budget constraint (price at which Q_required reaches q_max)',
@@ -83,7 +83,7 @@ TABLE_DOCS = {
             'end_day': 'INTEGER — Day subscription ended (NULL if active)',
             'status': "TEXT — 'lead', 'subscribed', 'cancelled', 'lost'",
             'billing_day_mod30': 'INTEGER — Billing cycle day (0-29)',
-            'seat_count': 'INTEGER — Number of seats for this subscription',
+            'seat_count': 'INTEGER — Current effective seats for this subscription',
             'pending_plan': "TEXT — Scheduled plan change (NULL if none)",
             'pending_price': 'REAL — Negotiated price for pending plan change',
             'contract_months': 'INTEGER — Commitment length in months (1=month-to-month)',
@@ -420,7 +420,7 @@ def init_database(db_path: Path) -> sqlite3.Connection:
             -- Usage tracking per billing period
             daily_usage_rate REAL NOT NULL DEFAULT 0,  -- Sampled at billing period start, constant for the month
             billing_period_usage REAL NOT NULL DEFAULT 0,  -- Cumulative usage this billing period
-            seat_count INTEGER NOT NULL DEFAULT 1,  -- Floored seat count (from customer's float seat_count at subscription time)
+            seat_count INTEGER NOT NULL DEFAULT 1,  -- Current effective seats, synchronized from the customer's float drift accumulator
             -- V2.1: Contract-based enterprise subscriptions
             contract_months INTEGER NOT NULL DEFAULT 1,  -- Commitment length in months (1=month-to-month)
             contract_end_day INTEGER,  -- Day when contract expires (NULL for month-to-month/small customers)
@@ -1139,12 +1139,13 @@ def get_mrr(conn: sqlite3.Connection) -> float:
 
     Uses effective_price (listed_price - promotion) for accurate revenue.
     For individual customers (small): effective_price is the total price.
-    For enterprise customers (large): effective_price is per-seat, so multiply by seat_count.
+    For enterprise customers (large): effective_price is per-seat, so multiply by
+    the effective integer seat count stored on the subscription.
     """
     result = conn.execute("""
         SELECT COALESCE(SUM(
             CASE WHEN c.customer_type = 'large'
-                 THEN s.effective_price * CAST(c.seat_count AS INTEGER)
+                 THEN s.effective_price * s.seat_count
                  ELSE s.effective_price
             END
         ), 0)

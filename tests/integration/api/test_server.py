@@ -14,7 +14,9 @@ import pytest
 
 from saas_bench.runtime.api_server import NovaMindAPIServer, _APIHandler
 from saas_bench.agents.bash_agent.analysis.signals import SignalCollector
+from saas_bench.simulator.database import get_mrr
 from saas_bench.simulator.public_week_snapshot import build_public_week_snapshot
+from saas_bench.simulator.tools import _PUBLIC_CURRENT_MRR_SQL
 
 from saas_bench.runtime import _public_cli
 
@@ -337,6 +339,57 @@ def test_api_select_star_keeps_public_columns_and_removes_hidden_columns(
     assert "seat_count" not in payload["columns"]
     assert "c_max" not in payload["rows"][0]
     assert "seat_count" not in payload["rows"][0]
+
+
+def test_public_mrr_query_counts_enterprise_subscription_seats(
+    make_initialized_sim, monkeypatch
+):
+    conn, simulator, _ = make_initialized_sim()
+    individual_id = simulator._create_customer(
+        simulator._generate_customer_from_group("S1")
+    )
+    enterprise_id = simulator._create_customer(
+        simulator._generate_customer_from_group("E1")
+    )
+    conn.execute(
+        "UPDATE customers SET customer_type = 'large', seat_count = 37.8 "
+        "WHERE customer_id = ?",
+        (enterprise_id,),
+    )
+    conn.executemany(
+        """
+        INSERT INTO subscriptions (
+            customer_id, plan, listed_price, effective_price,
+            start_day, status, billing_day_mod30, seat_count
+        ) VALUES (?, ?, ?, ?, 0, 'subscribed', 0, ?)
+        """,
+        [
+            (individual_id, "A", 20.0, 20.0, 1),
+            (enterprise_id, "B", 80.0, 80.0, 10),
+        ],
+    )
+    conn.commit()
+
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {"sql": _PUBLIC_CURRENT_MRR_SQL}
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 200
+    assert payload["success"] is True
+    # 个人订阅按账户计价，企业订阅按公开的订阅席位快照计价。
+    assert payload["rows"] == [{"mrr": 20.0 + 80.0 * 10}]
+    assert get_mrr(conn) == 20.0 + 80.0 * 10
+    assert (
+        build_public_week_snapshot(conn, 0).current_state.enterprise_subscribed_seats
+        == 10
+    )
 
 
 def test_oracle_can_read_hidden_source_column_with_alias(

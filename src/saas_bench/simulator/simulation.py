@@ -607,8 +607,32 @@ class Simulator:
                     )
                 """, (effective_rate, group_id))
 
+        # customers 保留浮点数以累积缓慢漂移；对经营生效的整数席位
+        # 必须在同一次漂移中立即同步，避免 Dashboard、Agent 和评价口径分叉。
+        self._sync_active_subscription_seat_counts()
+
         # L6: Cleanup temp table
         self.conn.execute("DROP TABLE IF EXISTS _tmp_active_subs")
+
+    def _sync_active_subscription_seat_counts(self) -> None:
+        """将企业客户的浮点漂移结果转为当前生效的整数订阅席位。"""
+        self.conn.execute("""
+            UPDATE subscriptions AS s
+            SET seat_count = (
+                SELECT CAST(c.seat_count AS INTEGER)
+                FROM customers AS c
+                WHERE c.customer_id = s.customer_id
+            )
+            WHERE s.status = 'subscribed'
+              AND s.end_day IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM customers AS c
+                  WHERE c.customer_id = s.customer_id
+                    AND c.customer_type = 'large'
+                    AND c.seat_count IS NOT NULL
+              )
+        """)
 
     def _apply_monthly_leads_noise(self):
         """v3.4aj: perturb every (channel, group) leads_per_1000_dollars entry with N(0, 0.05*v).
@@ -1201,10 +1225,9 @@ class Simulator:
         # Shared quality adjustment (grows with development spending + research)
         q_shared_bonus = get_global_state(self.conn, 'q_shared_bonus', 0.0)
 
-        # Get customer's usage demand, group, and state
+        # Get customer group and relationship state.
         customer = self.conn.execute("""
-            SELECT c.usage_demand, c.seat_count, c.group_id,
-                   cs.relationship
+            SELECT c.group_id, cs.relationship
             FROM customers c
             LEFT JOIN customer_state cs ON c.customer_id = cs.customer_id
             WHERE c.customer_id = ?
@@ -1218,8 +1241,6 @@ class Simulator:
         days_subscribed = (self.current_day - subscription['start_day']) if subscription else 0
         daily_usage_rate = subscription['daily_usage_rate'] if subscription else 0.0
 
-        usage_demand = customer['usage_demand'] if customer else 50.0
-        seat_count = int(customer['seat_count'] or 1)
         relationship = customer['relationship'] if customer and customer['relationship'] else 0.5
 
         # Today's quota comparison uses the sampled billing-period demand rate
@@ -1798,7 +1819,7 @@ class Simulator:
                    s.promotion, s.first_billing_done, s.start_day,
                    s.daily_usage_rate,
                    c.steepness_left, c.steepness_right, c.c_max, c.group_id,
-                   c.usage_demand, c.seat_count, c.ads_quality_sensitivity,
+                   c.usage_demand, s.seat_count, c.ads_quality_sensitivity,
                    cs.current_steepness_left, cs.current_steepness_right, cs.current_c_max,
                    cs.open_issue_days,
                    COALESCE(cs.current_q_max, c.q_max) as q_max,
@@ -2758,7 +2779,7 @@ class Simulator:
                    cs.current_steepness_left, cs.current_steepness_right, cs.current_c_max,
                    c.steepness_left, c.steepness_right, c.c_max,
                    cs.relationship, c.group_id,
-                   c.usage_demand, c.seat_count,
+                   c.usage_demand, s.seat_count,
                    c.customer_type, s.contract_months, s.contract_end_day,
                    c.ads_quality_sensitivity, c.ads_return_sensitivity,
                    COALESCE(cs.current_q_max, c.q_max) as q_max,
@@ -3193,7 +3214,7 @@ class Simulator:
             # Fallback if cache not populated (shouldn't happen in normal step_day flow)
             all_subscribers = self.conn.execute("""
                 SELECT cs.customer_id, cs.satisfaction, cs.open_issue_days, cs.relationship,
-                       c.group_id, c.seat_count, s.plan
+                       c.group_id, s.seat_count, s.plan
                 FROM customer_state cs
                 JOIN subscriptions s ON cs.customer_id = s.customer_id
                 JOIN customers c ON cs.customer_id = c.customer_id
@@ -3427,7 +3448,7 @@ class Simulator:
         # L3: Fetch all columns needed for inline quality computation (no per-customer DB queries)
         subscribers = self.conn.execute("""
             SELECT s.customer_id, s.plan, s.listed_price, s.effective_price, s.start_day, s.daily_usage_rate,
-                   c.group_id, c.usage_demand, c.seat_count, c.ads_quality_sensitivity,
+                   c.group_id, c.usage_demand, s.seat_count, c.ads_quality_sensitivity,
                    c.steepness_left, c.steepness_right, c.c_max,
                    cs.current_steepness_left, cs.current_steepness_right, cs.current_c_max,
                    cs.open_issue_days,
@@ -4478,7 +4499,7 @@ class Simulator:
         mrr = self.conn.execute("""
             SELECT COALESCE(SUM(
                 CASE WHEN c.customer_type = 'large'
-                     THEN s.effective_price * CAST(c.seat_count AS INTEGER)
+                     THEN s.effective_price * s.seat_count
                      ELSE s.effective_price
                 END
             ), 0)
@@ -5839,15 +5860,16 @@ Guidelines:
 
         # 1) Batch-fetch subscription info for all customers
         sub_rows = chunked_select(self.conn, """
-            SELECT customer_id, plan, listed_price, contract_end_day, start_day
+            SELECT customer_id, plan, listed_price, contract_end_day, start_day,
+                   seat_count
             FROM subscriptions
             WHERE customer_id IN ({ph}) AND status = 'subscribed' AND end_day IS NULL
         """, unique_cids)
         sub_map = {row['customer_id']: row for row in sub_rows}
 
-        # 2) Batch-fetch customer info (seat_count, group_id, c_max)
+        # 2) Batch-fetch customer info (group_id, c_max)
         cust_rows = chunked_select(self.conn, """
-            SELECT c.customer_id, c.seat_count, c.group_id, c.c_max,
+            SELECT c.customer_id, c.group_id, c.c_max,
                    cs.current_c_max, cs.shock_event_id
             FROM customers c
             LEFT JOIN customer_state cs ON c.customer_id = cs.customer_id
@@ -5920,7 +5942,7 @@ Guidelines:
                 cancel_updates.append((end_day, churn_reason_val, customer_id))
                 dead_thread_ids.append(thread_id)
 
-                seat_count = int(cust['seat_count'] or 0) if cust else 0
+                seat_count = int(sub['seat_count'] or 0) if sub else 0
                 group_id = cust['group_id'] if cust else None
 
                 relationship_updates.append((customer_id,))
@@ -6184,16 +6206,12 @@ Guidelines:
                     ORDER BY end_day DESC LIMIT 1
                 """, (customer_id,)).fetchone()
                 days_subscribed = (self.current_day - sub_info['start_day']) if sub_info else 30
-                cust_seat = self.conn.execute(
-                    "SELECT seat_count FROM customers WHERE customer_id = ?",
-                    (customer_id,)
-                ).fetchone()
                 enterprise_churn_events.append({
                     'customer_id': customer_id,
                     'group_id': group_id,
                     'satisfaction': 0.2,
                     'days_subscribed': days_subscribed,
-                    'seat_count': int(cust_seat['seat_count'] or 1) if cust_seat else 1,
+                    'seat_count': seat_count,
                     'post_type': 'negotiation_churn',
                     'event_context': {
                         'event_type': f'{state.thread_type}_ghost',
@@ -6243,16 +6261,12 @@ Guidelines:
                     ORDER BY end_day DESC LIMIT 1
                 """, (customer_id,)).fetchone()
                 days_subscribed = (self.current_day - sub_info['start_day']) if sub_info else 30
-                cust_seat = self.conn.execute(
-                    "SELECT seat_count FROM customers WHERE customer_id = ?",
-                    (customer_id,)
-                ).fetchone()
                 enterprise_churn_events.append({
                     'customer_id': customer_id,
                     'group_id': group_id,
                     'satisfaction': 0.2,
                     'days_subscribed': days_subscribed,
-                    'seat_count': int(cust_seat['seat_count'] or 1) if cust_seat else 1,
+                    'seat_count': seat_count,
                     'post_type': 'renegotiation_churn',
                     'event_context': {
                         'event_type': 'renegotiation_ghost',
@@ -6452,7 +6466,7 @@ Guidelines:
         newly_suspended_customers = set()
         # Get all enterprise customers with subscriptions and asymmetric sigmoid curve params
         enterprises = self.conn.execute("""
-            SELECT c.customer_id, c.group_id, CAST(c.seat_count AS INTEGER) as seat_count,
+            SELECT c.customer_id, c.group_id, s.seat_count,
                    COALESCE(cs.current_q_max, c.q_max) as q_max,
                    COALESCE(cs.current_q_min, c.q_min) as q_min,
                    c.steepness_left as initial_steepness_left, c.steepness_right as initial_steepness_right,
@@ -6715,7 +6729,7 @@ Guidelines:
 
         # Find enterprise subscribers with contracts expiring within lead_days
         approaching = self.conn.execute("""
-            SELECT c.customer_id, c.group_id, CAST(c.seat_count AS INTEGER) as seat_count,
+            SELECT c.customer_id, c.group_id, s.seat_count,
                    s.plan, s.listed_price, s.contract_months, s.contract_end_day
             FROM customers c
             JOIN subscriptions s ON c.customer_id = s.customer_id
@@ -6785,7 +6799,7 @@ Guidelines:
 
         # Also check for expired contracts with no renewal — auto-churn
         expired = self.conn.execute("""
-            SELECT c.customer_id, c.group_id, CAST(c.seat_count AS INTEGER) as seat_count,
+            SELECT c.customer_id, c.group_id, s.seat_count,
                    s.plan, s.listed_price, s.contract_months, s.contract_end_day
             FROM customers c
             JOIN subscriptions s ON c.customer_id = s.customer_id
@@ -6918,7 +6932,7 @@ Guidelines:
             SELECT s.subscription_id, s.customer_id, s.listed_price,
                    s.promotion, s.effective_price,
                    s.plan, s.pending_plan, s.pending_price, s.start_day,
-                   c.customer_type, c.usage_scale, c.seat_count, c.group_id,
+                   c.customer_type, c.usage_scale, s.seat_count, c.group_id,
                    c.c_max,
                    cs.current_c_max,
                    s.first_billing_done
@@ -7138,7 +7152,7 @@ Guidelines:
         if has_any_ads:
             # Fetch all active subscribers with ads return sensitivity
             ad_subs = self.conn.execute("""
-                SELECT s.customer_id, c.group_id, c.ads_return_sensitivity, c.seat_count
+                SELECT s.customer_id, c.group_id, c.ads_return_sensitivity, s.seat_count
                 FROM subscriptions s
                 JOIN customers c ON s.customer_id = c.customer_id
                 WHERE s.status = 'subscribed' AND s.end_day IS NULL
@@ -7430,7 +7444,7 @@ Guidelines:
         """).fetchone()[0]
 
         total_enterprise_seats = self.conn.execute("""
-            SELECT COALESCE(SUM(CAST(c.seat_count AS INTEGER)), 0) FROM subscriptions s
+            SELECT COALESCE(SUM(s.seat_count), 0) FROM subscriptions s
             JOIN customers c ON s.customer_id = c.customer_id
             WHERE s.status = 'subscribed' AND s.end_day IS NULL
               AND c.customer_type = 'large'
@@ -7438,7 +7452,7 @@ Guidelines:
 
         # Count enterprise deals that converted to subscribed today
         new_enterprise_seats_today = self.conn.execute("""
-            SELECT COALESCE(SUM(CAST(c.seat_count AS INTEGER)), 0) FROM subscriptions s
+            SELECT COALESCE(SUM(s.seat_count), 0) FROM subscriptions s
             JOIN customers c ON s.customer_id = c.customer_id
             WHERE s.status = 'subscribed' AND s.start_day = ?
               AND c.customer_type = 'large'

@@ -61,6 +61,20 @@ def _render_table_doc(table_name: str, max_cols: int | None = None) -> str:
     return "\n".join(lines)
 
 
+# Agent 只能使用 subscriptions 中公开的整数席位快照计算 MRR，
+# 不得引用 customers.seat_count 中用于模拟器漂移的隐藏状态。
+_PUBLIC_MRR_VALUE_SQL = (
+    "CASE WHEN c.customer_type = 'large' "
+    "THEN s.effective_price * s.seat_count "
+    "ELSE s.effective_price END"
+)
+_PUBLIC_CURRENT_MRR_SQL = (
+    f"SELECT COALESCE(SUM({_PUBLIC_MRR_VALUE_SQL}), 0) AS mrr "
+    "FROM subscriptions s JOIN customers c ON s.customer_id = c.customer_id "
+    "WHERE s.status = 'subscribed' AND s.end_day IS NULL"
+)
+
+
 # =====================================================================
 # TOOL_DOCS: Canonical documentation for all agent tools.
 # Used by get_tool_documentation() to render tool docs.
@@ -637,7 +651,7 @@ TOOL_DOCS = {
             ],
             "revenue_analysis": [
                 "# Current MRR",
-                "row('SELECT SUM(effective_price) FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL')[0]",
+                f'row("{_PUBLIC_CURRENT_MRR_SQL}")[0]',
                 "",
                 "# Revenue by day (last 7 days)",
                 "rows('SELECT day, SUM(amount) as rev FROM ledger WHERE category=\"subscription_payment\" AND day > (SELECT MAX(day)-7 FROM ledger) GROUP BY day ORDER BY day')",
@@ -663,7 +677,7 @@ TOOL_DOCS = {
             ],
             "enterprise_threads": [
                 "# Open negotiation threads (latest turn per thread)",
-                "rows('SELECT et.thread_id, et.closed, et.close_reason, et.turn_number, et.seat_count, c.email FROM enterprise_turns et JOIN customers c ON et.customer_id=c.customer_id WHERE et.message_id = (SELECT MAX(et2.message_id) FROM enterprise_turns et2 WHERE et2.thread_id=et.thread_id) AND et.closed = 0 AND et._internal_status IS NULL')",
+                "rows(\"SELECT et.thread_id, et.closed, et.close_reason, et.turn_number, s.seat_count, c.email FROM enterprise_turns et JOIN customers c ON et.customer_id = c.customer_id JOIN subscriptions s ON et.customer_id = s.customer_id WHERE et.message_id = (SELECT MAX(et2.message_id) FROM enterprise_turns et2 WHERE et2.thread_id = et.thread_id) AND et.closed = 0 AND et._internal_status IS NULL AND ((et.thread_type = 'new_lead' AND s.status = 'lead') OR (et.thread_type != 'new_lead' AND s.status = 'subscribed' AND s.end_day IS NULL))\")",
                 "",
                 "# Thread turn history",
                 "rows('SELECT message_id, turn_number, day, sender, message_text, offer_json, seat_count, closed, close_reason FROM enterprise_turns WHERE thread_id=? ORDER BY turn_number', (thread_id,))"
@@ -689,10 +703,10 @@ TOOL_DOCS = {
                 "rows('SELECT acquisition_source, COUNT(*) as cnt FROM customers GROUP BY acquisition_source ORDER BY cnt DESC')",
                 "",
                 "# Active subscribers by acquisition source",
-                "rows('SELECT c.acquisition_source, COUNT(*) as subs, SUM(s.effective_price) as mrr FROM customers c JOIN subscriptions s ON c.customer_id=s.customer_id WHERE s.status=\"subscribed\" AND s.end_day IS NULL GROUP BY c.acquisition_source ORDER BY mrr DESC')",
+                f'rows("SELECT c.acquisition_source, COUNT(*) AS subs, SUM({_PUBLIC_MRR_VALUE_SQL}) AS mrr FROM customers c JOIN subscriptions s ON c.customer_id = s.customer_id WHERE s.status = \'subscribed\' AND s.end_day IS NULL GROUP BY c.acquisition_source ORDER BY mrr DESC")',
                 "",
                 "# Which ad channels bring the most valuable customers?",
-                "rows('SELECT c.acquisition_source, AVG(s.effective_price) as avg_price, COUNT(*) as cnt FROM customers c JOIN subscriptions s ON c.customer_id=s.customer_id WHERE s.status=\"subscribed\" AND s.end_day IS NULL GROUP BY c.acquisition_source HAVING cnt > 5 ORDER BY avg_price DESC')",
+                f'rows("SELECT c.acquisition_source, AVG({_PUBLIC_MRR_VALUE_SQL}) AS avg_account_mrr, COUNT(*) AS cnt FROM customers c JOIN subscriptions s ON c.customer_id = s.customer_id WHERE s.status = \'subscribed\' AND s.end_day IS NULL GROUP BY c.acquisition_source HAVING cnt > 5 ORDER BY avg_account_mrr DESC")',
                 "",
                 "# Retention by acquisition source (lower cancelled ratio = better)",
                 "rows('SELECT c.acquisition_source, SUM(CASE WHEN s.status=\"cancelled\" THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as cancel_pct FROM customers c JOIN subscriptions s ON c.customer_id=s.customer_id GROUP BY c.acquisition_source ORDER BY cancel_pct')"
@@ -721,17 +735,35 @@ TOOL_DOCS = {
         "example_call": {
             "tool": "python_exec",
             "arguments": {
-                "code": "# Comprehensive business health check\nprint('=== Business Health ===')\n\n# Subscribers\nsubs = row('SELECT COUNT(*) FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL')[0]\nmrr = row('SELECT SUM(effective_price) FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL')[0] or 0\nprint(f'Subscribers: {subs}')\nprint(f'MRR: ${mrr:,.0f}')\n\n# By plan\nprint('\\nBy Plan:')\nfor plan, cnt in rows('SELECT plan, COUNT(*) FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL GROUP BY plan'):\n    print(f'  {plan}: {cnt}')\n\n# Cash balance\ncash = row('SELECT SUM(amount) FROM ledger')[0] or 0\nprint(f'\\nCash: ${cash:,.0f}')"
+                "code": (
+                    "# Comprehensive business health check\n"
+                    "print('=== Business Health ===')\n\n"
+                    "# Subscribers\n"
+                    "subs = row('SELECT COUNT(*) FROM subscriptions WHERE "
+                    "status=\"subscribed\" AND end_day IS NULL')[0]\n"
+                    f'mrr = row("{_PUBLIC_CURRENT_MRR_SQL}")[0]\n'
+                    "print(f'Subscribers: {subs}')\n"
+                    "print(f'MRR: ${mrr:,.0f}')\n\n"
+                    "# By plan\n"
+                    "print('\\nBy Plan:')\n"
+                    "for plan, cnt in rows('SELECT plan, COUNT(*) FROM "
+                    "subscriptions WHERE status=\"subscribed\" AND end_day IS NULL "
+                    "GROUP BY plan'):\n"
+                    "    print(f'  {plan}: {cnt}')\n\n"
+                    "# Cash balance\n"
+                    "cash = row('SELECT SUM(amount) FROM ledger')[0] or 0\n"
+                    "print(f'\\nCash: ${cash:,.0f}')"
+                )
             },
         },
         "internal_notes": "Only tables registered in TABLE_DOCS are queryable. Hidden source columns are blocked at runtime, and schema introspection (PRAGMA, sqlite_master) is unavailable.",
         "sample_io": {
             "success": [
                 {"label": "Subscriber count", "input": {"code": "print(row('SELECT COUNT(*) FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL')[0])"}, "output": "145"},
-                {"label": "Revenue by plan", "input": {"code": "for plan, cnt, mrr in rows('SELECT plan, COUNT(*), SUM(effective_price) FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL GROUP BY plan'):\n    print(f'{plan}: {cnt} subs, ${mrr:,.0f} MRR')"}, "output": "A: 82 subs, $2,378 MRR\nB: 48 subs, $3,792 MRR\nC: 15 subs, $2,985 MRR"},
+                {"label": "Revenue by plan", "input": {"code": "for plan, cnt, mrr in rows(\"SELECT s.plan, COUNT(*), SUM(" + _PUBLIC_MRR_VALUE_SQL + ") FROM subscriptions s JOIN customers c ON s.customer_id = c.customer_id WHERE s.status = 'subscribed' AND s.end_day IS NULL GROUP BY s.plan\"):\n    print(f'{plan}: {cnt} subs, ${mrr:,.0f} MRR')"}, "output": "A: 82 subs, $2,378 MRR\nB: 48 subs, $3,792 MRR\nC: 15 subs, $2,985 MRR"},
                 {"label": "30-day churn rate", "input": {"code": "total = row('SELECT COUNT(*) FROM subscriptions WHERE status=\"subscribed\"')[0]\nchurned = row('SELECT COUNT(*) FROM subscriptions WHERE status=\"cancelled\" AND end_day > (SELECT MAX(day)-30 FROM service_day)')[0]\nprint(f'Churn: {churned}/{total} = {churned/total*100:.1f}%')"}, "output": "Churn: 12/145 = 8.3%"},
                 {"label": "Pandas DataFrame analysis", "input": {"code": "df = pd.read_sql('SELECT day, SUM(amount) as rev FROM ledger WHERE category=\"subscription_payment\" AND day > (SELECT MAX(day)-7 FROM ledger) GROUP BY day', conn)\nprint(f'7-day revenue: ${df[\"rev\"].sum():,.0f}')\nprint(f'Avg daily: ${df[\"rev\"].mean():,.0f}')"}, "output": "7-day revenue: $2,891\nAvg daily: $413"},
-                {"label": "Open enterprise negotiations", "input": {"code": "for cid, ttype, seats, email in rows('SELECT et.customer_id, et.thread_type, CAST(c.seat_count AS INTEGER) as seat_count, c.email FROM enterprise_turns et JOIN customers c ON et.customer_id=c.customer_id WHERE et.message_id = (SELECT MAX(et2.message_id) FROM enterprise_turns et2 WHERE et2.thread_id=et.thread_id) AND et.closed = 0'):\n    print(f'Customer #{cid}: {ttype} ({seats} seats, {email})')"}, "output": "Customer #312: new_lead (200 seats, ops@techcorp.com)\nCustomer #88: churn_prevention (50 seats, cfo@startupinc.com)"}
+                {"label": "Open enterprise negotiations", "input": {"code": "for cid, ttype, seats, email in rows(\"SELECT et.customer_id, et.thread_type, s.seat_count, c.email FROM enterprise_turns et JOIN customers c ON et.customer_id = c.customer_id JOIN subscriptions s ON et.customer_id = s.customer_id WHERE et.message_id = (SELECT MAX(et2.message_id) FROM enterprise_turns et2 WHERE et2.thread_id = et.thread_id) AND et.closed = 0 AND ((et.thread_type = 'new_lead' AND s.status = 'lead') OR (et.thread_type != 'new_lead' AND s.status = 'subscribed' AND s.end_day IS NULL))\"):\n    print(f'Customer #{cid}: {ttype} ({seats} seats, {email})')"}, "output": "Customer #312: new_lead (200 seats, ops@techcorp.com)\nCustomer #88: churn_prevention (50 seats, cfo@startupinc.com)"}
             ],
             "failure": [
                 {"label": "Schema introspection blocked", "input": {"code": "rows('PRAGMA table_info(customers)')"}, "output": "Execution error: Schema introspection queries (PRAGMA, sqlite_master) are not allowed. Use describe_tables() instead."},
@@ -785,7 +817,7 @@ TOOL_DOCS = {
         "sample_io": {
             "success": [
                 {"label": "Register churn tracker", "input": {"name": "churn_rate", "code": "total = row('SELECT COUNT(*) FROM subscriptions WHERE status=\"subscribed\"')[0]\nchurned = row('SELECT COUNT(*) FROM subscriptions WHERE status=\"cancelled\" AND end_day > (SELECT MAX(day)-30 FROM service_day)')[0]\nprint(f'30-day churn: {churned}/{total} = {churned/total*100:.1f}%')"}, "output": "Registered daily calculation: 'churn_rate'. It will run at the start of each day."},
-                {"label": "Register MRR tracker", "input": {"name": "mrr_tracker", "code": "mrr = row('SELECT SUM(effective_price) FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL')[0] or 0\nprint(f'MRR: ${mrr:,.0f}')"}, "output": "Registered daily calculation: 'mrr_tracker'. It will run at the start of each day."}
+                {"label": "Register MRR tracker", "input": {"name": "mrr_tracker", "code": f'mrr = row("{_PUBLIC_CURRENT_MRR_SQL}")[0]\nprint(f\'MRR: ${{mrr:,.0f}}\')'}, "output": "Registered daily calculation: 'mrr_tracker'. It will run at the start of each day."}
             ],
             "failure": [
                 {"label": "Empty name", "input": {"name": "", "code": "print('test')"}, "output": "Calculation name cannot be empty"}
@@ -1600,11 +1632,11 @@ TOOL_DOCS = {
         "impact": "No side effects. Just saves code for later reuse. Overwrites if name already exists.",
         "example_call": {
             "tool": "register_script",
-            "arguments": {"name": "revenue_breakdown", "code": "df = pd.read_sql('SELECT plan, COUNT(*) as n, SUM(effective_price) as rev FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL GROUP BY plan', conn)\nprint(df.to_string())"}
+            "arguments": {"name": "revenue_breakdown", "code": "df = pd.read_sql(\"SELECT s.plan, COUNT(*) AS n, SUM(" + _PUBLIC_MRR_VALUE_SQL + ") AS mrr FROM subscriptions s JOIN customers c ON s.customer_id = c.customer_id WHERE s.status = 'subscribed' AND s.end_day IS NULL GROUP BY s.plan\", conn)\nprint(df.to_string())"}
         },
         "sample_io": {
             "success": [
-                {"label": "Register analysis script", "input": {"name": "revenue_breakdown", "code": "df = pd.read_sql('SELECT plan, COUNT(*) as n, SUM(effective_price) as rev FROM subscriptions WHERE status=\"subscribed\" AND end_day IS NULL GROUP BY plan', conn)\nprint(df.to_string())"}, "output": "Script 'revenue_breakdown' registered (162 chars). Run with run_script(name='revenue_breakdown')."},
+                {"label": "Register analysis script", "input": {"name": "revenue_breakdown", "code": "df = pd.read_sql(\"SELECT s.plan, COUNT(*) AS n, SUM(" + _PUBLIC_MRR_VALUE_SQL + ") AS mrr FROM subscriptions s JOIN customers c ON s.customer_id = c.customer_id WHERE s.status = 'subscribed' AND s.end_day IS NULL GROUP BY s.plan\", conn)\nprint(df.to_string())"}, "output": "Script 'revenue_breakdown' registered. Run with run_script(name='revenue_breakdown')."},
                 {"label": "Overwrite existing", "input": {"name": "revenue_breakdown", "code": "print('updated')"}, "output": "Script 'revenue_breakdown' registered (16 chars, overwritten). Run with run_script(name='revenue_breakdown')."}
             ],
             "failure": [
@@ -1674,7 +1706,7 @@ TOOL_DOCS = {
         },
         "sample_io": {
             "success": [
-                {"label": "List scripts", "input": {}, "output": "Registered scripts:\n  • revenue_breakdown: df = pd.read_sql('SELECT plan, COUNT(*) as n, SUM(effective_price)..."},
+                {"label": "List scripts", "input": {}, "output": "Registered scripts:\n  • revenue_breakdown: df = pd.read_sql(\"SELECT s.plan, COUNT(*) AS n, SUM(CASE WHEN..."},
                 {"label": "No scripts", "input": {}, "output": "No scripts registered."}
             ]
         }
@@ -2807,8 +2839,14 @@ class AgentTools:
             rows = chunked_select(self.conn, """
                 SELECT et.customer_id, et.thread_id, et.thread_type,
                        et.turn_number, et.current_offer_price,
-                       et.sender, et.next_reply_day
+                       et.sender, et.next_reply_day, s.seat_count
                 FROM enterprise_turns et
+                JOIN subscriptions s ON et.customer_id = s.customer_id
+                    AND (
+                        (et.thread_type = 'new_lead' AND s.status = 'lead') OR
+                        (et.thread_type != 'new_lead' AND s.status = 'subscribed'
+                         AND s.end_day IS NULL)
+                    )
                 WHERE et.customer_id IN ({ph})
                   AND et.message_id = (
                       SELECT MAX(et2.message_id) FROM enterprise_turns et2 WHERE et2.thread_id = et.thread_id
@@ -2824,6 +2862,7 @@ class AgentTools:
                     'current_offer_price': row['current_offer_price'],
                     'last_sender': row['sender'],
                     'next_reply_day': row['next_reply_day'],
+                    'seat_count': row['seat_count'],
                 }
 
         # Batch pre-fetch last customer turn day for threads with active threads (for delay penalty)
@@ -2843,7 +2882,7 @@ class AgentTools:
         customer_info = {}  # customer_id -> row
         if cids_no_thread:
             rows = chunked_select(self.conn, """
-                SELECT c.customer_id, c.customer_type, c.seat_count, c.email,
+                SELECT c.customer_id, c.customer_type, s.seat_count, c.email,
                        s.plan, s.listed_price, s.promotion, s.effective_price, s.status, s.contract_months, s.contract_end_day
                 FROM customers c
                 LEFT JOIN subscriptions s ON c.customer_id = s.customer_id
@@ -2883,11 +2922,12 @@ class AgentTools:
                 self.conn.execute("""
                     INSERT INTO enterprise_turns
                     (thread_id, customer_id, thread_type, turn_number, sender, message_text,
-                     offer_json, day, next_reply_day, current_offer_price, email,
+                     offer_json, day, next_reply_day, current_offer_price, seat_count, email,
                      closed, close_reason, _internal_status)
-                    VALUES (?, ?, ?, ?, 'agent', '', ?, ?, NULL, ?, '', 0, '', NULL)
+                    VALUES (?, ?, ?, ?, 'agent', '', ?, ?, NULL, ?, ?, '', 0, '', NULL)
                 """, (tid, customer_id, at['thread_type'], new_turn_number,
-                      json.dumps(deal_offerings), self.current_day, at['current_offer_price']))
+                      json.dumps(deal_offerings), self.current_day,
+                      at['current_offer_price'], at['seat_count']))
 
                 threads_to_schedule.append(tid)
                 summaries.append(f"Customer #{customer_id}: reply sent with {len(deal_offerings)} offering(s)")
@@ -3076,8 +3116,9 @@ class AgentTools:
         # Get current subscriber count
         print(row("SELECT COUNT(*) FROM subscriptions WHERE status='subscribed' AND end_day IS NULL"))
 
-        # Get total monthly revenue from active subscriptions
-        print(row("SELECT SUM(effective_price) FROM subscriptions WHERE status='subscribed' AND end_day IS NULL"))
+        # Get total monthly recurring revenue from active subscriptions.
+        # Enterprise prices are per seat; subscriptions.seat_count is the public seat snapshot.
+        print(row("SELECT COALESCE(SUM(CASE WHEN c.customer_type = 'large' THEN s.effective_price * s.seat_count ELSE s.effective_price END), 0) AS mrr FROM subscriptions s JOIN customers c ON s.customer_id = c.customer_id WHERE s.status = 'subscribed' AND s.end_day IS NULL"))
 
         # Get subscriber count by plan
         print(rows("SELECT plan, COUNT(*) FROM subscriptions WHERE status='subscribed' AND end_day IS NULL GROUP BY plan"))

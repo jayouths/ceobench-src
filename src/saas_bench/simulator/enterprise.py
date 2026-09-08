@@ -177,7 +177,8 @@ def get_negotiation_state(conn: sqlite3.Connection, thread_id: int) -> Optional[
                et.turn_number, et.current_offer_price, et.next_reply_day,
                c.steepness_left, c.steepness_right, c.c_max, c.q_max, c.q_min, c.negotiation_rate,
                c.initial_offer_factor, c.group_id,
-               c.reply_delay_mean, c.reply_delay_std, c.max_negotiation_turns, c.seat_count,
+               c.reply_delay_mean, c.reply_delay_std, c.max_negotiation_turns,
+               COALESCE(s.seat_count, CAST(c.seat_count AS INTEGER)) AS seat_count,
                c.contract_lockin_penalty,
                cs.relationship, cs.current_steepness_left, cs.current_steepness_right,
                cs.current_c_max, cs.current_q_max, cs.current_q_min, cs.current_slope,
@@ -266,7 +267,8 @@ def get_negotiation_states_batch(conn: sqlite3.Connection, thread_ids: List[int]
                et.turn_number, et.current_offer_price, et.next_reply_day,
                c.steepness_left, c.steepness_right, c.c_max, c.q_max, c.q_min, c.negotiation_rate,
                c.initial_offer_factor, c.group_id,
-               c.reply_delay_mean, c.reply_delay_std, c.max_negotiation_turns, c.seat_count,
+               c.reply_delay_mean, c.reply_delay_std, c.max_negotiation_turns,
+               COALESCE(s.seat_count, CAST(c.seat_count AS INTEGER)) AS seat_count,
                c.contract_lockin_penalty,
                cs.relationship, cs.current_steepness_left, cs.current_steepness_right,
                cs.current_c_max, cs.current_q_max, cs.current_q_min, cs.current_slope,
@@ -1006,7 +1008,7 @@ def get_qualities_for_all_plans_batch(
     # Batch-fetch customer data (relationship, open_issue_days, subscription start_day, etc.)
     rows = chunked_select(conn, """
         SELECT cs.customer_id, cs.relationship, cs.open_issue_days,
-               c.usage_demand, c.seat_count, c.ads_quality_sensitivity, c.group_id,
+               c.usage_demand, c.ads_quality_sensitivity, c.group_id,
                s.start_day, s.daily_usage_rate
         FROM customer_state cs
         JOIN customers c ON cs.customer_id = c.customer_id

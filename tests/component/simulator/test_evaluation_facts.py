@@ -36,15 +36,29 @@ def _insert_subscription(
     start_day: int,
     status: str = "subscribed",
 ) -> int:
+    seats = conn.execute(
+        "SELECT CAST(COALESCE(seat_count, 1) AS INTEGER) FROM customers "
+        "WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()[0]
     cursor = conn.execute(
         """
         INSERT INTO subscriptions (
             customer_id, plan, listed_price, effective_price,
-            start_day, status, billing_day_mod30
+            start_day, status, billing_day_mod30, seat_count
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (customer_id, plan, price, price, start_day, status, start_day % 30),
+        (
+            customer_id,
+            plan,
+            price,
+            price,
+            start_day,
+            status,
+            start_day % 30,
+            seats,
+        ),
     )
     return cursor.lastrowid
 
@@ -165,7 +179,7 @@ def test_subscription_events_capture_real_status_transition_day(make_initialized
 
 
 def test_subscription_day_records_immutable_daily_stock(make_initialized_sim):
-    conn, _, _ = make_initialized_sim()
+    conn, simulator, _ = make_initialized_sim()
     small = _insert_customer(conn, "small", "S1", 1)
     enterprise = _insert_customer(conn, "large", "E1", 10)
     _insert_subscription(conn, small, plan="A", price=20.0, start_day=7)
@@ -175,9 +189,10 @@ def test_subscription_day_records_immutable_daily_stock(make_initialized_sim):
 
     record_subscription_day(conn, 7)
     conn.execute(
-        "UPDATE customers SET seat_count = 12 WHERE customer_id = ?",
+        "UPDATE customers SET seat_count = 12.8 WHERE customer_id = ?",
         (enterprise,),
     )
+    simulator._sync_active_subscription_seat_counts()
     conn.execute(
         """
         UPDATE subscriptions SET plan = 'B', listed_price = 90.0,
@@ -231,6 +246,13 @@ def test_subscription_day_records_immutable_daily_stock(make_initialized_sim):
         "mrr": pytest.approx(1080.0),
     }
     assert day_8[1]["mrr"] == pytest.approx(20.0)
+    assert conn.execute(
+        "SELECT seat_count FROM customers WHERE customer_id = ?", (enterprise,)
+    ).fetchone()[0] == pytest.approx(12.8)
+    assert conn.execute(
+        "SELECT seat_count FROM subscriptions WHERE subscription_id = ?",
+        (enterprise_sub,),
+    ).fetchone()[0] == 12
 
 
 def test_step_day_records_subscription_day(make_initialized_sim):

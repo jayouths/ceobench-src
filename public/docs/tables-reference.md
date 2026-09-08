@@ -317,7 +317,7 @@ Customer subscriptions (current and historical)
 | `end_day` | INTEGER — Day subscription ended (NULL if active) |
 | `status` | TEXT — 'lead', 'subscribed', 'cancelled', 'lost' |
 | `billing_day_mod30` | INTEGER — Billing cycle day (0-29) |
-| `seat_count` | INTEGER — Number of seats for this subscription |
+| `seat_count` | INTEGER — Current effective seats for this subscription |
 | `pending_plan` | TEXT — Scheduled plan change (NULL if none) |
 | `pending_price` | REAL — Negotiated price for pending plan change |
 | `contract_months` | INTEGER — Commitment length in months (1=month-to-month) |

@@ -115,7 +115,7 @@ def _get_subscriber_counts(
           AND c.customer_type = 'small'
     """).fetchone()[0]
     enterprise_seats = conn.execute("""
-        SELECT COALESCE(SUM(CAST(c.seat_count AS INTEGER)), 0) FROM subscriptions s
+        SELECT COALESCE(SUM(s.seat_count), 0) FROM subscriptions s
         JOIN customers c ON s.customer_id = c.customer_id
         WHERE s.status = 'subscribed' AND s.end_day IS NULL
           AND c.customer_type = 'large'

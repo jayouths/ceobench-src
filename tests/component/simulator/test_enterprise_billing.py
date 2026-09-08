@@ -9,7 +9,7 @@ from saas_bench.simulator.enterprise import (
 )
 
 
-def _insert_enterprise_customer(conn, *, seats: int = 10) -> int:
+def _insert_enterprise_customer(conn, *, seats: float = 10) -> int:
     cursor = conn.execute(
         """
         INSERT INTO customers (
@@ -118,6 +118,44 @@ def test_new_enterprise_customer_is_billed_on_deal_day(make_initialized_sim):
 
     assert tuple(subscription) == (5, 5, 1)
     assert payment["amount"] == pytest.approx(800.0)
+
+
+def test_active_subscription_seats_are_the_billing_authority(make_initialized_sim):
+    """隐藏浮点席位尚未同步时，账单仍只按当前生效的订阅席位收费。"""
+    conn, simulator, _ = make_initialized_sim(seed=42)
+    customer_id = _insert_enterprise_customer(conn, seats=37.8)
+    _insert_enterprise_subscription(
+        conn,
+        customer_id,
+        billing_day=5,
+        seats=10,
+        price=80.0,
+    )
+
+    simulator.current_day = 5
+    payments = simulator._process_billing(simulator.get_current_config())
+
+    assert payments == pytest.approx(800.0)
+
+
+def test_seat_drift_syncs_effective_subscription_seats(make_initialized_sim):
+    """浮点漂移结果应立即截断并同步到当前有效订阅。"""
+    conn, simulator, _ = make_initialized_sim(seed=42)
+    customer_id = _insert_enterprise_customer(conn, seats=37.8)
+    _insert_enterprise_subscription(conn, customer_id, billing_day=5, seats=10)
+
+    simulator._sync_active_subscription_seat_counts()
+
+    subscription_seats = conn.execute(
+        "SELECT seat_count FROM subscriptions WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()["seat_count"]
+    hidden_seats = conn.execute(
+        "SELECT seat_count FROM customers WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()["seat_count"]
+    assert subscription_seats == 37
+    assert hidden_seats == pytest.approx(37.8)
 
 
 def test_billing_resumes_when_churn_prevention_closes_today(

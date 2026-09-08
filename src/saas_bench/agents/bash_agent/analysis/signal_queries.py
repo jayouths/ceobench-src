@@ -147,7 +147,8 @@ def _active_thread_cte() -> str:
             WHERE et2.thread_id = et.thread_id
           )
         ), active AS (
-          SELECT latest.*, c.group_id, CAST(c.seat_count AS INTEGER) AS seat_count
+          SELECT latest.*, c.group_id,
+                 COALESCE(s.seat_count, latest.seat_count) AS effective_seat_count
           FROM latest
           JOIN customers c ON c.customer_id = latest.customer_id
           JOIN subscriptions s ON s.customer_id = latest.customer_id
@@ -162,7 +163,7 @@ def _active_thread_cte() -> str:
 def negotiation_summary(day: int) -> str:
     return _active_thread_cte() + f"""
         SELECT COUNT(*) AS open_threads,
-               COALESCE(SUM(seat_count), 0) AS open_seats,
+               COALESCE(SUM(effective_seat_count), 0) AS open_seats,
                SUM(CASE WHEN sender = 'customer' THEN 1 ELSE 0 END) AS awaiting_agent,
                AVG({day} - day) AS avg_waiting_days,
                MAX({day} - day) AS max_waiting_days
@@ -172,7 +173,8 @@ def negotiation_summary(day: int) -> str:
 
 def negotiation_details(day: int, limit: int) -> str:
     return _active_thread_cte() + f"""
-        SELECT thread_id, customer_id, thread_type, group_id, seat_count,
+        SELECT thread_id, customer_id, thread_type, group_id,
+               effective_seat_count AS seat_count,
                {day} - day AS waiting_days, day AS latest_day,
                sender AS latest_sender, message_text AS latest_message
         FROM active
