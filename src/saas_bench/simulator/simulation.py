@@ -6289,6 +6289,8 @@ Guidelines:
                 'effective_c_max': deal_c_max,
                 'seat_count': seat_count,
                 'start_day': self.current_day,
+                # 企业线索尚未使用服务，首个账单周期必须从实际成交日开始。
+                'billing_day_mod30': self.current_day % 30,
                 'daily_usage_rate': daily_usage_rate,
                 'contract_months': contract_months,
                 'contract_end_day': contract_end_day,
