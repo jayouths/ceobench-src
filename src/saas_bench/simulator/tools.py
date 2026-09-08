@@ -70,7 +70,11 @@ TOOL_DOCS = {
     "set_prices": {
         "name": "set_prices",
         "category": "Business Configuration",
-        "description": "Set monthly subscription prices for plans A, B, and C.",
+        "description": (
+            "Set monthly subscription prices for plans A, B, and C. "
+            "Existing individual subscribers keep the lower of their stored price "
+            "and the current published price while remaining on the same plan."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -94,7 +98,13 @@ TOOL_DOCS = {
             "current": "Dict[str, float] — final prices for all plans {'A': float, 'B': float, 'C': float}",
             "_access": "result['current']['A'] → current price of plan A"
         },
-        "impact": "Affects customer acquisition (higher prices = fewer sign-ups), churn (price vs value), and revenue. Changes take effect on next_week.",
+        "impact": (
+            "Affects customer acquisition, plan switching, churn, and revenue. New "
+            "customers and customers switching plans use current published prices. "
+            "For existing individual subscribers staying on the same plan, decreases "
+            "take effect at renewal but increases do not replace a lower stored price. "
+            "Changes take effect on next_week."
+        ),
         "example_call": {
             "tool": "set_prices",
             "arguments": {"A": 25, "B": 69, "C": 179}
@@ -2973,7 +2983,8 @@ class AgentTools:
           • subscription_id: Unique identifier for the subscription
           • customer_id: Foreign key to customers table
           • plan: Plan tier - 'A' (basic), 'B' (standard), 'C' (premium)
-          • listed_price: List price per seat (before promotions)
+          • listed_price: Stored list price per seat before promotions; existing
+            individual subscribers may retain a lower historical price
           • promotion: Total promotion $ currently applied
           • effective_price: Actual price per seat = listed_price - promotion
           • status: Current state - 'lead', 'subscribed', 'cancelled', 'lost'

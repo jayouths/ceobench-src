@@ -72,7 +72,11 @@ TABLE_DOCS = {
             'subscription_id': 'INTEGER PRIMARY KEY — Unique subscription ID',
             'customer_id': 'INTEGER — Foreign key to customers',
             'plan': "TEXT — Plan tier: 'A', 'B', or 'C'",
-            'listed_price': 'REAL — List price per seat in $ (before promotions; enterprise may have negotiated price)',
+            'listed_price': (
+                'REAL — Stored list price per seat in $ before promotions; '
+                'enterprise customers may have a negotiated price, and existing '
+                'individual subscribers may retain a lower historical price'
+            ),
             'promotion': 'REAL — Total promotion $ currently applied (updated at each billing cycle)',
             'effective_price': 'REAL — Actual price per seat = listed_price - promotion (floored at 0). Use this for revenue/satisfaction calculations.',
             'start_day': 'INTEGER — Day subscription started',

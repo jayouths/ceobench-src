@@ -439,7 +439,13 @@ class Simulator:
         best_satisfaction = float('-inf')
 
         for plan in ['A', 'B', 'C']:
-            price = config[f'price_{plan}']
+            published_price = config[f'price_{plan}']
+            # 存量个人客户留在当前套餐时保留历史低价，但也能享受降价。
+            # 其他套餐没有历史价，仍按当前公开价评估。
+            if plan == sub_row['plan']:
+                price = min(sub_row['listed_price'], published_price)
+            else:
+                price = published_price
             # The current plan's first-period promotion is snapshotted at
             # signup so channel-targeted lead discounts survive until billing.
             # All later renewals and alternative plans use the current ongoing

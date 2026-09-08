@@ -542,3 +542,64 @@ def test_same_plan_renewal_billing_preserves_stored_price_when_evaluated_is_high
     ).fetchone()
     assert sub["listed_price"] == pytest.approx(10.0)
     assert sub["effective_price"] == pytest.approx(10.0)
+
+
+def test_same_plan_renewal_decision_uses_stored_price_after_increase(
+    make_initialized_sim,
+    monkeypatch,
+):
+    conn, sim, _config = make_initialized_sim(seed=123)
+    customer_id = _create_subscribed_customer(conn, sim)
+    conn.execute(
+        """
+        UPDATE customers
+        SET c_max = 20.0, q_min = 0.0, q_max = 1.0
+        WHERE customer_id = ?
+        """,
+        (customer_id,),
+    )
+    conn.execute(
+        """
+        UPDATE customer_state
+        SET current_c_max = 20.0, current_q_min = 0.0, current_q_max = 1.0
+        WHERE customer_id = ?
+        """,
+        (customer_id,),
+    )
+    conn.commit()
+
+    plan_config = {
+        "price_A": 100.0,
+        "price_B": 100.0,
+        "price_C": 100.0,
+        "tier_A": 4,
+        "tier_B": 4,
+        "tier_C": 4,
+    }
+    monkeypatch.setattr(sim, "_get_involuntary_churn_mu", lambda _group_id: 0.0)
+    monkeypatch.setattr(
+        sim,
+        "_compute_comprehensive_quality_inline",
+        lambda *_args, **_kwargs: 1.0,
+    )
+
+    cancellations, _, _, _, _ = sim._process_billing_decisions(
+        plan_config,
+        overload=0.0,
+        outage=False,
+    )
+    payments = sim._process_billing(plan_config)
+    subscription = conn.execute(
+        """
+        SELECT status, listed_price, effective_price
+        FROM subscriptions
+        WHERE customer_id = ?
+        """,
+        (customer_id,),
+    ).fetchone()
+
+    assert cancellations == 0
+    assert subscription["status"] == "subscribed"
+    assert payments == pytest.approx(10.0)
+    assert subscription["listed_price"] == pytest.approx(10.0)
+    assert subscription["effective_price"] == pytest.approx(10.0)

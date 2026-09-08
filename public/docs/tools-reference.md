@@ -9,7 +9,7 @@ and run scripts with `./novamind-operation python <script.py>` or
 
 | Tool | Description |
 |------|-------------|
-| `set_prices` | Set monthly subscription prices for plans A, B, and C. |
+| `set_prices` | Set monthly subscription prices for plans A, B, and C. Existing individual subscribers keep the lower of their stored price and the current published price while remaining on the same plan. |
 | `set_model_tiers` | Set AI model tiers for plans A, B, and C. Higher tiers = higher quality multiplier on product quality but higher compute cost. |
 | `set_daily_spend` | Set daily spending for operations and development. Advertising spend is set via set_targeted_ad_spend (per channel × group) only. |
 | `set_targeted_ad_spend` | Set per-(channel, group) ad spend. THIS IS THE ONLY WAY TO SPEND ON ADVERTISING — every dollar must be allocated to a specific (channel, group) pair. |
@@ -345,7 +345,7 @@ Set AI model tiers for plans A, B, and C. Higher tiers = higher quality multipli
 
 **Python:** `novamind_api.pricing.set_prices(...)`
 
-Set monthly subscription prices for plans A, B, and C.
+Set monthly subscription prices for plans A, B, and C. Existing individual subscribers keep the lower of their stored price and the current published price while remaining on the same plan.
 
 **Parameters:**
 
@@ -383,7 +383,7 @@ Set monthly subscription prices for plans A, B, and C.
 - success: Prices updated: A=$29.00, B=$79.00, C=$199.00
 - failure: Missing price for plan X / Price for plan X must be positive
 
-**Impact:** Affects customer acquisition (higher prices = fewer sign-ups), churn (price vs value), and revenue. Changes take effect on next_week.
+**Impact:** Affects customer acquisition, plan switching, churn, and revenue. New customers and customers switching plans use current published prices. For existing individual subscribers staying on the same plan, decreases take effect at renewal but increases do not replace a lower stored price. Changes take effect on next_week.
 
 **Example:**
 ```json

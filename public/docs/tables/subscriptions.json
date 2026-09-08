@@ -5,7 +5,7 @@
     "subscription_id": "INTEGER PRIMARY KEY \u2014 Unique subscription ID",
     "customer_id": "INTEGER \u2014 Foreign key to customers",
     "plan": "TEXT \u2014 Plan tier: 'A', 'B', or 'C'",
-    "listed_price": "REAL \u2014 List price per seat in $ (before promotions; enterprise may have negotiated price)",
+    "listed_price": "REAL \u2014 Stored list price per seat in $ before promotions; enterprise customers may have a negotiated price, and existing individual subscribers may retain a lower historical price",
     "promotion": "REAL \u2014 Total promotion $ currently applied (updated at each billing cycle)",
     "effective_price": "REAL \u2014 Actual price per seat = listed_price - promotion (floored at 0). Use this for revenue/satisfaction calculations.",
     "start_day": "INTEGER \u2014 Day subscription started",
