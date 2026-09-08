@@ -29,6 +29,7 @@ class ModelTier:
     tier: int
     unit_cost: float  # $ per usage unit
     quality_multiplier: float  # Multiplier applied to product quality (1.0 = true fidelity)
+    model_class: str  # Agent-facing description of the representative model class
 
 
 # Default model tiers (quality_multiplier: linear amplifier on product quality)
@@ -44,11 +45,11 @@ class ModelTier:
 # Lower tiers degrade product quality (cheaper models lose nuance).
 # Tier 5 amplifies beyond base product quality (premium reasoning).
 MODEL_TIERS: Dict[int, ModelTier] = {
-    1: ModelTier(tier=1, unit_cost=0.0003, quality_multiplier=0.60),   # ~$0.30/M tokens (Flash-Lite/4o-mini class)
-    2: ModelTier(tier=2, unit_cost=0.002, quality_multiplier=0.75),    # ~$2.00/M tokens (Haiku/Flash class)
-    3: ModelTier(tier=3, unit_cost=0.006, quality_multiplier=0.90),    # ~$6.00/M tokens (Sonnet/GPT-4o class)
-    4: ModelTier(tier=4, unit_cost=0.012, quality_multiplier=1.00),    # ~$12.00/M tokens (Opus/GPT-5 class)
-    5: ModelTier(tier=5, unit_cost=0.030, quality_multiplier=1.10),    # ~$30.00/M tokens (o1/o3 reasoning class)
+    1: ModelTier(1, 0.0003, 0.60, "Flash-Lite/4o-mini"),
+    2: ModelTier(2, 0.002, 0.75, "Haiku/Flash"),
+    3: ModelTier(3, 0.006, 0.90, "Sonnet/GPT-4o"),
+    4: ModelTier(4, 0.012, 1.00, "Opus/GPT-5"),
+    5: ModelTier(5, 0.030, 1.10, "o1/o3 reasoning"),
 }
 
 

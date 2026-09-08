@@ -61,6 +61,43 @@ def _render_table_doc(table_name: str, max_cols: int | None = None) -> str:
     return "\n".join(lines)
 
 
+def _model_tier_info(
+    compute_multiplier: float = 1.0,
+    *,
+    cost_key: str = "cost_per_usage_unit",
+    string_keys: bool = False,
+) -> Dict[int | str, Dict[str, Any]]:
+    """从模拟规则生成 Agent 可见的模型档位信息。"""
+    return {
+        (str(tier) if string_keys else tier): {
+            cost_key: round(spec.unit_cost * compute_multiplier, 6),
+            "quality_multiplier": spec.quality_multiplier,
+            "class": spec.model_class,
+        }
+        for tier, spec in MODEL_TIERS.items()
+    }
+
+
+def _render_model_tier_cost_sample() -> str:
+    """生成与 MODEL_TIERS 同源的档位示例，避免手写数值失配。"""
+    lines = ["=== Cost Structure ===", "", "Model Tiers (cost per usage unit):"]
+    for tier, info in _model_tier_info().items():
+        lines.append(
+            f"  Tier {tier}: ${info['cost_per_usage_unit']:.4f}/unit "
+            f"(q={info['quality_multiplier']:.2f}) — {info['class']}"
+        )
+    lines.extend(
+        [
+            "",
+            "Capacity Tiers:",
+            "  Tier 0:     50,000 units/day    $85/day  — Serverless API",
+            "  Tier 1:    200,000 units/day   $215/day  — 1x H100 neocloud",
+            "  ...",
+        ]
+    )
+    return "\n".join(lines)
+
+
 # Agent 只能使用 subscriptions 中公开的整数席位快照计算 MRR，
 # 不得引用 customers.seat_count 中用于模拟器漂移的隐藏状态。
 _PUBLIC_MRR_VALUE_SQL = (
@@ -156,13 +193,10 @@ TOOL_DOCS = {
             "B": {"type": "int", "description": "Model tier for plan B (1-5)"},
             "C": {"type": "int", "description": "Model tier for plan C (1-5)"}
         },
-        "tier_info": {
-            "1": {"cost_per_unit": 0.0003, "quality_multiplier": 0.60, "class": "Flash-Lite/4o-mini"},
-            "2": {"cost_per_unit": 0.002, "quality_multiplier": 0.75, "class": "Haiku/Flash"},
-            "3": {"cost_per_unit": 0.006, "quality_multiplier": 0.90, "class": "Sonnet/GPT-4o"},
-            "4": {"cost_per_unit": 0.012, "quality_multiplier": 1.00, "class": "Opus/GPT-5"},
-            "5": {"cost_per_unit": 0.030, "quality_multiplier": 1.10, "class": "o1/o3 reasoning"}
-        },
+        "tier_info": _model_tier_info(
+            cost_key="cost_per_unit",
+            string_keys=True,
+        ),
         "returns": {
             "success": "Model tiers updated: A=tier2, B=tier3, C=tier4",
             "failure": "Missing tier for plan X / Tier for plan X must be 1-5"
@@ -1010,13 +1044,7 @@ TOOL_DOCS = {
         "parameters": {},
         "returns": {
             "success": {
-                "model_tiers": {
-                    "1": {"cost_per_usage_unit": 0.0003, "quality_multiplier": 0.60, "class": "Flash-Lite/4o-mini"},
-                    "2": {"cost_per_usage_unit": 0.002, "quality_multiplier": 0.75, "class": "Haiku/Flash"},
-                    "3": {"cost_per_usage_unit": 0.006, "quality_multiplier": 0.90, "class": "Sonnet/GPT-4o"},
-                    "4": {"cost_per_usage_unit": 0.012, "quality_multiplier": 1.00, "class": "Opus/GPT-5"},
-                    "5": {"cost_per_usage_unit": 0.030, "quality_multiplier": 1.10, "class": "o1/o3 reasoning"}
-                },
+                "model_tiers": _model_tier_info(string_keys=True),
                 "capacity_tiers": {
                     "0": {"capacity_units": 50000, "cost_per_day": 85},
                     "1": {"capacity_units": 200000, "cost_per_day": 215},
@@ -1043,7 +1071,7 @@ TOOL_DOCS = {
         },
         "sample_io": {
             "success": [
-                {"label": "View cost structure", "input": {}, "output": "=== Cost Structure ===\n\nModel Tiers (cost per usage unit):\n  Tier 1: $0.0003/unit (q=0.55) — Flash-Lite/4o-mini\n  Tier 2: $0.0020/unit (q=0.65) — Haiku/Flash\n  Tier 3: $0.0060/unit (q=0.75) — Sonnet/GPT-4o\n  Tier 4: $0.0120/unit (q=0.85) — Opus/GPT-5\n  Tier 5: $0.0300/unit (q=0.95) — o1/o3 reasoning\n\nCapacity Tiers:\n  Tier 0:     50,000 units/day    $85/day  — Serverless API\n  Tier 1:    200,000 units/day   $215/day  — 1x H100 neocloud\n  ..."}
+                {"label": "View cost structure", "input": {}, "output": _render_model_tier_cost_sample()}
             ]
         }
     },
@@ -4784,13 +4812,7 @@ os.chdir('{self.workspace_path}')
         # delivered_quality = product_quality × tier_multiplier
         # Note: costs shown include any current multiplier but agent doesn't see multiplier directly
         cost_info = {
-            'model_tiers': {
-                1: {'cost_per_usage_unit': round(0.0003 * compute_multiplier, 6), 'quality_multiplier': 0.60, 'class': 'Flash-Lite/4o-mini'},
-                2: {'cost_per_usage_unit': round(0.002 * compute_multiplier, 6), 'quality_multiplier': 0.75, 'class': 'Haiku/Flash'},
-                3: {'cost_per_usage_unit': round(0.006 * compute_multiplier, 6), 'quality_multiplier': 0.90, 'class': 'Sonnet/GPT-4o'},
-                4: {'cost_per_usage_unit': round(0.012 * compute_multiplier, 6), 'quality_multiplier': 1.00, 'class': 'Opus/GPT-5'},
-                5: {'cost_per_usage_unit': round(0.030 * compute_multiplier, 6), 'quality_multiplier': 1.10, 'class': 'o1/o3 reasoning'},
-            },
+            'model_tiers': _model_tier_info(compute_multiplier),
             'capacity_tiers': {
                 0: {'capacity_units': 50000, 'cost_per_day': 85},
                 1: {'capacity_units': 200000, 'cost_per_day': 215},

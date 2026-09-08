@@ -10,8 +10,9 @@ from saas_bench.simulator.config import (
     BenchmarkConfig,
     DEFAULT_ENTERPRISE_OPS_SCALE,
     DEFAULT_INDIVIDUAL_OPS_SCALE,
+    MODEL_TIERS,
 )
-from saas_bench.simulator.tools import TOOL_DOCS
+from saas_bench.simulator.tools import TOOL_DOCS, get_tool_descriptions
 from saas_bench.simulator.database import TABLE_DOCS, init_database
 from saas_bench.runtime.docs_generator import (
     _EXCLUDED_TOOLS,
@@ -46,6 +47,33 @@ def test_operations_docs_follow_simulator_defaults():
     )
     assert f"scale_g = {config.individual_ops_scale:g}" in operations_docs
     assert f"scale_g = {config.enterprise_ops_scale:g}" in operations_docs
+
+
+def test_model_tier_docs_follow_simulator_rules(make_initialized_sim, make_agent_tools):
+    """档位配置、工具返回和 Agent 可见示例必须使用同一组模型参数。"""
+    conn, _, config = make_initialized_sim()
+    result = make_agent_tools(conn, config).get_cost_info()
+    tool_description = next(
+        tool["description"]
+        for tool in get_tool_descriptions()
+        if tool["name"] == "get_cost_info"
+    )
+
+    for tier, spec in MODEL_TIERS.items():
+        returned = result.data["model_tiers"][tier]
+        documented = TOOL_DOCS["get_cost_info"]["returns"]["success"][
+            "model_tiers"
+        ][str(tier)]
+        configured = TOOL_DOCS["set_model_tiers"]["tier_info"][str(tier)]
+
+        assert returned["cost_per_usage_unit"] == spec.unit_cost
+        assert returned["quality_multiplier"] == spec.quality_multiplier
+        assert returned["class"] == spec.model_class
+        assert documented == returned
+        assert configured["cost_per_unit"] == spec.unit_cost
+        assert configured["quality_multiplier"] == spec.quality_multiplier
+        assert configured["class"] == spec.model_class
+        assert f"(q={spec.quality_multiplier:.2f})" in tool_description
 
 
 def test_complete_public_docs_generator_writes_every_stable_entry(tmp_path):
