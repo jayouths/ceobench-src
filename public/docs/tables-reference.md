@@ -181,7 +181,7 @@ Individual customer support issues with full lifecycle tracking
 | `days_open` | INTEGER — How many days the issue has been open (increments daily) |
 | `status` | TEXT — 'open' or 'resolved' |
 | `resolved_day` | INTEGER — Simulation day when resolved (NULL if still open) |
-| `resolution_type` | TEXT — How resolved: 'ops_resolved' (via operations spend) |
+| `resolution_type` | TEXT — How closed: 'ops_resolved' (via operations spend) or 'customer_churned' (customer no longer has an active subscription) |
 
 ---
 

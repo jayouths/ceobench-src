@@ -115,10 +115,6 @@ def build():
     # ── Step 2: Render docs (the public-facing reference) ──
     step("2. Rendering docs from TOOL_DOCS and TABLE_DOCS")
 
-    # Add source to path for imports
-    sys.path.insert(0, str(PROJECT_ROOT / "src"))
-    from saas_bench.runtime.docs_generator import render_api_docs, render_table_docs, render_cli_docs
-
     docs_dir = PUBLIC_DIR / "docs"
     api_dir = docs_dir / "api"
     tables_dir = docs_dir / "tables"
@@ -130,9 +126,11 @@ def build():
     if examples_dir.exists():
         shutil.rmtree(examples_dir)
 
-    render_api_docs(api_dir)
-    render_table_docs(tables_dir)
-    render_cli_docs(docs_dir)
+    # 统一走完整公开文档入口，避免 Markdown 汇总文档滞后于 JSON 文档。
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    from saas_bench.runtime.docs_generator import generate_public_docs
+
+    generate_public_docs(docs_dir)
 
     # Drop any stale empty JSON
     import json as _json

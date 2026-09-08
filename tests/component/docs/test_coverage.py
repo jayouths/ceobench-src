@@ -14,7 +14,11 @@ from saas_bench.simulator.config import (
 )
 from saas_bench.simulator.tools import TOOL_DOCS
 from saas_bench.simulator.database import TABLE_DOCS, init_database
-from saas_bench.runtime.docs_generator import _EXCLUDED_TOOLS, _TOOL_TO_MODULE
+from saas_bench.runtime.docs_generator import (
+    _EXCLUDED_TOOLS,
+    _TOOL_TO_MODULE,
+    generate_public_docs,
+)
 from saas_bench.runtime._public_cli import _build_parser, get_cli_docs
 
 
@@ -54,6 +58,27 @@ def test_operations_docs_follow_simulator_defaults():
     )
     assert f"scale_g = {config.individual_ops_scale:g}" in operations_docs
     assert f"scale_g = {config.enterprise_ops_scale:g}" in operations_docs
+
+
+def test_complete_public_docs_generator_writes_every_stable_entry(tmp_path):
+    """完整生成入口不得只更新 JSON，而遗漏 Agent 会直接阅读的 Markdown。"""
+    output_dir = tmp_path / "docs"
+
+    generate_public_docs(output_dir)
+
+    expected_files = {
+        "cli.md",
+        "cli-reference.md",
+        "simulator-instructions.md",
+        "tables-reference.md",
+        "tools-reference.md",
+    }
+    assert expected_files <= {path.name for path in output_dir.iterdir()}
+    assert (output_dir / "cli.md").read_text() == (
+        output_dir / "cli-reference.md"
+    ).read_text()
+    assert list((output_dir / "api").glob("*.json"))
+    assert list((output_dir / "tables").glob("*.json"))
 
 
 def test_all_tools_mapped_or_excluded():
