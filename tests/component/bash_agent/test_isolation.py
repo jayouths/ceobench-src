@@ -114,6 +114,24 @@ def test_isolated_bash_agent_requires_bubblewrap(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="bubblewrap is required"):
         executor._build_bwrap_cmd("true", str(workspace), {"PATH": "/usr/bin"})
 
+
+def test_python_exec_direct_database_fallback_hides_aliased_columns(
+    make_initialized_sim,
+    make_agent_tools,
+):
+    conn, _, config = make_initialized_sim()
+    db_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    tools = make_agent_tools(conn, config)
+    tools.db_path = db_path
+
+    result = tools.python_exec(
+        "print(row('SELECT c_max AS leaked_c_max FROM customers LIMIT 1'))",
+        timeout_seconds=30,
+    )
+
+    assert result.success is True
+    assert result.message.strip() == "(None,)"
+
 @pytest.mark.slow
 @pytest.mark.linux
 @pytest.mark.bwrap

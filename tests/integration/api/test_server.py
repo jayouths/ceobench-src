@@ -225,6 +225,97 @@ def test_api_blocks_all_hidden_prefix_tables(
         "error": f"Table '{table_name}' is not accessible.",
     }
 
+
+@pytest.mark.parametrize(
+    ("sql", "result_column"),
+    [
+        ("SELECT c_max AS leaked_c_max FROM customers LIMIT 1", "leaked_c_max"),
+        ("SELECT AVG(c_max) AS avg_hidden_budget FROM customers", "avg_hidden_budget"),
+        (
+            "SELECT leaked_c_max FROM "
+            "(SELECT c_max AS leaked_c_max FROM customers LIMIT 1)",
+            "leaked_c_max",
+        ),
+        (
+            "WITH secret AS (SELECT c_max AS hidden_budget FROM customers LIMIT 1) "
+            "SELECT hidden_budget FROM secret",
+            "hidden_budget",
+        ),
+        (
+            "SELECT seat_count AS leaked_seats FROM customers LIMIT 1",
+            "leaked_seats",
+        ),
+    ],
+)
+def test_api_hides_source_columns_through_aliases_and_expressions(
+    make_initialized_sim, monkeypatch, sql, result_column
+):
+    conn, _, _ = make_initialized_sim()
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {"sql": sql}
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 200
+    assert payload["success"] is True
+    assert payload["columns"] == [result_column]
+    assert payload["rows"] == [{result_column: None}]
+    # 查询结束后必须移除授权器，模拟器仍可读取自己的内部状态。
+    assert conn.execute("SELECT c_max FROM customers LIMIT 1").fetchone()[0] is not None
+
+
+def test_api_select_star_keeps_public_columns_and_removes_hidden_columns(
+    make_initialized_sim, monkeypatch
+):
+    conn, _, _ = make_initialized_sim()
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {"sql": "SELECT customers.* FROM customers LIMIT 1"}
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 200
+    assert payload["success"] is True
+    assert "customer_id" in payload["columns"]
+    assert "c_max" not in payload["columns"]
+    assert "seat_count" not in payload["columns"]
+    assert "c_max" not in payload["rows"][0]
+    assert "seat_count" not in payload["rows"][0]
+
+
+def test_oracle_can_read_hidden_source_column_with_alias(
+    make_initialized_sim, monkeypatch
+):
+    conn, _, _ = make_initialized_sim()
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", True)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {
+        "sql": "SELECT c_max AS real_budget FROM customers LIMIT 1"
+    }
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 200
+    assert payload["success"] is True
+    assert payload["columns"] == ["real_budget"]
+    assert payload["rows"][0]["real_budget"] is not None
+
 def test_public_cli_and_sdk_prefer_unix_socket(monkeypatch):
     socket_dir = Path(tempfile.mkdtemp(prefix="ceobench-test-"))
     socket_path = socket_dir / "api.sock"

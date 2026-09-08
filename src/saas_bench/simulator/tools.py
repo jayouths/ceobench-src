@@ -3298,6 +3298,17 @@ def _filter_hidden(result, description, query=None):
     # Filter out hidden column indices
     return tuple(v for i, v in enumerate(result) if i not in hidden_indices)
 
+def _public_query_authorizer(action_code, table_name, column_name, database_name, trigger_name):
+    \"\"\"Prevent a public SQL query from reading hidden source columns.\"\"\"
+    if action_code != sqlite3.SQLITE_READ or not table_name or not column_name:
+        return sqlite3.SQLITE_OK
+    table = table_name.lower()
+    column = column_name.lower()
+    if column in _HIDDEN_COLUMNS or column in _TABLE_HIDDEN_COLUMNS.get(table, set()):
+        # 在源字段读取阶段替换为 NULL，防止别名、聚合和嵌套查询绕过结果列过滤。
+        return sqlite3.SQLITE_IGNORE
+    return sqlite3.SQLITE_OK
+
 def _is_schema_query(query):
     \"\"\"Check if query is trying to inspect database schema.\"\"\"
     q = query.lower().strip()
@@ -3394,6 +3405,7 @@ class _FilteredConnection:
     \"\"\"Connection wrapper that hides internal columns from all queries.\"\"\"
     def __init__(self, real_conn):
         self._conn = real_conn
+        self._conn.set_authorizer(_public_query_authorizer)
 
     def execute(self, query, params=()):
         # Block schema introspection queries

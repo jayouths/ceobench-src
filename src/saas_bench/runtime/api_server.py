@@ -158,6 +158,27 @@ def _strip_hidden_columns(rows: List[Dict], columns: List[str], sql: str = None)
     return [{k: row[k] for k in visible if k in row} for row in rows]
 
 
+def _public_query_authorizer(
+    action_code: int,
+    table_name: Optional[str],
+    column_name: Optional[str],
+    database_name: Optional[str],
+    trigger_name: Optional[str],
+) -> int:
+    """Prevent a public SQL query from reading hidden source columns."""
+    if action_code != sqlite3.SQLITE_READ or not table_name or not column_name:
+        return sqlite3.SQLITE_OK
+
+    table = table_name.lower()
+    column = column_name.lower()
+    hidden_for_table = _TABLE_HIDDEN_COLUMNS.get(table, set())
+    if column in _HIDDEN_COLUMNS or column in hidden_for_table:
+        # 在 SQLite 读取源字段时替换为 NULL，别名、聚合、子查询和 CTE
+        # 都无法取得真实值；同时保留 SELECT * 查询公开列的可用性。
+        return sqlite3.SQLITE_IGNORE
+    return sqlite3.SQLITE_OK
+
+
 # Build table→columns mapping for helpful error messages (exclude hidden columns)
 _TABLE_COLUMNS: Dict[str, List[str]] = {
     table_name: [
@@ -594,12 +615,17 @@ class _APIHandler(BaseHTTPRequestHandler):
             import time as _qt_time
             with server._lock:
                 server._query_deadline = _qt_time.monotonic() + server.QUERY_TIMEOUT_SECONDS
+                if not _ORACLE_MODE:
+                    server.conn.set_authorizer(_public_query_authorizer)
                 try:
                     cursor = server.conn.execute(sql)
                     columns = [desc[0] for desc in cursor.description] if cursor.description else []
                     # Fetch up to limit+1 rows to detect overflow
                     rows_raw = cursor.fetchmany(_QUERY_ROW_LIMIT + 1)
                 finally:
+                    # 授权器只约束当前 Agent 查询，不能影响模拟器后续读取内部状态。
+                    if not _ORACLE_MODE:
+                        server.conn.set_authorizer(None)
                     server._query_deadline = 0.0
                 truncated = len(rows_raw) > _QUERY_ROW_LIMIT
                 if truncated:
