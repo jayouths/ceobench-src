@@ -6,6 +6,7 @@ from typing import Dict
 
 from ..simulator.tools import TOOL_DOCS, get_tool_summary_table
 from ..simulator.database import TABLE_DOCS
+from ..simulator.config import ENTERPRISE_RESPONSE_TIMEOUT_DAYS
 
 
 # Tools excluded from the novamind_api (not exposed to bash_agent)
@@ -268,6 +269,10 @@ def render_simulator_instructions(output_path: Path):
     content = source_path.read_text()
     content = content.replace("{total_days}", "N")
     content = content.replace("{total_years}", "N/365")
+    content = content.replace(
+        "{enterprise_response_timeout_days}",
+        str(ENTERPRISE_RESPONSE_TIMEOUT_DAYS),
+    )
     content = content.replace("{tool_list}", get_tool_summary_table())
     output_path.write_text(content)
 

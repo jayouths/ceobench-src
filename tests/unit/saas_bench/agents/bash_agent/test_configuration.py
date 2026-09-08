@@ -9,6 +9,7 @@ from saas_bench.agents.bash_agent.agent import BashAgent
 from saas_bench.agents.bash_agent.runner import BashAgentRunner
 
 from saas_bench.experiment.experiment_config import load_experiment_config
+from saas_bench.simulator.config import ENTERPRISE_RESPONSE_TIMEOUT_DAYS
 from tests.support.harness import TEST_CONFIG
 
 
@@ -34,6 +35,18 @@ def test_runner_rejects_missing_decision_request_limit():
 def test_agent_rejects_missing_model_identity():
     with pytest.raises(ValueError, match="agent model must be explicitly configured"):
         BashAgent(tool_descriptions=[], client=object(), api_type="openai_responses")
+
+
+def test_agent_prompt_uses_enterprise_response_timeout_constant(monkeypatch):
+    """决策 Agent 主说明不得遗留未替换的企业回复期限占位符。"""
+    monkeypatch.delenv("ORACLE_MODE", raising=False)
+    agent = BashAgent.__new__(BashAgent)
+    agent.total_days = 497
+
+    prompt = agent._default_system_prompt()
+
+    assert f"{ENTERPRISE_RESPONSE_TIMEOUT_DAYS}-day timeout" in prompt
+    assert "{enterprise_response_timeout_days}" not in prompt
 
 def test_short_experiment_is_allowed_and_runner_rounds_to_zero(tmp_path):
     text = TEST_CONFIG.read_text()

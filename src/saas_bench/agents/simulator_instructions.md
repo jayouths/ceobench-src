@@ -103,7 +103,7 @@ Each customer has a personal quality-price curve:
 - You MUST respond with `send_enterprise_deal` using compact tuple format: `deals=[[customer_id, [["plan", price_per_seat], ...]]]` — all contracts are month-to-month (1 month)
 - Grace period: 1 day to reply with no penalty
 - Late reply: -0.02 relationship/day after grace period
-- 7-day timeout (1 week): if YOU (the agent) do not reply within 7 days (1 week), the lead is PERMANENTLY LOST (or existing customer cancels). The clock starts when the customer message arrives — you must call `send_enterprise_deal` within 1 simulation week.
+- {enterprise_response_timeout_days}-day timeout (1 week): if YOU (the agent) do not reply within {enterprise_response_timeout_days} days (1 week), the lead is PERMANENTLY LOST (or existing customer cancels). The clock starts when the customer message arrives — you must call `send_enterprise_deal` within 1 simulation week.
 - Limited negotiation turns per customer — rejection on final turn = customer lost forever
 
 ### Proactive Renegotiation

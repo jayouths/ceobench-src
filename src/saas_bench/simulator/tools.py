@@ -7,7 +7,7 @@ from typing import Dict, Optional, List, Any
 from pathlib import Path
 from numpy.random import Generator, default_rng
 
-from .config import MODEL_TIERS, CAPACITY_TIERS, CUSTOMER_GROUPS, INITIAL_CUSTOMER_GROUPS, AD_CHANNELS, BenchmarkConfig, RESEARCH_TIERS, RESEARCH_TIERS_BY_ID, ResearchTier, REPUTATION_INFLUENCE_MATRIX, REPUTATION_INFLUENCE_RATE, NETWORK_INFLUENCE_MATRIX, DEFAULT_INDIVIDUAL_OPS_SCALE, DEFAULT_ENTERPRISE_OPS_SCALE
+from .config import MODEL_TIERS, CAPACITY_TIERS, CUSTOMER_GROUPS, INITIAL_CUSTOMER_GROUPS, AD_CHANNELS, BenchmarkConfig, RESEARCH_TIERS, RESEARCH_TIERS_BY_ID, ResearchTier, REPUTATION_INFLUENCE_MATRIX, REPUTATION_INFLUENCE_RATE, NETWORK_INFLUENCE_MATRIX, DEFAULT_INDIVIDUAL_OPS_SCALE, DEFAULT_ENTERPRISE_OPS_SCALE, ENTERPRISE_RESPONSE_TIMEOUT_DAYS
 from .database import (
     add_ledger_entry, get_recent_social_posts, get_posts_by_sentiment,
     get_world_context, get_all_world_context,
@@ -565,7 +565,7 @@ TOOL_DOCS = {
     "send_enterprise_deal": {
         "name": "send_enterprise_deal",
         "category": "Customer Communication",
-        "description": "Send enterprise deal offerings. Compact tuple format: each deal = [customer_id, [[plan, price_per_seat], ...]]. All contracts are month-to-month (1 month). If the customer has an open negotiation thread, replies to it. If no open thread, initiates renegotiation. Up to 3 offerings per deal. Customer picks the best. Late replies damage relationship (-0.02/day after 1 day grace). No response within 3 days = customer LOST FOREVER.",
+        "description": f"Send enterprise deal offerings. Compact tuple format: each deal = [customer_id, [[plan, price_per_seat], ...]]. All contracts are month-to-month (1 month). If the customer has an open negotiation thread, replies to it. If no open thread, initiates renegotiation. Up to 3 offerings per deal. Customer picks the best. Late replies damage relationship (-0.02/day after 1 day grace). No response within {ENTERPRISE_RESPONSE_TIMEOUT_DAYS} days = customer LOST FOREVER.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -596,7 +596,7 @@ TOOL_DOCS = {
             "results": "List[Dict] — one dict per deal with keys: customer_id (int), success (bool), status (str), error (str, if failed)",
             "_access": "for r in result['results']: print(r['customer_id'], r['status'])"
         },
-        "impact": "Customer evaluates ALL offerings and picks the one with highest satisfaction. Satisfaction = quality_perceived - quality_required(price) - contract_penalty. Contract lock-in penalty varies per customer group (e.g. price-sensitive individuals ~0.8%/month, strategic enterprises ~0.2%/month — longer contracts penalize satisfaction, offset with lower prices). Customer accepts if best satisfaction > 0, counter-offers otherwise. Max negotiation turns = customer ghosts. Late replies (>1 day) damage relationship -0.02/day. No response within 3 days = customer permanently lost. Renegotiation (no open thread): creates new thread. WARNING: if the customer rejects all offerings OR the thread times out, the customer CHURNS (cancels subscription).",
+        "impact": f"Customer evaluates ALL offerings and picks the one with highest satisfaction. Satisfaction = quality_perceived - quality_required(price) - contract_penalty. Contract lock-in penalty varies per customer group (e.g. price-sensitive individuals ~0.8%/month, strategic enterprises ~0.2%/month — longer contracts penalize satisfaction, offset with lower prices). Customer accepts if best satisfaction > 0, counter-offers otherwise. Max negotiation turns = customer ghosts. Late replies (>1 day) damage relationship -0.02/day. No response within {ENTERPRISE_RESPONSE_TIMEOUT_DAYS} days = customer permanently lost. Renegotiation (no open thread): creates new thread. WARNING: if the customer rejects all offerings OR the thread times out, the customer CHURNS (cancels subscription).",
         "example_call": {
             "tool": "send_enterprise_deal",
             "arguments": {
@@ -1163,7 +1163,7 @@ TOOL_DOCS = {
             "4. Revenue collected from billing customers (cumulative for week)",
             "5. Daily costs deducted (capacity, compute, operations, development, advertising, lead acquisition) × 7",
             "6. Social posts generated on last day of week",
-            "7. Enterprise negotiations processed (customer replies, 7-day timeout)",
+            f"7. Enterprise negotiations processed (customer replies, {ENTERPRISE_RESPONSE_TIMEOUT_DAYS}-day timeout)",
             "8. Reputation updated daily",
             "9. Weekly dashboard built and returned"
         ],

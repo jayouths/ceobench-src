@@ -10,6 +10,7 @@ from saas_bench.simulator.config import (
     BenchmarkConfig,
     DEFAULT_ENTERPRISE_OPS_SCALE,
     DEFAULT_INDIVIDUAL_OPS_SCALE,
+    ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
     MODEL_TIERS,
 )
 from saas_bench.simulator.tools import TOOL_DOCS, get_tool_descriptions
@@ -74,6 +75,19 @@ def test_model_tier_docs_follow_simulator_rules(make_initialized_sim, make_agent
         assert configured["quality_multiplier"] == spec.quality_multiplier
         assert configured["class"] == spec.model_class
         assert f"(q={spec.quality_multiplier:.2f})" in tool_description
+
+
+def test_enterprise_timeout_docs_follow_simulator_rule(tmp_path):
+    """企业回复期限在工具说明和主说明中必须与真实规则一致。"""
+    timeout = str(ENTERPRISE_RESPONSE_TIMEOUT_DAYS)
+    enterprise_docs = json.dumps(TOOL_DOCS["send_enterprise_deal"])
+    assert f"within {timeout} days" in enterprise_docs
+
+    output_dir = tmp_path / "docs"
+    generate_public_docs(output_dir)
+    instructions = (output_dir / "simulator-instructions.md").read_text()
+    assert f"{timeout}-day timeout" in instructions
+    assert "{enterprise_response_timeout_days}" not in instructions
 
 
 def test_complete_public_docs_generator_writes_every_stable_entry(tmp_path):

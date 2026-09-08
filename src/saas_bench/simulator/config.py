@@ -10,6 +10,9 @@ import numpy as np
 DEFAULT_INDIVIDUAL_OPS_SCALE = 0.6
 DEFAULT_ENTERPRISE_OPS_SCALE = 0.1
 
+# 企业消息会在周末 Dashboard 中集中暴露，回复期限必须覆盖一个完整决策周期。
+ENTERPRISE_RESPONSE_TIMEOUT_DAYS = 7
+
 
 # === V2.1: CHURN REASON ENUM ===
 # Structured churn reasons tracked internally (hidden from agent).

@@ -21,7 +21,7 @@ from numpy.random import Generator
 
 from .config import (
     BenchmarkConfig, MODEL_TIERS, CUSTOMER_GROUPS, WEEKLY_MULTIPLIERS,
-    compute_quota_quality_factor,
+    ENTERPRISE_RESPONSE_TIMEOUT_DAYS, compute_quota_quality_factor,
 )
 from ._sql_chunk import chunked_select, chunked_execute
 
@@ -770,7 +770,11 @@ def get_threads_needing_reply(conn: sqlite3.Connection, current_day: int) -> Lis
     return [row['thread_id'] for row in rows]
 
 
-def get_threads_awaiting_agent_response(conn: sqlite3.Connection, current_day: int, timeout_days: int = 7) -> List[dict]:
+def get_threads_awaiting_agent_response(
+    conn: sqlite3.Connection,
+    current_day: int,
+    timeout_days: int = ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
+) -> List[dict]:
     """Get threads where agent hasn't responded within timeout_days.
 
     Returns threads where the latest turn has status='awaiting_agent_reply'

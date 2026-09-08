@@ -12,6 +12,7 @@ from numpy.random import Generator, PCG64
 
 from .config import (
     BenchmarkConfig, MODEL_TIERS, CAPACITY_TIERS,
+    ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
     # Customer group system
     CUSTOMER_GROUPS, INITIAL_CUSTOMER_GROUPS, CustomerGroupConfig,
     SMALL_CUSTOMER_GROUPS, ENTERPRISE_CUSTOMER_GROUPS,
@@ -5726,7 +5727,7 @@ Guidelines:
         """Process enterprise customer negotiations - replies and triggers.
 
         This handles:
-        1. Processing agent response timeouts (3-day limit)
+        1. Processing agent response timeouts
         2. Processing scheduled customer replies
         3. Triggering new negotiations (churn risk, plan changes, etc.)
         4. Updating relationships based on agent response times
@@ -5838,19 +5839,20 @@ Guidelines:
         return active_customers & candidates
 
     def _process_agent_response_timeouts(self, config: dict, enterprise_churn_events: list):
-        """Process threads where agent hasn't responded within 7 days (1 week).
+        """Process threads where the agent exceeded the configured reply deadline.
 
         L11: Batch-optimized — pre-fetches all needed data in 2 bulk queries,
         then does all writes via executemany. Eliminates N per-thread DB round-trips.
 
-        If agent doesn't respond to customer within 7 days:
+        If the agent does not respond before the deadline:
         - For new_lead: Lead is lost (subscription marked as 'lost', thread closed)
         - For existing customers (churn_prevention, plan_change, budget_freeze):
           Customer cancels their subscription
         """
-        timeout_days = 7
         timed_out_threads = get_threads_awaiting_agent_response(
-            self.conn, self.current_day, timeout_days
+            self.conn,
+            self.current_day,
+            ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
         )
 
         if not timed_out_threads:

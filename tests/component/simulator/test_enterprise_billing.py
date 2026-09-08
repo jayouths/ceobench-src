@@ -2,10 +2,12 @@
 
 import pytest
 
+from saas_bench.simulator.config import ENTERPRISE_RESPONSE_TIMEOUT_DAYS
 from saas_bench.simulator.enterprise import (
     close_thread,
     create_negotiation_thread,
     get_negotiation_state,
+    get_threads_awaiting_agent_response,
 )
 
 
@@ -156,6 +158,25 @@ def test_seat_drift_syncs_effective_subscription_seats(make_initialized_sim):
     ).fetchone()["seat_count"]
     assert subscription_seats == 37
     assert hidden_seats == pytest.approx(37.8)
+
+
+def test_enterprise_reply_timeout_matches_weekly_decision_cycle(
+    make_initialized_sim,
+):
+    """企业消息等待六天仍可回复，满七天才进入超时处理。"""
+    conn, _, _ = make_initialized_sim(seed=42)
+    customer_id = _insert_enterprise_customer(conn)
+    thread_id, _ = create_negotiation_thread(conn, customer_id, "new_lead", 1)
+
+    assert get_threads_awaiting_agent_response(
+        conn,
+        1 + ENTERPRISE_RESPONSE_TIMEOUT_DAYS - 1,
+    ) == []
+    timed_out = get_threads_awaiting_agent_response(
+        conn,
+        1 + ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
+    )
+    assert [thread["thread_id"] for thread in timed_out] == [thread_id]
 
 
 def test_billing_resumes_when_churn_prevention_closes_today(
