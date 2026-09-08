@@ -2,10 +2,16 @@
 
 Run: uv run python -m pytest tests/test_docs_coverage.py -v
 """
+import json
 import sqlite3
 import tempfile
 from pathlib import Path
 
+from saas_bench.simulator.config import (
+    BenchmarkConfig,
+    DEFAULT_ENTERPRISE_OPS_SCALE,
+    DEFAULT_INDIVIDUAL_OPS_SCALE,
+)
 from saas_bench.simulator.tools import TOOL_DOCS
 from saas_bench.simulator.database import TABLE_DOCS, init_database
 from saas_bench.runtime.docs_generator import _EXCLUDED_TOOLS, _TOOL_TO_MODULE
@@ -32,6 +38,22 @@ def test_cli_docs_follow_public_parser():
         assert f"./novamind-operation {command}" in docs
     assert "cash_26wk_upper" in docs
     assert "<cash_1wk> <cash_4wk> <cash_12wk>" not in docs
+
+
+def test_operations_docs_follow_simulator_defaults():
+    """Agent 看到的运营系数必须与模拟器默认规则一致。"""
+    config = BenchmarkConfig()
+    assert config.individual_ops_scale == DEFAULT_INDIVIDUAL_OPS_SCALE
+    assert config.enterprise_ops_scale == DEFAULT_ENTERPRISE_OPS_SCALE
+
+    operations_docs = json.dumps(
+        {
+            "global": TOOL_DOCS["set_daily_spend"],
+            "targeted": TOOL_DOCS["set_targeted_ops_spend"],
+        }
+    )
+    assert f"scale_g = {config.individual_ops_scale:g}" in operations_docs
+    assert f"scale_g = {config.enterprise_ops_scale:g}" in operations_docs
 
 
 def test_all_tools_mapped_or_excluded():

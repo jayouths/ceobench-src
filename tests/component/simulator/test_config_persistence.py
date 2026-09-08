@@ -70,3 +70,20 @@ def test_resume_restores_latest_advanced_business_config(
     assert restored.promotion_by_group == {"E1": 6.0}
     assert restored.promotion_by_customer == {103: 7.0}
     assert restored.promotion_by_group_plan == {"S1": {"A": 8.0}}
+
+
+def test_targeted_ops_response_uses_active_config(
+    make_initialized_sim,
+    make_agent_tools,
+):
+    """工具回执应说明当前实验系数，不应硬编码默认值。"""
+    conn, _, config = make_initialized_sim(seed=42)
+    config.individual_ops_scale = 0.7
+    config.enterprise_ops_scale = 0.2
+    tools = make_agent_tools(conn, config, seed=42)
+
+    result = tools.set_targeted_ops_spend(by_group={"S1": 100})
+
+    assert result.success
+    assert "scale_g = 0.7 for individual groups" in result.message
+    assert "and 0.2 for enterprise groups" in result.message

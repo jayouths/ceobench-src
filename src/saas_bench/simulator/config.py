@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 
+# 运营工单解决系数的唯一默认值，Agent 公开说明与模拟器默认配置共用。
+DEFAULT_INDIVIDUAL_OPS_SCALE = 0.6
+DEFAULT_ENTERPRISE_OPS_SCALE = 0.1
+
+
 # === V2.1: CHURN REASON ENUM ===
 # Structured churn reasons tracked internally (hidden from agent).
 # Agent must infer from LLM-generated churn message.
@@ -782,8 +787,8 @@ class BenchmarkConfig:
     # individual issues. Each pool (global + 4 targeted scopes) is partitioned by group;
     # each group g draws Poisson(scale_g × spend × n_g / |pool|) resolutions. Pure-group
     # pools collapse to scale_g × spend. Mixed pools yield a composition-weighted rate.
-    individual_ops_scale: float = 0.6  # issues resolved per $ ops spend per day for S* + D_S* groups
-    enterprise_ops_scale: float = 0.1  # issues resolved per $ ops spend per day for E* + D_E* groups (lower than individual)
+    individual_ops_scale: float = DEFAULT_INDIVIDUAL_OPS_SCALE  # S* + D_S* groups
+    enterprise_ops_scale: float = DEFAULT_ENTERPRISE_OPS_SCALE  # E* + D_E* groups
     quick_resolution_threshold_days: int = 2  # Max days for "quick" resolution bonus
     quick_resolution_boost_1day: float = 0.40  # Relationship boost for 1-day resolution
     quick_resolution_boost_2day: float = 0.30  # Relationship boost for 2-day resolution
