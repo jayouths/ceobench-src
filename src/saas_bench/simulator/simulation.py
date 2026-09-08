@@ -5747,28 +5747,36 @@ Guidelines:
         # from the cached temp table (instant — no GROUP BY needed).
         _t0 = _time.monotonic()
         active_thread_customers = set()
-        payment_suspended_customers = set()
+        payment_suspended_candidates = set()
         rows = self.conn.execute(
             "SELECT DISTINCT customer_id, thread_type FROM _tmp_latest_turns"
         ).fetchall()
         for row in rows:
             active_thread_customers.add(row['customer_id'])
             if row['thread_type'] == 'churn_prevention':
-                payment_suspended_customers.add(row['customer_id'])
-        # Cache for _process_billing: enterprise customers with active churn_prevention
-        # threads have payment suspended (sat was < 0 when thread was created)
-        self._payment_suspended_customers = payment_suspended_customers
+                payment_suspended_candidates.add(row['customer_id'])
         _ent_timings['active_threads_query'] = _time.monotonic() - _t0
 
         # Check for new negotiation triggers
         _t0 = _time.monotonic()
-        self._check_negotiation_triggers(config, active_thread_customers)
+        newly_suspended_customers = self._check_negotiation_triggers(
+            config, active_thread_customers
+        )
         _ent_timings['negotiation_triggers'] = _time.monotonic() - _t0
 
         # V2.1: Check for contract renewals
         _t0 = _time.monotonic()
         self._process_contract_renewals(config, active_thread_customers)
         _ent_timings['contract_renewals'] = _time.monotonic() - _t0
+
+        # 回复、成交和新触发都会改变会话状态；收费必须读取这些变化完成后的真值，
+        # 不能继续使用日初临时表，否则恰逢账单日会漏收或错误收费整期费用。
+        _t0 = _time.monotonic()
+        self._payment_suspended_customers = (
+            self._get_payment_suspended_customers(payment_suspended_candidates)
+            | newly_suspended_customers
+        )
+        _ent_timings['payment_suspension_query'] = _time.monotonic() - _t0
 
         # Clean up temp table
         self.conn.execute("DROP TABLE IF EXISTS _tmp_latest_turns")
@@ -5781,6 +5789,29 @@ Guidelines:
             print(f"  [enterprise_negs] {_ent_total:.1f}s — {parts}", file=sys.stderr)
 
         return enterprise_churn_events
+
+    def _get_payment_suspended_customers(
+        self,
+        candidates: set[int],
+    ) -> set[int]:
+        """Keep day-start candidates whose churn-prevention thread remains active."""
+        if not candidates:
+            return set()
+        rows = self.conn.execute("""
+            SELECT DISTINCT initial.customer_id
+            FROM _tmp_latest_turns initial
+            JOIN enterprise_turns current
+              ON current.message_id = (
+                  SELECT MAX(latest.message_id)
+                  FROM enterprise_turns latest
+                  WHERE latest.thread_id = initial.thread_id
+              )
+            WHERE initial.thread_type = 'churn_prevention'
+              AND current.closed = 0
+              AND current._internal_status IS NULL
+        """).fetchall()
+        active_customers = {row['customer_id'] for row in rows}
+        return active_customers & candidates
 
     def _process_agent_response_timeouts(self, config: dict, enterprise_churn_events: list):
         """Process threads where agent hasn't responded within 7 days (1 week).
@@ -6414,7 +6445,11 @@ Guidelines:
         Args:
             active_thread_customers: Pre-computed set of customer_ids with active threads.
                 If None, falls back to per-customer query (backward compat).
+
+        Returns:
+            Customer IDs whose churn-prevention thread was created today.
         """
+        newly_suspended_customers = set()
         # Get all enterprise customers with subscriptions and asymmetric sigmoid curve params
         enterprises = self.conn.execute("""
             SELECT c.customer_id, c.group_id, CAST(c.seat_count AS INTEGER) as seat_count,
@@ -6524,6 +6559,7 @@ Guidelines:
             # Trigger churn prevention only if satisfaction < 0 AND in churn window
             if satisfaction < 0 and in_churn_window:
                 self._create_churn_prevention_thread(customer_id, ent)
+                newly_suspended_customers.add(customer_id)
                 continue
 
             # Check plan_change only if in churn window
@@ -6532,6 +6568,8 @@ Guidelines:
                     customer_id, ent, quality, steepness_left, steepness_right,
                     c_max, config, q_max, q_min, weekly_usage_mult,
                 )
+
+        return newly_suspended_customers
 
     def _create_churn_prevention_thread(self, customer_id: int, ent: dict):
         """Create a churn prevention thread for an enterprise customer."""
