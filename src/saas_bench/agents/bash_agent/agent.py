@@ -14,7 +14,11 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
 from ..base import BaseAgent
-from ...simulator.config import ENTERPRISE_RESPONSE_TIMEOUT_DAYS, RESEARCH_TIERS
+from ...simulator.config import (
+    ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
+    RESEARCH_TIERS,
+    get_development_quality_formula,
+)
 from ...simulator.environment import Action
 from ...experiment.llm_provider import (
     api_tool_choice,
@@ -175,6 +179,14 @@ class BashAgent(BaseAgent):
             str(ENTERPRISE_RESPONSE_TIMEOUT_DAYS),
         )
         sim_text = sim_text.replace('{research_tier_count}', str(len(RESEARCH_TIERS)))
+        sim_text = sim_text.replace(
+            '{global_development_quality_formula}',
+            get_development_quality_formula('global_spend'),
+        )
+        sim_text = sim_text.replace(
+            '{targeted_development_quality_formula}',
+            get_development_quality_formula('targeted_spend', targeted=True),
+        )
 
         template_file = base_dir / "system_prompt.md"
         with open(template_file, 'r') as f:

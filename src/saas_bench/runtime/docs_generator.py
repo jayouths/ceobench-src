@@ -6,7 +6,11 @@ from typing import Dict
 
 from ..simulator.tools import TOOL_DOCS, get_tool_summary_table
 from ..simulator.database import TABLE_DOCS
-from ..simulator.config import ENTERPRISE_RESPONSE_TIMEOUT_DAYS, RESEARCH_TIERS
+from ..simulator.config import (
+    ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
+    RESEARCH_TIERS,
+    get_development_quality_formula,
+)
 
 
 # Tools excluded from the novamind_api (not exposed to bash_agent)
@@ -274,6 +278,14 @@ def render_simulator_instructions(output_path: Path):
         str(ENTERPRISE_RESPONSE_TIMEOUT_DAYS),
     )
     content = content.replace("{research_tier_count}", str(len(RESEARCH_TIERS)))
+    content = content.replace(
+        "{global_development_quality_formula}",
+        get_development_quality_formula("global_spend"),
+    )
+    content = content.replace(
+        "{targeted_development_quality_formula}",
+        get_development_quality_formula("targeted_spend", targeted=True),
+    )
     content = content.replace("{tool_list}", get_tool_summary_table())
     output_path.write_text(content)
 

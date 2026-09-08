@@ -1,5 +1,6 @@
 """Configuration and constants for SaaS Bench."""
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,6 +13,11 @@ DEFAULT_ENTERPRISE_OPS_SCALE = 0.1
 
 # 企业消息会在周末 Dashboard 中集中暴露，回复期限必须覆盖一个完整决策周期。
 ENTERPRISE_RESPONSE_TIMEOUT_DAYS = 7
+
+# 研发投入对产品质量的每日确定性增益；随机质量波动另行计算。
+GLOBAL_DEV_QUALITY_COEFFICIENT = 0.0045
+TARGETED_DEV_QUALITY_COEFFICIENT = 0.0225
+DEV_QUALITY_SPEND_SCALE = 5_000.0
 
 
 # === V2.1: CHURN REASON ENUM ===
@@ -944,6 +950,39 @@ def get_info_level_noise(config: BenchmarkConfig, info_level: int) -> float:
 def get_info_level_noise_label(config: BenchmarkConfig, info_level: int) -> str:
     """统一生成 Agent 可见的误差标签，避免各链路手写百分比。"""
     return f"±{get_info_level_noise(config, info_level):.0%}"
+
+
+def compute_development_quality_improvement(
+    daily_spend: float,
+    *,
+    targeted: bool = False,
+) -> float:
+    """按唯一的研发规则计算单日确定性质量增益。"""
+    if daily_spend <= 0:
+        return 0.0
+    coefficient = (
+        TARGETED_DEV_QUALITY_COEFFICIENT
+        if targeted
+        else GLOBAL_DEV_QUALITY_COEFFICIENT
+    )
+    return coefficient * math.log(1 + daily_spend / DEV_QUALITY_SPEND_SCALE)
+
+
+def get_development_quality_formula(
+    spend_name: str = "spend",
+    *,
+    targeted: bool = False,
+) -> str:
+    """Generate the public formula from the same constants used by the simulator."""
+    coefficient = (
+        TARGETED_DEV_QUALITY_COEFFICIENT
+        if targeted
+        else GLOBAL_DEV_QUALITY_COEFFICIENT
+    )
+    return (
+        f"{coefficient:g} × ln(1 + "
+        f"{spend_name}/{DEV_QUALITY_SPEND_SCALE:g})"
+    )
 
 
 # =============================================================================

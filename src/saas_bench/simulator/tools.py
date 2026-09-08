@@ -7,7 +7,7 @@ from typing import Dict, Optional, List, Any
 from pathlib import Path
 from numpy.random import Generator, default_rng
 
-from .config import MODEL_TIERS, CAPACITY_TIERS, CUSTOMER_GROUPS, INITIAL_CUSTOMER_GROUPS, AD_CHANNELS, BenchmarkConfig, RESEARCH_TIERS, RESEARCH_TIERS_BY_ID, ResearchTier, REPUTATION_INFLUENCE_MATRIX, REPUTATION_INFLUENCE_RATE, NETWORK_INFLUENCE_MATRIX, DEFAULT_INDIVIDUAL_OPS_SCALE, DEFAULT_ENTERPRISE_OPS_SCALE, ENTERPRISE_RESPONSE_TIMEOUT_DAYS, MIN_RESEARCH_DURATION_DAYS, MIN_RESEARCH_QUALITY_BOOST, get_info_level_noise, get_info_level_noise_label
+from .config import MODEL_TIERS, CAPACITY_TIERS, CUSTOMER_GROUPS, INITIAL_CUSTOMER_GROUPS, AD_CHANNELS, BenchmarkConfig, RESEARCH_TIERS, RESEARCH_TIERS_BY_ID, ResearchTier, REPUTATION_INFLUENCE_MATRIX, REPUTATION_INFLUENCE_RATE, NETWORK_INFLUENCE_MATRIX, DEFAULT_INDIVIDUAL_OPS_SCALE, DEFAULT_ENTERPRISE_OPS_SCALE, ENTERPRISE_RESPONSE_TIMEOUT_DAYS, MIN_RESEARCH_DURATION_DAYS, MIN_RESEARCH_QUALITY_BOOST, compute_development_quality_improvement, get_development_quality_formula, get_info_level_noise, get_info_level_noise_label
 from .database import (
     add_ledger_entry, get_recent_social_posts, get_posts_by_sentiment,
     get_world_context, get_all_world_context,
@@ -251,13 +251,13 @@ TOOL_DOCS = {
         },
         "impact": {
             "operations": f"CRITICAL: (1) REDUCES OUTAGE PROBABILITY - At $0: ~3% daily outage risk (~1/month). At $500: ~1.1% daily (~3/year). (2) Speeds up issue resolution. The global issue-resolution pool is partitioned by customer group: each group g draws Poisson((base_rate + scale_g × spend) × n_g / total_open_issues), where scale_g = {DEFAULT_INDIVIDUAL_OPS_SCALE:g} for individual groups (S*, D_S*) and {DEFAULT_ENTERPRISE_OPS_SCALE:g} for enterprise groups (E*, D_E*). So $1 of ops spend resolves ~{DEFAULT_INDIVIDUAL_OPS_SCALE:g} individual issues/day vs ~{DEFAULT_ENTERPRISE_OPS_SCALE:g} enterprise issues/day. WARNING: Without ops spending, frequent outages damage reputation and cause churn!",
-            "development": "Dev spending improves product quality (amplified by model tier). Global improvement = 0.006 × ln(1 + global_spend/5000) per day (applies to all groups). Targeted per-group improvement = 0.030 × ln(1 + targeted_spend/5000) per day (5× coefficient, applies to that group only, stacks with global). delivered_quality = (base_product_quality + q_shared_bonus + q_group_bonus) × tier_multiplier."
+            "development": f"Dev spending improves product quality (amplified by model tier). Global improvement = {get_development_quality_formula('global_spend')} per day (applies to all groups). Targeted per-group improvement = {get_development_quality_formula('targeted_spend', targeted=True)} per day (5× coefficient, applies to that group only, stacks with global). delivered_quality = (base_product_quality + q_shared_bonus + q_group_bonus) × tier_multiplier."
         },
         "example_call": {
             "tool": "set_daily_spend",
             "arguments": {"operations": 1200, "development": 600}
         },
-        "internal_notes": f"Ops: outage_prob = 0.03 * exp(-0.002 * ops_spend). Issue resolution (global pool, partitioned by group): for each group g with n_g open issues, mean_g = (base_rate + scale_g * spend) * (n_g / total_open_issues); scale_g = {DEFAULT_INDIVIDUAL_OPS_SCALE:g} for individual groups (S*, D_S*), {DEFAULT_ENTERPRISE_OPS_SCALE:g} for enterprise groups (E*, D_E*). Dev (global): quality_improvement = 0.006 * ln(1 + spend/5000). Dev (targeted per-group): group_improvement = 0.030 * ln(1 + spend/5000). Advertising is NOT a valid key here — use set_targeted_ad_spend.",
+        "internal_notes": f"Ops: outage_prob = 0.03 * exp(-0.002 * ops_spend). Issue resolution (global pool, partitioned by group): for each group g with n_g open issues, mean_g = (base_rate + scale_g * spend) * (n_g / total_open_issues); scale_g = {DEFAULT_INDIVIDUAL_OPS_SCALE:g} for individual groups (S*, D_S*), {DEFAULT_ENTERPRISE_OPS_SCALE:g} for enterprise groups (E*, D_E*). Dev (global): quality_improvement = {get_development_quality_formula()}. Dev (targeted per-group): group_improvement = {get_development_quality_formula(targeted=True)}. Advertising is NOT a valid key here — use set_targeted_ad_spend.",
         "sample_io": {
             "success": [
                 {"label": "Set both budgets", "input": {"operations": 1200, "development": 600}, "output": "Daily spend updated: operations=$1200, development=$600"},
@@ -441,7 +441,7 @@ TOOL_DOCS = {
             "_access": "result['targeted_spend']['E1'] → E1's extra dev spend"
         },
         "mechanics": {
-            "quality_bonus": "Per-group quality bonus ACCUMULATES daily: +0.005 × log(1 + spend/1000) per day (5× more efficient than global dev spend). At $5000/day: +0.00896/day cumulative. After 30 days: +0.269 total. Investment persists if spending stops.",
+            "quality_bonus": f"Per-group quality bonus ACCUMULATES daily: +{get_development_quality_formula(targeted=True)} per day (5× coefficient versus global dev spend). At $5000/day: +{compute_development_quality_improvement(5000, targeted=True):.5f}/day cumulative. After 30 days: +{30 * compute_development_quality_improvement(5000, targeted=True):.3f} total. Investment persists if spending stops.",
             "scope": "Only affects subscribers in the targeted group (not global q_shared). Like building group-specific features — investment compounds over time.",
             "cost": "Extra dollars are deducted from cash daily as development cost"
         },
@@ -2424,7 +2424,11 @@ class AgentTools:
         if summary_parts:
             result_msg += '\n'.join(summary_parts)
             result_msg += f"\n\nEffect: Each targeted group ACCUMULATES a quality bonus of "
-            result_msg += f"0.005 × log(1 + spend/1000) per day (5× more efficient than global dev spend). This compounds over time and persists if spending stops."
+            result_msg += (
+                f"{get_development_quality_formula(targeted=True)} per day "
+                "(5× coefficient versus global dev spend). This compounds "
+                "over time and persists if spending stops."
+            )
         else:
             result_msg += "  (no targeted dev spend — all dev spend is global)"
 

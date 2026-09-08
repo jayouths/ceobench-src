@@ -12,6 +12,7 @@ from saas_bench.experiment.experiment_config import load_experiment_config
 from saas_bench.simulator.config import (
     ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
     RESEARCH_TIERS,
+    get_development_quality_formula,
 )
 from tests.support.harness import TEST_CONFIG
 
@@ -62,6 +63,24 @@ def test_agent_prompt_uses_configured_research_tier_count(monkeypatch):
 
     assert f"{len(RESEARCH_TIERS)} independent tiers" in prompt
     assert "{research_tier_count}" not in prompt
+
+
+def test_agent_prompt_uses_authoritative_development_formulas(monkeypatch):
+    """决策 Agent 主说明必须使用模拟器的真实研发公式。"""
+    monkeypatch.delenv("ORACLE_MODE", raising=False)
+    agent = BashAgent.__new__(BashAgent)
+    agent.total_days = 497
+
+    prompt = agent._default_system_prompt()
+
+    assert get_development_quality_formula("global_spend") in prompt
+    assert get_development_quality_formula(
+        "targeted_spend",
+        targeted=True,
+    ) in prompt
+    assert "{global_development_quality_formula}" not in prompt
+    assert "{targeted_development_quality_formula}" not in prompt
+
 
 def test_short_experiment_is_allowed_and_runner_rounds_to_zero(tmp_path):
     text = TEST_CONFIG.read_text()

@@ -36,6 +36,7 @@ from .config import (
     MACRO_SENSITIVITY,
     # v2.1: Churn Reason Enum
     ChurnReason,
+    compute_development_quality_improvement,
     compute_quota_quality_factor,
     get_info_level_noise_label,
     # v2.2: Term sheet options
@@ -4718,9 +4719,8 @@ class Simulator:
 
         q_shared = get_global_state(self.conn, 'q_shared_bonus', 0.0)
 
-        # Dev spending improvement (logarithmic, always applied if spending)
-        # 5× cost scaling: same quality boost as original but requires 5× more dollars
-        improvement = 0.0045 * math.log(1 + spend_dev / 5000) if spend_dev > 0 else 0.0
+        # 研发的确定性增益与 Agent 可见公式共用同一计算函数。
+        improvement = compute_development_quality_improvement(spend_dev)
 
         new_q_shared = (
             q_shared + improvement
@@ -4741,7 +4741,10 @@ class Simulator:
             if spend > 0:
                 key = f'q_group_bonus_{group_id}'
                 current = get_global_state(self.conn, key, 0.0)
-                group_improvement = 0.0225 * math.log(1 + spend / 5000)
+                group_improvement = compute_development_quality_improvement(
+                    spend,
+                    targeted=True,
+                )
                 set_global_state(self.conn, key, current + group_improvement)
                 # v3.4an: deposit per-segment dev improvement into a per-segment
                 # `unreleased_targeted_dev_<group_id>` bank, mirroring the global

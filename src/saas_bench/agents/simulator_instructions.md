@@ -82,7 +82,7 @@ Each customer has a personal quality-price curve:
 - Per-group quality bonus: CUMULATIVE from targeted dev spend (persists after spending stops)
 
 ### Quality Dynamics
-- Development spending improves quality: global improvement = 0.0045 × ln(1 + global_spend/5000), targeted per-group improvement = 0.0225 × ln(1 + targeted_spend/5000) (5× coefficient, stacks with global)
+- Development spending improves quality: global improvement = {global_development_quality_formula}, targeted per-group improvement = {targeted_development_quality_formula} (5× coefficient, stacks with global)
 - Customer expected quality drifts upward over time (global drift + per-group drift)
 - Competitor events occur randomly and raise customer quality expectations across all groups — these are permanent upward shifts that cannot be reversed, only offset via dev spending or R&D breakthroughs. Different customer groups react to the same competitor event with different magnitudes (some groups are highly trend-sensitive; others — e.g. compliance-bound enterprises — barely move), so the expectation gap widens unevenly across your book. Competitor activity is visible in the social media feed (`get_social_posts`), so you can monitor rival launches/announcements there.
 - R&D research tiers provide permanent quality boosts ({research_tier_count} independent tiers)

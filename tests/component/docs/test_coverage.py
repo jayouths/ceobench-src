@@ -16,6 +16,7 @@ from saas_bench.simulator.config import (
     MIN_RESEARCH_QUALITY_BOOST,
     MODEL_TIERS,
     RESEARCH_TIERS,
+    get_development_quality_formula,
     get_info_level_noise_label,
 )
 from saas_bench.simulator.tools import TOOL_DOCS, get_tool_descriptions
@@ -152,6 +153,34 @@ def test_market_tool_examples_match_default_information_levels():
         for wrong_label in noise_labels - {expected}:
             assert f"Level {level} ({wrong_label})" not in docs_text
             assert f"Info Level: {level} ({wrong_label})" not in docs_text
+
+
+def test_development_quality_docs_follow_simulator_formula(tmp_path):
+    """研发工具与 Agent 主说明不得再维护独立增益公式。"""
+    global_formula = get_development_quality_formula("global_spend")
+    targeted_formula = get_development_quality_formula(
+        "targeted_spend",
+        targeted=True,
+    )
+    tool_docs = json.dumps(
+        {
+            "daily": TOOL_DOCS["set_daily_spend"],
+            "targeted": TOOL_DOCS["set_targeted_dev_spend"],
+        },
+        ensure_ascii=False,
+    )
+    assert global_formula in tool_docs
+    assert targeted_formula in tool_docs
+    assert "0.006 × ln(1 + global_spend/5000)" not in tool_docs
+    assert "0.005 × log(1 + spend/1000)" not in tool_docs
+
+    output_dir = tmp_path / "docs"
+    generate_public_docs(output_dir)
+    instructions = (output_dir / "simulator-instructions.md").read_text()
+    assert global_formula in instructions
+    assert targeted_formula in instructions
+    assert "{global_development_quality_formula}" not in instructions
+    assert "{targeted_development_quality_formula}" not in instructions
 
 
 def test_complete_public_docs_generator_writes_every_stable_entry(tmp_path):
