@@ -845,6 +845,10 @@ class Simulator:
             'rng': _serialize_state(self.rng),
             '_macro_rng': _serialize_state(self._macro_rng),
             '_competitor_rng': _serialize_state(self._competitor_rng),
+            # 竞争帖子噪声会改变公开社交内容，必须与竞争事件随机流一起恢复。
+            '_competitor_post_noise_rng': _serialize_state(
+                self._competitor_post_noise_rng
+            ),
             '_quality_rng': _serialize_state(self._quality_rng),
             '_customer_quality_noise_rng': _serialize_state(self._customer_quality_noise_rng),
             '_customer_pick_rng': _serialize_state(self._customer_pick_rng),
@@ -919,6 +923,10 @@ class Simulator:
         _restore_state(self.rng, states['rng'])
         _restore_state(self._macro_rng, states['_macro_rng'])
         _restore_state(self._competitor_rng, states['_competitor_rng'])
+        _restore_state(
+            self._competitor_post_noise_rng,
+            states['_competitor_post_noise_rng'],
+        )
         _restore_state(self._quality_rng, states['_quality_rng'])
         if '_customer_quality_noise_rng' in states:
             _restore_state(self._customer_quality_noise_rng, states['_customer_quality_noise_rng'])

@@ -362,21 +362,27 @@ def cmd_start_server(args, base: Path):
     simulator.initialize(resume=True)  # resume=True: skip DB writes, just set up _group_rngs
     current_day = meta.get("current_day", 0)
 
-    # Restore RNG states from database for deterministic resume
-    if current_day > 0:
-        simulator.current_day = current_day
-        if not simulator.restore_rng_states():
-            print(f"WARNING: No saved RNG states found — RNG will NOT match continuous run", file=sys.stderr)
-
-    workspace = _session_workspace(base, session_id)
-    tools = AgentTools(conn, current_day, workspace, rng=rng, config=config, seed=seed)
-
-    # Shock manager for world events
+    # ShockManager 初始化会从主随机流派生自己的种子。必须先按初始顺序重建它，
+    # 再把主随机流恢复到 checkpoint 位置，否则恢复动作本身会多消耗一个随机数。
     scenario_name = meta.get("scenario", "default")
     scenario_pack = SCENARIO_PACKS.get(scenario_name, ScenarioPack(
         name='Default', description='Balanced scenario'
     ))
     shock_manager = ShockManager(conn, rng, scenario_pack)
+
+    # Restore RNG states from database for deterministic resume
+    if current_day > 0:
+        simulator.current_day = current_day
+        if not simulator.restore_rng_states():
+            print(f"WARNING: No saved RNG states found — RNG will NOT match continuous run", file=sys.stderr)
+        if not shock_manager.restore_rng_state():
+            raise RuntimeError(
+                "Checkpoint is missing the demand-shock RNG state; "
+                "refusing a non-deterministic resume"
+            )
+
+    workspace = _session_workspace(base, session_id)
+    tools = AgentTools(conn, current_day, workspace, rng=rng, config=config, seed=seed)
 
     # Event logger
     logs_dir = sdir / "logs"

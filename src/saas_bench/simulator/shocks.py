@@ -21,6 +21,8 @@ class Shock:
 class ShockManager:
     """Manages shock generation and effects."""
 
+    _RNG_STATE_NAME = 'shock_manager'
+
     def __init__(self, conn: sqlite3.Connection, rng: Generator, scenario: ScenarioPack):
         self.conn = conn
         self.scenario = scenario
@@ -43,7 +45,36 @@ class ShockManager:
         # in simulation.py _apply_preference_drift(). Enterprise budgets now
         # tighten gradually via c_max_drift instead of sudden shocks.
 
+        # 冲击事件与随机流位置写入同一数据库事务，避免恢复后重新抽取未来冲击。
+        self.save_rng_state()
         return shocks
+
+    def save_rng_state(self) -> None:
+        """Persist the demand-shock RNG position in the world database."""
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS _rng_states (
+                name TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL
+            )
+        """)
+        self.conn.execute(
+            "INSERT OR REPLACE INTO _rng_states (name, state_json) VALUES (?, ?)",
+            (self._RNG_STATE_NAME, json.dumps(self.rng.bit_generator.state)),
+        )
+
+    def restore_rng_state(self) -> bool:
+        """Restore the demand-shock RNG position from the world database."""
+        try:
+            row = self.conn.execute(
+                "SELECT state_json FROM _rng_states WHERE name = ?",
+                (self._RNG_STATE_NAME,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return False
+        if row is None:
+            return False
+        self.rng.bit_generator.state = json.loads(row['state_json'])
+        return True
 
     def _create_demand_surge(self, day: int) -> Shock:
         """Create a demand surge event."""
