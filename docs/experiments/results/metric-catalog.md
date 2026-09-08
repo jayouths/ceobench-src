@@ -38,8 +38,14 @@
 | 企业席位流失率 | P1 | 窗口内结束订阅的席位数除以期初有效席位加窗口内新增席位 | `_eval_subscription_event` + `_eval_subscription_day` | Analysis |
 | 活跃客户群数量 | P1 | 终止日仍有有效订阅的 `group_id` 数量 | `subscriptions` + `customers` | Analysis |
 | MRR 客群集中度 | P1 | 各客群 MRR 占比的 HHI 或最大客群占比 | `_eval_subscription_day` | Analysis |
+| 客群订阅与 MRR 构成 | P2 | 按 `group_id` 分别统计有效个人订阅、企业席位、MRR 及其占比 | `_eval_subscription_day` | Analysis |
+| 客群线索转化率 | P2 | 窗口内该客群新增有效订阅数除以实际线索数；个人与企业分别计算 | `_eval_subscription_event` + `_eval_segment_day` | Analysis |
+| 客群流失率 | P2 | 按 `group_id` 计算窗口内结束订阅数 ÷（期初有效订阅数 + 窗口内新增数） | `_eval_subscription_event` + `_eval_subscription_day` | Analysis |
+| 客群质量与健康状态 | P2 | 按客群观察交付质量、平均满意度、声誉及其时序，仅用于解释转化和流失 | `_eval_quality_day` + `_eval_segment_day` | Analysis |
 
 MRR 表示当前订阅结构未来每月可持续产生的收入，与历史累计形成的现金不同。
+
+客群分析用于识别总体增长或衰退由哪些消费者群体驱动，以及是否存在单一客群依赖。它属于机制解释候选，不代替总体现金、MRR 和生存天数等核心指标。
 
 ## 4. 服务质量与经营风险
 
@@ -105,6 +111,7 @@ MRR 表示当前订阅结构未来每月可持续产生的收入，与历史累�
 - `_eval_subscription_day` 已记录日末订阅、席位和 MRR 存量；`_eval_subscription_event` 已记录真实订阅开始与结束事件。两表均不向 Agent 开放。
 - `_eval_segment_day` 已统一记录客群日末状态、客户健康和当日真实获客过程。没有客户样本时满意度为空，未发现客群的获客字段为空；新增和流失仍以订阅事件表为准。
 - `_eval_quality_day` 已记录日期、客群和套餐维度的交付质量组成；`_eval_channel_effectiveness_event` 已记录初始及月度变化后的渠道获客效率。
+- 客群级订阅构成、转化、流失、满意度和交付质量的原始数据已具备；离线评价器尚未导出统一的客群级汇总。
 - 正式实验前需要锁定方向预测阈值。服务故障直接报告宕机、错误率、延迟和过载等实际表现，不再人为划分“严重故障”。
 - 潜在 TODO（低优先级）：如果最终实验出现稳定且有解释价值的故障分层，可在正式统计前固定“严重故障”阈值，仅作附录补充；不用于开题阶段和主结论。
 - 潜在 TODO：只有最终实验确实需要分析“渠道投入→订阅回款”时，才补充客户级结构化回款事实和归因窗口；开题阶段不实现。
