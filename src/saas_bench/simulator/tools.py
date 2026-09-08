@@ -3275,6 +3275,42 @@ _TABLE_HIDDEN_COLUMNS = {{
     'social_media_posts': {{'customer_id'}},  # V4: Hide which customer posted (agent sees content only)
 }}
 
+# 查询代码不能改变连接的事务或附加数据库状态。
+_QUERY_CONNECTION_ACTIONS = {{
+    sqlite3.SQLITE_ATTACH,
+    sqlite3.SQLITE_DETACH,
+    sqlite3.SQLITE_TRANSACTION,
+    sqlite3.SQLITE_SAVEPOINT,
+}}
+
+# 明确拒绝 SQLite 定义的数据库变更动作，其余只读动作默认放行。
+_QUERY_MUTATION_ACTIONS = {{
+    sqlite3.SQLITE_INSERT,
+    sqlite3.SQLITE_UPDATE,
+    sqlite3.SQLITE_DELETE,
+    sqlite3.SQLITE_CREATE_INDEX,
+    sqlite3.SQLITE_CREATE_TABLE,
+    sqlite3.SQLITE_CREATE_TEMP_INDEX,
+    sqlite3.SQLITE_CREATE_TEMP_TABLE,
+    sqlite3.SQLITE_CREATE_TEMP_TRIGGER,
+    sqlite3.SQLITE_CREATE_TEMP_VIEW,
+    sqlite3.SQLITE_CREATE_TRIGGER,
+    sqlite3.SQLITE_CREATE_VIEW,
+    sqlite3.SQLITE_CREATE_VTABLE,
+    sqlite3.SQLITE_DROP_INDEX,
+    sqlite3.SQLITE_DROP_TABLE,
+    sqlite3.SQLITE_DROP_TEMP_INDEX,
+    sqlite3.SQLITE_DROP_TEMP_TABLE,
+    sqlite3.SQLITE_DROP_TEMP_TRIGGER,
+    sqlite3.SQLITE_DROP_TEMP_VIEW,
+    sqlite3.SQLITE_DROP_TRIGGER,
+    sqlite3.SQLITE_DROP_VIEW,
+    sqlite3.SQLITE_DROP_VTABLE,
+    sqlite3.SQLITE_ALTER_TABLE,
+    sqlite3.SQLITE_REINDEX,
+    sqlite3.SQLITE_ANALYZE,
+}}
+
 def _get_effective_hidden(query=None):
     \"\"\"Get the effective set of hidden columns, including table-specific ones.\"\"\"
     hidden = set(_HIDDEN_COLUMNS)
@@ -3300,6 +3336,11 @@ def _filter_hidden(result, description, query=None):
 
 def _public_query_authorizer(action_code, table_name, column_name, database_name, trigger_name):
     \"\"\"Prevent a public SQL query from reading hidden source columns.\"\"\"
+    if (
+        action_code in _QUERY_CONNECTION_ACTIONS
+        or action_code in _QUERY_MUTATION_ACTIONS
+    ):
+        return sqlite3.SQLITE_DENY
     if action_code != sqlite3.SQLITE_READ or not table_name or not column_name:
         return sqlite3.SQLITE_OK
     table = table_name.lower()
@@ -3405,6 +3446,8 @@ class _FilteredConnection:
     \"\"\"Connection wrapper that hides internal columns from all queries.\"\"\"
     def __init__(self, real_conn):
         self._conn = real_conn
+        # 只禁止数据库变更，保留 SQLite 的完整只读查询能力。
+        self._conn.execute("PRAGMA query_only = ON")
         self._conn.set_authorizer(_public_query_authorizer)
 
     def execute(self, query, params=()):

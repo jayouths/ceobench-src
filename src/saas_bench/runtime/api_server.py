@@ -117,6 +117,42 @@ _TABLE_HIDDEN_COLUMNS: Dict[str, Set[str]] = {
     'social_media_posts': {'customer_id'},  # V4: Hide which customer posted
 }
 
+# 查询接口不能改变共享连接的事务或附加数据库状态；这些动作不是数据查询。
+_QUERY_CONNECTION_ACTIONS = {
+    sqlite3.SQLITE_ATTACH,
+    sqlite3.SQLITE_DETACH,
+    sqlite3.SQLITE_TRANSACTION,
+    sqlite3.SQLITE_SAVEPOINT,
+}
+
+# 明确拒绝 SQLite 定义的数据库变更动作，其余只读动作默认放行。
+_QUERY_MUTATION_ACTIONS = {
+    sqlite3.SQLITE_INSERT,
+    sqlite3.SQLITE_UPDATE,
+    sqlite3.SQLITE_DELETE,
+    sqlite3.SQLITE_CREATE_INDEX,
+    sqlite3.SQLITE_CREATE_TABLE,
+    sqlite3.SQLITE_CREATE_TEMP_INDEX,
+    sqlite3.SQLITE_CREATE_TEMP_TABLE,
+    sqlite3.SQLITE_CREATE_TEMP_TRIGGER,
+    sqlite3.SQLITE_CREATE_TEMP_VIEW,
+    sqlite3.SQLITE_CREATE_TRIGGER,
+    sqlite3.SQLITE_CREATE_VIEW,
+    sqlite3.SQLITE_CREATE_VTABLE,
+    sqlite3.SQLITE_DROP_INDEX,
+    sqlite3.SQLITE_DROP_TABLE,
+    sqlite3.SQLITE_DROP_TEMP_INDEX,
+    sqlite3.SQLITE_DROP_TEMP_TABLE,
+    sqlite3.SQLITE_DROP_TEMP_TRIGGER,
+    sqlite3.SQLITE_DROP_TEMP_VIEW,
+    sqlite3.SQLITE_DROP_TRIGGER,
+    sqlite3.SQLITE_DROP_VIEW,
+    sqlite3.SQLITE_DROP_VTABLE,
+    sqlite3.SQLITE_ALTER_TABLE,
+    sqlite3.SQLITE_REINDEX,
+    sqlite3.SQLITE_ANALYZE,
+}
+
 
 def _is_schema_query(query: str) -> bool:
     """Check if query is trying to inspect database schema."""
@@ -165,7 +201,17 @@ def _public_query_authorizer(
     database_name: Optional[str],
     trigger_name: Optional[str],
 ) -> int:
-    """Prevent a public SQL query from reading hidden source columns."""
+    """Protect hidden columns and shared connection state during SQL queries."""
+    if (
+        action_code in _QUERY_CONNECTION_ACTIONS
+        or action_code in _QUERY_MUTATION_ACTIONS
+    ):
+        return sqlite3.SQLITE_DENY
+
+    # Oracle 只放宽数据可见性，不获得修改数据库或连接状态的权限。
+    if _ORACLE_MODE:
+        return sqlite3.SQLITE_OK
+
     if action_code != sqlite3.SQLITE_READ or not table_name or not column_name:
         return sqlite3.SQLITE_OK
 
@@ -596,15 +642,6 @@ class _APIHandler(BaseHTTPRequestHandler):
                     }, 403)
                     return
 
-            # Block writes
-            sql_lower = sql.lower().lstrip()
-            if sql_lower.startswith(('insert', 'update', 'delete', 'drop', 'alter', 'create')):
-                self._send_json({
-                    "success": False,
-                    "error": "Write queries are not allowed. Use the novamind_api for all actions.",
-                }, 403)
-                return
-
             # Enforce a row limit to prevent 60MB+ JSON responses from
             # killing the agent's bash command timeout.  If the user's SQL
             # already contains a LIMIT we respect it; otherwise we cap at
@@ -615,17 +652,25 @@ class _APIHandler(BaseHTTPRequestHandler):
             import time as _qt_time
             with server._lock:
                 server._query_deadline = _qt_time.monotonic() + server.QUERY_TIMEOUT_SECONDS
-                if not _ORACLE_MODE:
-                    server.conn.set_authorizer(_public_query_authorizer)
+                query_only_enabled = False
+                authorizer_installed = False
                 try:
+                    # 交给 SQLite 自身保证只读，不限制 JOIN、聚合、窗口函数、
+                    # 子查询或 CTE 等正常查询能力。
+                    server.conn.execute("PRAGMA query_only = ON")
+                    query_only_enabled = True
+                    server.conn.set_authorizer(_public_query_authorizer)
+                    authorizer_installed = True
                     cursor = server.conn.execute(sql)
                     columns = [desc[0] for desc in cursor.description] if cursor.description else []
                     # Fetch up to limit+1 rows to detect overflow
                     rows_raw = cursor.fetchmany(_QUERY_ROW_LIMIT + 1)
                 finally:
-                    # 授权器只约束当前 Agent 查询，不能影响模拟器后续读取内部状态。
-                    if not _ORACLE_MODE:
+                    # 两项保护都只约束当前查询，不能影响模拟器后续推进世界。
+                    if authorizer_installed:
                         server.conn.set_authorizer(None)
+                    if query_only_enabled:
+                        server.conn.execute("PRAGMA query_only = OFF")
                     server._query_deadline = 0.0
                 truncated = len(rows_raw) > _QUERY_ROW_LIMIT
                 if truncated:
@@ -663,10 +708,15 @@ class _APIHandler(BaseHTTPRequestHandler):
             self._send_json(response)
 
         except sqlite3.OperationalError as e:
+            if "readonly" in str(e).lower():
+                self._send_json({
+                    "success": False,
+                    "error": "Write queries are not allowed. Use the novamind_api for all actions.",
+                }, 403)
             # Server-side query deadline (set_progress_handler) was hit.
             # Surface a concrete, recoverable message so the agent can narrow
             # the query instead of retrying the same expensive SQL.
-            if "interrupt" in str(e).lower():
+            elif "interrupt" in str(e).lower():
                 self._send_json({
                     "success": False,
                     "error": (
@@ -681,7 +731,13 @@ class _APIHandler(BaseHTTPRequestHandler):
         except sqlite3.Error as e:
             # SQL errors are deliberately surfaced to the agent (the helper
             # rewrites them into typed hints — no source paths or tracebacks).
-            self._send_json({"success": False, "error": _get_helpful_query_error(e, sql)}, 500)
+            if "not authorized" in str(e).lower():
+                self._send_json({
+                    "success": False,
+                    "error": "Write queries are not allowed. Use the novamind_api for all actions.",
+                }, 403)
+            else:
+                self._send_json({"success": False, "error": _get_helpful_query_error(e, sql)}, 500)
         except Exception as e:
             # Anything non-SQL (e.g. a programming error in the handler) must
             # NOT leak details — route through the centralized scrubber.

@@ -316,6 +316,106 @@ def test_oracle_can_read_hidden_source_column_with_alias(
     assert payload["columns"] == ["real_budget"]
     assert payload["rows"][0]["real_budget"] is not None
 
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "UPDATE config_history SET price_A = 999 WHERE day = 0 RETURNING price_A",
+        (
+            "WITH chosen AS (SELECT 1) UPDATE config_history "
+            "SET price_A = 999 WHERE day = 0 RETURNING price_A"
+        ),
+        "DELETE FROM config_history WHERE day = 0 RETURNING day",
+        "REPLACE INTO config_history SELECT * FROM config_history WHERE day = 0",
+        "CREATE TEMP TABLE leaked_state(value INTEGER)",
+        "ATTACH DATABASE ':memory:' AS extra",
+        "BEGIN",
+    ],
+)
+def test_api_rejects_all_database_and_connection_changes(
+    make_initialized_sim, monkeypatch, sql
+):
+    conn, _, _ = make_initialized_sim()
+    initial_price = conn.execute(
+        "SELECT price_A FROM config_history WHERE day = 0"
+    ).fetchone()[0]
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {"sql": sql}
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 403
+    assert payload == {
+        "success": False,
+        "error": "Write queries are not allowed. Use the novamind_api for all actions.",
+    }
+    assert conn.execute(
+        "SELECT price_A FROM config_history WHERE day = 0"
+    ).fetchone()[0] == initial_price
+    assert conn.in_transaction is False
+    assert conn.execute("PRAGMA query_only").fetchone()[0] == 0
+    assert [row[1] for row in conn.execute("PRAGMA database_list")] == ["main"]
+
+
+def test_api_keeps_complex_read_queries_available(make_initialized_sim, monkeypatch):
+    conn, _, _ = make_initialized_sim()
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {
+        "sql": (
+            "WITH ranked AS ("
+            "SELECT group_id, ROW_NUMBER() OVER (ORDER BY customer_id) AS rank "
+            "FROM customers"
+            ") SELECT group_id, COUNT(*) AS customers, MAX(rank) AS last_rank "
+            "FROM ranked GROUP BY group_id ORDER BY group_id"
+        )
+    }
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 200
+    assert payload["success"] is True
+    assert payload["columns"] == ["group_id", "customers", "last_rank"]
+    assert payload["row_count"] > 0
+    assert conn.execute("PRAGMA query_only").fetchone()[0] == 0
+
+
+def test_oracle_query_is_read_only(make_initialized_sim, monkeypatch):
+    conn, _, _ = make_initialized_sim()
+    initial_price = conn.execute(
+        "SELECT price_A FROM config_history WHERE day = 0"
+    ).fetchone()[0]
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", True)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {
+        "sql": "UPDATE config_history SET price_A = 999 WHERE day = 0"
+    }
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 403
+    assert payload["success"] is False
+    assert conn.execute(
+        "SELECT price_A FROM config_history WHERE day = 0"
+    ).fetchone()[0] == initial_price
+    assert conn.execute("PRAGMA query_only").fetchone()[0] == 0
+
 def test_public_cli_and_sdk_prefer_unix_socket(monkeypatch):
     socket_dir = Path(tempfile.mkdtemp(prefix="ceobench-test-"))
     socket_path = socket_dir / "api.sock"
