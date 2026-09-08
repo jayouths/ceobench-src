@@ -59,7 +59,7 @@
       "results": "List[Dict] \u2014 one dict per deal with keys: customer_id (int), success (bool), status (str), error (str, if failed)",
       "_access": "for r in result['results']: print(r['customer_id'], r['status'])"
     },
-    "impact": "Customer evaluates ALL offerings and picks the one with highest satisfaction. Satisfaction = quality_perceived - quality_required(price) - contract_penalty. Contract lock-in penalty varies per customer group (e.g. price-sensitive individuals ~0.8%/month, strategic enterprises ~0.2%/month \u2014 longer contracts penalize satisfaction, offset with lower prices). Customer accepts if best satisfaction > 0, counter-offers otherwise. Max negotiation turns = customer ghosts. Late replies (>1 day) damage relationship -0.02/day. No response within 7 days = customer permanently lost. Renegotiation (no open thread): creates new thread. WARNING: if the customer rejects all offerings OR the thread times out, the customer CHURNS (cancels subscription).",
+    "impact": "Customer evaluates ALL offerings and picks the one with highest satisfaction. Satisfaction = quality_perceived - quality_required(price). All contracts are month-to-month, so contract duration is not configurable. Customer accepts if best satisfaction > 0, counter-offers otherwise. Max negotiation turns = customer ghosts. Late replies (>1 day) damage relationship -0.02/day. No response within 7 days = customer permanently lost. Renegotiation (no open thread): creates new thread. WARNING: if the customer rejects all offerings OR the thread times out, the customer CHURNS (cancels subscription).",
     "example_call": {
       "tool": "send_enterprise_deal",
       "arguments": {
@@ -69,13 +69,11 @@
             [
               [
                 "A",
-                9.0,
-                6
+                9.0
               ],
               [
                 "B",
-                14.0,
-                12
+                14.0
               ]
             ]
           ],
@@ -84,8 +82,7 @@
             [
               [
                 "B",
-                12.0,
-                6
+                12.0
               ]
             ]
           ]

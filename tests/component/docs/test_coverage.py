@@ -96,6 +96,23 @@ def test_enterprise_timeout_docs_follow_simulator_rule(tmp_path):
     assert "{enterprise_response_timeout_days}" not in instructions
 
 
+def test_enterprise_deal_docs_only_advertise_monthly_contracts():
+    """企业报价的正式说明和成功示例不得继续宣传多月合同。"""
+    docs = TOOL_DOCS["send_enterprise_deal"]
+    example_deals = docs["example_call"]["arguments"]["deals"]
+    successful_examples = docs["sample_io"]["success"]
+
+    for _, offerings in example_deals:
+        assert all(len(offering) == 2 for offering in offerings)
+    for example in successful_examples:
+        for _, offerings in example["input"]["deals"]:
+            assert all(len(offering) == 2 for offering in offerings)
+
+    assert "month-to-month" in docs["description"]
+    assert "duration is not configurable" in docs["impact"]
+    assert "longer contracts" not in docs["impact"]
+
+
 def test_research_docs_follow_configured_tiers(tmp_path):
     """研发工具和公开说明不得再维护另一套档位参数。"""
     list_docs = TOOL_DOCS["list_research_projects"]

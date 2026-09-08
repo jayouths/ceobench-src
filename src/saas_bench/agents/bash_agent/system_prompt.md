@@ -69,7 +69,7 @@ nm.infrastructure.set_capacity_tier(tier=3)
 cost_info = nm.infrastructure.get_cost_info()
 
 # === Enterprise Sales ===
-nm.enterprise.send_enterprise_deal(deals=[[customer_id, [["B", 50.0, 6]]]])
+nm.enterprise.send_enterprise_deal(deals=[[customer_id, [["B", 50.0]]]])  # month-to-month
 nm.enterprise.reject_enterprise_deal(deals=[[customer_id]])
 
 # === Market Research ===

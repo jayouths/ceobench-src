@@ -7,7 +7,9 @@ from . import _client
 def send_enterprise_deal(deals: List) -> Dict:
     """Send enterprise deal offerings to one or more customers.
 
-    Compact tuple format: deals=[[customer_id, [["plan", price_per_seat, contract_months], ...]]]
+    Compact tuple format: deals=[[customer_id, [["plan", price_per_seat], ...]]]
+
+    All contracts are month-to-month. Contract duration cannot be configured.
 
     If customer has an open thread, this replies; otherwise initiates renegotiation.
 

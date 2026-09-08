@@ -596,24 +596,25 @@ TOOL_DOCS = {
             "results": "List[Dict] — one dict per deal with keys: customer_id (int), success (bool), status (str), error (str, if failed)",
             "_access": "for r in result['results']: print(r['customer_id'], r['status'])"
         },
-        "impact": f"Customer evaluates ALL offerings and picks the one with highest satisfaction. Satisfaction = quality_perceived - quality_required(price) - contract_penalty. Contract lock-in penalty varies per customer group (e.g. price-sensitive individuals ~0.8%/month, strategic enterprises ~0.2%/month — longer contracts penalize satisfaction, offset with lower prices). Customer accepts if best satisfaction > 0, counter-offers otherwise. Max negotiation turns = customer ghosts. Late replies (>1 day) damage relationship -0.02/day. No response within {ENTERPRISE_RESPONSE_TIMEOUT_DAYS} days = customer permanently lost. Renegotiation (no open thread): creates new thread. WARNING: if the customer rejects all offerings OR the thread times out, the customer CHURNS (cancels subscription).",
+        "impact": f"Customer evaluates ALL offerings and picks the one with highest satisfaction. Satisfaction = quality_perceived - quality_required(price). All contracts are month-to-month, so contract duration is not configurable. Customer accepts if best satisfaction > 0, counter-offers otherwise. Max negotiation turns = customer ghosts. Late replies (>1 day) damage relationship -0.02/day. No response within {ENTERPRISE_RESPONSE_TIMEOUT_DAYS} days = customer permanently lost. Renegotiation (no open thread): creates new thread. WARNING: if the customer rejects all offerings OR the thread times out, the customer CHURNS (cancels subscription).",
         "example_call": {
             "tool": "send_enterprise_deal",
             "arguments": {
-                "deals": [[312, [["A", 9.00, 6], ["B", 14.00, 12]]], [88, [["B", 12.00, 6]]]]
+                "deals": [[312, [["A", 9.00], ["B", 14.00]]], [88, [["B", 12.00]]]]
             }
         },
-        "internal_notes": "Accepts tuple format [cid, [[plan,price,months],...]] or legacy dict format. If customer has open thread, replies (with late-reply penalty). If no open thread, initiates renegotiation (requires active subscription). Satisfaction = Q_perceived - Q_required(price) - contract_lockin_penalty * (months-1). Lock-in penalty is per-customer (sampled from group distribution at creation: S1=0.008, S2=0.005, S3=0.006, E1=0.005, E2=0.003, E3=0.002). Late penalty = -0.02 * max(0, days_since_msg - 1). Max offerings = 3.",
+        "internal_notes": "Accepts tuple format [cid, [[plan,price],...]] or dict offerings without a contract_months field. Contract duration is fixed internally at one month; supplying a duration is rejected instead of silently ignored. If customer has open thread, replies (with late-reply penalty). If no open thread, initiates renegotiation (requires active subscription). Satisfaction = Q_perceived - Q_required(price). Late penalty = -0.02 * max(0, days_since_msg - 1). Max offerings = 3.",
         "sample_io": {
             "success": [
-                {"label": "Reply to open thread with 3 offerings", "input": {"deals": [[312, [["A", 9.0, 6], ["B", 14.0, 12], ["C", 22.0, 12]]]]}, "output": "Customer #312: reply sent with 3 offering(s)"},
-                {"label": "Initiate renegotiation (no open thread)", "input": {"deals": [[88, [["B", 12.0, 6], ["B", 11.0, 12]]]]}, "output": "Customer #88: renegotiation started (200 seats). 2 offering(s) sent."},
-                {"label": "Batch", "input": {"deals": [[312, [["A", 9.0, 6]]], [88, [["B", 12.0, 6]]]]}, "output": "Sent 2/2 enterprise deals:\n  Customer #312: reply sent with 1 offering(s)\n  Customer #88: renegotiation started. 1 offering(s) sent."}
+                {"label": "Reply to open thread with 3 offerings", "input": {"deals": [[312, [["A", 9.0], ["B", 14.0], ["C", 22.0]]]]}, "output": "Customer #312: reply sent with 3 offering(s)"},
+                {"label": "Initiate renegotiation (no open thread)", "input": {"deals": [[88, [["B", 12.0], ["B", 11.0]]]]}, "output": "Customer #88: renegotiation started (200 seats). 2 offering(s) sent."},
+                {"label": "Batch", "input": {"deals": [[312, [["A", 9.0]]], [88, [["B", 12.0]]]]}, "output": "Sent 2/2 enterprise deals:\n  Customer #312: reply sent with 1 offering(s)\n  Customer #88: renegotiation started. 1 offering(s) sent."}
             ],
             "failure": [
-                {"label": "Customer not found", "input": {"deals": [[999, [["A", 9.0, 6]]]]}, "output": "Customer #999: not found"},
+                {"label": "Customer not found", "input": {"deals": [[999, [["A", 9.0]]]]}, "output": "Customer #999: not found"},
                 {"label": "Missing offerings", "input": {"deals": [[312, []]]}, "output": "Customer #312: offerings required"},
-                {"label": "Customer has active thread", "input": {"deals": [[88, [["B", 11.0, 6]]]]}, "output": "Processed 0/1 deals (1 failed):\n  Customer #88: already has an active negotiation thread"}
+                {"label": "Contract duration is not configurable", "input": {"deals": [[312, [["A", 9.0, 6]]]]}, "output": "Customer #312: offering 0 must be [plan, price]; contracts are month-to-month"},
+                {"label": "Customer has active thread", "input": {"deals": [[88, [["B", 11.0]]]]}, "output": "Processed 0/1 deals (1 failed):\n  Customer #88: already has an active negotiation thread"}
             ]
         }
     },
@@ -2778,11 +2779,11 @@ class AgentTools:
                              **kwargs) -> ToolResult:
         """Send structured offerings to enterprise customers.
 
-        Compact tuple format: each deal is [customer_id, [[plan, price_per_seat, contract_months], ...]]
+        Compact tuple format: each deal is [customer_id, [[plan, price_per_seat], ...]]
 
         Args:
             deals: List of [customer_id, offerings] tuples.
-                   offerings = list of [plan, price_per_seat, contract_months] tuples.
+                   offerings = list of [plan, price_per_seat] tuples.
         """
         if deals is None:
             deals = []
@@ -2825,24 +2826,41 @@ class AgentTools:
             valid = True
             for i, off in enumerate(raw_offerings):
                 if isinstance(off, (list, tuple)):
-                    if len(off) < 2:
-                        summaries.append(f"Customer #{customer_id}: offering {i} needs at least [plan, price]")
-                        results.append({'customer_id': customer_id, 'error': f'offering {i} too short'})
+                    if len(off) != 2:
+                        summaries.append(
+                            f"Customer #{customer_id}: offering {i} must be [plan, price]; "
+                            "contracts are month-to-month"
+                        )
+                        results.append({
+                            'customer_id': customer_id,
+                            'error': f'offering {i} must contain exactly plan and price',
+                        })
                         valid = False
                         break
                     deal_offerings.append({
                         'plan': str(off[0]),
                         'price_per_seat': float(off[1]),
-                        'contract_months': 1,  # All contracts are 1 month (agent cannot set duration)
+                        # 主实验的企业合同按月续约，Agent 不能改变合同期限。
+                        'contract_months': 1,
                     })
                 elif isinstance(off, dict):
+                    if 'contract_months' in off:
+                        summaries.append(
+                            f"Customer #{customer_id}: offering {i} cannot set contract_months; "
+                            "contracts are month-to-month"
+                        )
+                        results.append({
+                            'customer_id': customer_id,
+                            'error': f'offering {i} cannot set contract_months',
+                        })
+                        valid = False
+                        break
                     if 'price_per_seat' not in off and 'price' not in off:
                         summaries.append(f"Customer #{customer_id}: offering {i} must include price_per_seat")
                         results.append({'customer_id': customer_id, 'error': f'offering {i} missing price'})
                         valid = False
                         break
-                    off['contract_months'] = 1  # All contracts are 1 month (agent cannot set duration)
-                    deal_offerings.append(off)
+                    deal_offerings.append({**off, 'contract_months': 1})
                 else:
                     summaries.append(f"Customer #{customer_id}: offering {i} invalid")
                     results.append({'customer_id': customer_id, 'error': f'offering {i} invalid'})

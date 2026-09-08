@@ -622,7 +622,7 @@ Send enterprise deal offerings. Compact tuple format: each deal = [customer_id, 
   Customer #88: renegotiation initiated, 2 offering(s) sent
 - failure: Customer #312: not found / Customer #88: already has an active thread / offerings required
 
-**Impact:** Customer evaluates ALL offerings and picks the one with highest satisfaction. Satisfaction = quality_perceived - quality_required(price) - contract_penalty. Contract lock-in penalty varies per customer group (e.g. price-sensitive individuals ~0.8%/month, strategic enterprises ~0.2%/month — longer contracts penalize satisfaction, offset with lower prices). Customer accepts if best satisfaction > 0, counter-offers otherwise. Max negotiation turns = customer ghosts. Late replies (>1 day) damage relationship -0.02/day. No response within 7 days = customer permanently lost. Renegotiation (no open thread): creates new thread. WARNING: if the customer rejects all offerings OR the thread times out, the customer CHURNS (cancels subscription).
+**Impact:** Customer evaluates ALL offerings and picks the one with highest satisfaction. Satisfaction = quality_perceived - quality_required(price). All contracts are month-to-month, so contract duration is not configurable. Customer accepts if best satisfaction > 0, counter-offers otherwise. Max negotiation turns = customer ghosts. Late replies (>1 day) damage relationship -0.02/day. No response within 7 days = customer permanently lost. Renegotiation (no open thread): creates new thread. WARNING: if the customer rejects all offerings OR the thread times out, the customer CHURNS (cancels subscription).
 
 **Example:**
 ```json
@@ -635,13 +635,11 @@ Send enterprise deal offerings. Compact tuple format: each deal = [customer_id, 
         [
           [
             "A",
-            9.0,
-            6
+            9.0
           ],
           [
             "B",
-            14.0,
-            12
+            14.0
           ]
         ]
       ],
@@ -650,8 +648,7 @@ Send enterprise deal offerings. Compact tuple format: each deal = [customer_id, 
         [
           [
             "B",
-            12.0,
-            6
+            12.0
           ]
         ]
       ]
