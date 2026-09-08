@@ -4964,7 +4964,7 @@ class Simulator:
             Multiplier (1.0 = no active surge, >1.0 = surge active)
         """
         rows = self.conn.execute("""
-            SELECT details_json FROM events
+            SELECT day, details_json FROM events
             WHERE type = 'demand_surge'
         """).fetchall()
 
@@ -4972,6 +4972,9 @@ class Simulator:
         for row in rows:
             details = json.loads(row['details_json'] if isinstance(row['details_json'], str) else row[0])
             if not details.get('_active', False):
+                continue
+            # next-week 会预先落库整周事件，未来日期的冲击不能提前影响线索。
+            if self.current_day < row['day']:
                 continue
             # Check if surge has expired
             if 'end_day' in details and self.current_day >= details['end_day']:

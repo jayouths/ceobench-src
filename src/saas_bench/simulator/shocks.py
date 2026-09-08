@@ -117,6 +117,10 @@ class ShockManager:
             if not details.get('_active', False):
                 continue
 
+            # 周推进会预先生成未来七天的冲击；开始日之前只能保存，不能生效。
+            if day < row['day']:
+                continue
+
             # Check if shock should be resolved
             if 'end_day' in details and day >= details['end_day']:
                 details['_active'] = False
