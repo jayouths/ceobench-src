@@ -14,7 +14,13 @@ from saas_bench.simulator.config import BenchmarkConfig
 from saas_bench.simulator.customer_llm import (
     CustomerSimulator,
     EVENT_WRITING_ANGLE_POOLS,
+    judge_agent_social_post,
 )
+from saas_bench.simulator.database import (
+    add_agent_social_post,
+    get_recent_agent_posts_for_judge,
+)
+from saas_bench.experiment.llm_provider import TextLLMResult
 
 from saas_bench.runtime.server_entry import (
     _apply_simulator_llm_config,
@@ -381,3 +387,59 @@ def test_unknown_model_cost_requires_explicit_pricing():
 
     with pytest.raises(ValueError, match="No token pricing configured"):
         simulator._calculate_cost(1, 1, 0, purpose="customer_social_post")
+
+
+def test_agent_post_judge_only_treats_earlier_posts_as_history(
+    make_initialized_sim,
+):
+    conn, _, config = make_initialized_sim(seed=42)
+    content = "We reduced API latency by 40%."
+    prompts = []
+
+    def capture_prompt(system_prompt, user_prompt, task):
+        prompts.append((system_prompt, user_prompt, task))
+        return TextLLMResult(
+            text="SCORE: 0.5\nREASON: Useful update.",
+            model="social-test",
+            input_tokens=1,
+            output_tokens=1,
+            cached_tokens=0,
+            reasoning_tokens=None,
+            raw_response=None,
+        )
+
+    first_post_id = add_agent_social_post(conn, day=0, content=content)
+    first_history = get_recent_agent_posts_for_judge(conn, 0, first_post_id)
+    judge_agent_social_post(
+        capture_prompt,
+        config,
+        content,
+        "S1",
+        "small developers",
+        "direct",
+        10,
+        100.0,
+        first_history,
+    )
+
+    assert first_history == []
+    assert "Their recent posts:" not in prompts[-1][1]
+    assert prompts[-1][1].count(content) == 1
+
+    second_post_id = add_agent_social_post(conn, day=7, content=content)
+    second_history = get_recent_agent_posts_for_judge(conn, 7, second_post_id)
+    judge_agent_social_post(
+        capture_prompt,
+        config,
+        content,
+        "S1",
+        "small developers",
+        "direct",
+        10,
+        100.0,
+        second_history,
+    )
+
+    assert [post["content"] for post in second_history] == [content]
+    assert "Their recent posts:" in prompts[-1][1]
+    assert prompts[-1][1].count(content) == 2

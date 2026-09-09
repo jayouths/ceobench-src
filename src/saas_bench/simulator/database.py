@@ -1802,22 +1802,27 @@ def compute_social_media_multiplier(conn: sqlite3.Connection, current_day: int,
     return max(0.75, min(1.25, 1.0 + total_contribution))
 
 
-def get_recent_agent_posts_for_judge(conn: sqlite3.Connection, current_day: int,
-                                      lookback_days: int = 14) -> list:
-    """Get recent agent posts for LLM judge context (prevents repetition penalty).
+def get_recent_agent_posts_for_judge(
+    conn: sqlite3.Connection,
+    post_day: int,
+    current_post_id: int,
+    lookback_days: int = 14,
+) -> list:
+    """Get earlier agent posts for LLM judge repetition context.
 
     For replies, includes the original customer post content via LEFT JOIN.
     Returns up to 10 most recent posts.
     """
-    min_day = max(0, current_day - lookback_days)
+    min_day = max(0, post_day - lookback_days)
     result = conn.execute("""
         SELECT a.day, a.content, a.reply_to_post_id, s.content AS original_post_content
         FROM agent_social_media_posts a
         LEFT JOIN social_media_posts s ON a.reply_to_post_id = s.post_id
         WHERE a.day >= ?
-        ORDER BY a.day DESC
+          AND (a.day < ? OR (a.day = ? AND a.agent_post_id < ?))
+        ORDER BY a.day DESC, a.agent_post_id DESC
         LIMIT 10
-    """, (min_day,)).fetchall()
+    """, (min_day, post_day, post_day, current_post_id)).fetchall()
     return [dict(row) for row in result]
 
 

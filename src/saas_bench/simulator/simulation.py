@@ -4522,6 +4522,7 @@ class Simulator:
             SELECT agent_post_id, day, content, reply_to_post_id
             FROM agent_social_media_posts
             WHERE effect_by_group = '{}'
+            ORDER BY day ASC, agent_post_id ASC
         """).fetchall()
 
         with open(_debug_log, "a") as _df:
@@ -4534,7 +4535,6 @@ class Simulator:
         if not discovered:
             return
 
-        recent_posts = get_recent_agent_posts_for_judge(self.conn, self.current_day)
         subs_per_group = self.conn.execute("""
             SELECT c.group_id, COUNT(*) as cnt
             FROM subscriptions s JOIN customers c ON s.customer_id = c.customer_id
@@ -4561,6 +4561,12 @@ class Simulator:
             post_id = row['agent_post_id']
             content = row['content']
             reply_to_id = row['reply_to_post_id']
+            # 历史上下文只能包含当前帖子之前的 CEO 帖子，否则首发也会被误判为重复。
+            recent_posts = get_recent_agent_posts_for_judge(
+                self.conn,
+                row['day'],
+                post_id,
+            )
 
             # Get original post content if this is a reply
             reply_to_content = None
