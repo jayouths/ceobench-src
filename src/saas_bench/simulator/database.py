@@ -1581,9 +1581,10 @@ def add_social_media_post(conn: sqlite3.Connection, day: int, customer_id: int,
     return cursor.lastrowid
 
 
-def get_recent_social_posts(conn: sqlite3.Connection, days: int = 7,
-                            limit: int = 50) -> list:
-    """Get recent social media posts."""
+def get_recent_social_posts(conn: sqlite3.Connection, current_day: int,
+                            days: int = 7, limit: int = 50) -> list:
+    """Get social media posts within the requested simulation-day window."""
+    earliest_exclusive_day = current_day - days
     result = conn.execute("""
         SELECT p.*, c.group_id, c.customer_type,
                pm.custom_name, pe.name as persona_name
@@ -1591,9 +1592,10 @@ def get_recent_social_posts(conn: sqlite3.Connection, days: int = 7,
         JOIN customers c ON p.customer_id = c.customer_id
         LEFT JOIN customer_persona_map pm ON p.customer_id = pm.customer_id
         LEFT JOIN customer_personas pe ON pm.persona_id = pe.persona_id
+        WHERE p.day > ? AND p.day <= ?
         ORDER BY p.day DESC, p.post_id DESC
         LIMIT ?
-    """, (limit,)).fetchall()
+    """, (earliest_exclusive_day, current_day, limit)).fetchall()
     return [dict(row) for row in result]
 
 

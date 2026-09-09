@@ -4029,7 +4029,18 @@ os.chdir('{self.workspace_path}')
             days: How many days back to search (default 7)
             limit: Maximum posts to return (default 50)
         """
-        posts = get_recent_social_posts(self.conn, days=days, limit=limit)
+        if not isinstance(days, int) or isinstance(days, bool) or days <= 0:
+            return ToolResult(False, "Days must be a positive integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            return ToolResult(False, "Limit must be a positive integer")
+
+        # 时间窗口必须以当前模拟日为上界，不能根据数据库中最新帖子滑动。
+        posts = get_recent_social_posts(
+            self.conn,
+            current_day=self.current_day,
+            days=days,
+            limit=limit,
+        )
 
         if not posts:
             return ToolResult(True, "No social media posts found.", {'posts': []})
