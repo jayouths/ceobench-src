@@ -2261,6 +2261,10 @@ class AgentTools:
         """
         valid_groups = set(INITIAL_CUSTOMER_GROUPS.keys()) | set(get_discovered_groups(self.conn))
         valid_plans = {'A', 'B', 'C'}
+        parsed_group = None
+        parsed_plan = None
+        parsed_group_plan = None
+        parsed_customer = None
 
         # ── by_group ──
         if by_group is not None:
@@ -2272,7 +2276,7 @@ class AgentTools:
             for gid, amt in by_group.items():
                 if not isinstance(amt, (int, float)) or amt < 0:
                     return ToolResult(False, f"Amount for {gid} must be a non-negative number")
-            self.config.targeted_ops_spend = {k: float(v) for k, v in by_group.items()}
+            parsed_group = {k: float(v) for k, v in by_group.items()}
 
         # ── by_plan ──
         if by_plan is not None:
@@ -2284,7 +2288,7 @@ class AgentTools:
             for plan, amt in by_plan.items():
                 if not isinstance(amt, (int, float)) or amt < 0:
                     return ToolResult(False, f"Amount for plan {plan} must be a non-negative number")
-            self.config.targeted_ops_spend_by_plan = {k: float(v) for k, v in by_plan.items()}
+            parsed_plan = {k: float(v) for k, v in by_plan.items()}
 
         # ── by_group_plan ──
         if by_group_plan is not None:
@@ -2293,7 +2297,7 @@ class AgentTools:
             invalid = set(by_group_plan.keys()) - valid_groups
             if invalid:
                 return ToolResult(False, f"Invalid group IDs in by_group_plan: {invalid}. Valid: {sorted(valid_groups)}")
-            parsed_gp: Dict[str, Dict[str, float]] = {}
+            parsed_group_plan = {}
             for gid, plans_dict in by_group_plan.items():
                 if not isinstance(plans_dict, dict):
                     return ToolResult(False, f"Value for group {gid} must be a dict of {{plan: $/day}}")
@@ -2305,14 +2309,13 @@ class AgentTools:
                     if not isinstance(amt, (int, float)) or amt < 0:
                         return ToolResult(False, f"Amount for {gid}/{plan} must be a non-negative number")
                     inner[plan] = float(amt)
-                parsed_gp[gid] = inner
-            self.config.targeted_ops_spend_by_group_plan = parsed_gp
+                parsed_group_plan[gid] = inner
 
         # ── by_customer ──
         if by_customer is not None:
             if not isinstance(by_customer, dict):
                 return ToolResult(False, "by_customer must be a dict of {customer_id: $/day}")
-            parsed_c: Dict[int, float] = {}
+            parsed_customer = {}
             for k, amt in by_customer.items():
                 try:
                     cid = int(k)
@@ -2320,8 +2323,17 @@ class AgentTools:
                     return ToolResult(False, f"Customer ID '{k}' must be an integer")
                 if not isinstance(amt, (int, float)) or amt < 0:
                     return ToolResult(False, f"Amount for customer {k} must be a non-negative number")
-                parsed_c[cid] = float(amt)
-            self.config.targeted_ops_spend_by_customer = parsed_c
+                parsed_customer[cid] = float(amt)
+
+        # 复合配置必须全部校验通过后再生效，失败调用不得部分改变世界。
+        if parsed_group is not None:
+            self.config.targeted_ops_spend = parsed_group
+        if parsed_plan is not None:
+            self.config.targeted_ops_spend_by_plan = parsed_plan
+        if parsed_group_plan is not None:
+            self.config.targeted_ops_spend_by_group_plan = parsed_group_plan
+        if parsed_customer is not None:
+            self.config.targeted_ops_spend_by_customer = parsed_customer
 
         # Summarise current state
         g = self.config.targeted_ops_spend
@@ -2434,14 +2446,17 @@ class AgentTools:
             by_customer: {customer_id_str: strength}. None = no change.
         """
         valid_groups = set(INITIAL_CUSTOMER_GROUPS.keys()) | set(get_discovered_groups(self.conn))
+        parsed_global = None
+        parsed_group = None
+        parsed_customer = None
 
-        # Validate and apply global strength
+        # Validate global strength
         if global_strength is not None:
             if not isinstance(global_strength, (int, float)) or global_strength < 0 or global_strength > 1:
                 return ToolResult(False, "Global ads strength must be between 0.0 and 1.0")
-            self.config.ads_strength_global = float(global_strength)
+            parsed_global = float(global_strength)
 
-        # Validate and apply per-group strength
+        # Validate per-group strength
         if by_group is not None:
             if not isinstance(by_group, dict):
                 return ToolResult(False, "by_group must be a dict of {group_id: strength}")
@@ -2451,13 +2466,13 @@ class AgentTools:
             for gid, val in by_group.items():
                 if not isinstance(val, (int, float)) or val < 0 or val > 1:
                     return ToolResult(False, f"Strength for {gid} must be between 0.0 and 1.0")
-            self.config.ads_strength_by_group = {k: float(v) for k, v in by_group.items()}
+            parsed_group = {k: float(v) for k, v in by_group.items()}
 
-        # Validate and apply per-customer strength
+        # Validate per-customer strength
         if by_customer is not None:
             if not isinstance(by_customer, dict):
                 return ToolResult(False, "by_customer must be a dict of {customer_id: strength}")
-            parsed = {}
+            parsed_customer = {}
             for k, v in by_customer.items():
                 try:
                     cid = int(k)
@@ -2465,8 +2480,15 @@ class AgentTools:
                     return ToolResult(False, f"Customer ID '{k}' must be an integer")
                 if not isinstance(v, (int, float)) or v < 0 or v > 1:
                     return ToolResult(False, f"Strength for customer {k} must be between 0.0 and 1.0")
-                parsed[cid] = float(v)
-            self.config.ads_strength_by_customer = parsed
+                parsed_customer[cid] = float(v)
+
+        # 先校验所有范围，再一次性更新，确保失败即无改动。
+        if parsed_global is not None:
+            self.config.ads_strength_global = parsed_global
+        if parsed_group is not None:
+            self.config.ads_strength_by_group = parsed_group
+        if parsed_customer is not None:
+            self.config.ads_strength_by_customer = parsed_customer
 
         # Build summary
         parts = [f"Global: {self.config.ads_strength_global:.2f}"]
@@ -2498,11 +2520,15 @@ class AgentTools:
         """
         valid_groups = set(INITIAL_CUSTOMER_GROUPS.keys()) | set(get_discovered_groups(self.conn))
         valid_channels = set(AD_CHANNELS.keys())
+        parsed_global = None
+        parsed_group = None
+        parsed_channel = None
+        parsed_channel_group = None
 
         if global_promotion is not None:
             if not isinstance(global_promotion, (int, float)) or global_promotion < 0:
                 return ToolResult(False, "Global lead promotion must be non-negative")
-            self.config.lead_promotion_global = float(global_promotion)
+            parsed_global = float(global_promotion)
 
         if by_group is not None:
             if not isinstance(by_group, dict):
@@ -2513,7 +2539,7 @@ class AgentTools:
             for gid, val in by_group.items():
                 if not isinstance(val, (int, float)) or val < 0:
                     return ToolResult(False, f"Promotion for {gid} must be non-negative")
-            self.config.lead_promotion_by_group = {k: float(v) for k, v in by_group.items()}
+            parsed_group = {k: float(v) for k, v in by_group.items()}
 
         if by_channel is not None:
             if not isinstance(by_channel, dict):
@@ -2524,7 +2550,7 @@ class AgentTools:
             for ch_id, val in by_channel.items():
                 if not isinstance(val, (int, float)) or val < 0:
                     return ToolResult(False, f"Promotion for channel '{ch_id}' must be non-negative")
-            self.config.lead_promotion_by_channel = {k: float(v) for k, v in by_channel.items()}
+            parsed_channel = {k: float(v) for k, v in by_channel.items()}
 
         if by_channel_group is not None:
             if not isinstance(by_channel_group, dict):
@@ -2532,7 +2558,7 @@ class AgentTools:
             invalid_channels_found = set(by_channel_group.keys()) - valid_channels
             if invalid_channels_found:
                 return ToolResult(False, f"Invalid channels: {invalid_channels_found}. Valid: {sorted(valid_channels)}")
-            parsed = {}
+            parsed_channel_group = {}
             for ch_id, group_dict in by_channel_group.items():
                 if not isinstance(group_dict, dict):
                     return ToolResult(False, f"by_channel_group['{ch_id}'] must be a dict of {{group_id: $/month}}")
@@ -2542,8 +2568,19 @@ class AgentTools:
                 for gid, val in group_dict.items():
                     if not isinstance(val, (int, float)) or val < 0:
                         return ToolResult(False, f"Promotion for channel '{ch_id}', group '{gid}' must be non-negative")
-                parsed[ch_id] = {k: float(v) for k, v in group_dict.items()}
-            self.config.lead_promotion_by_channel_group = parsed
+                parsed_channel_group[ch_id] = {
+                    k: float(v) for k, v in group_dict.items()
+                }
+
+        # 同一次促销调整中任一范围非法，整次调用都不得生效。
+        if parsed_global is not None:
+            self.config.lead_promotion_global = parsed_global
+        if parsed_group is not None:
+            self.config.lead_promotion_by_group = parsed_group
+        if parsed_channel is not None:
+            self.config.lead_promotion_by_channel = parsed_channel
+        if parsed_channel_group is not None:
+            self.config.lead_promotion_by_channel_group = parsed_channel_group
 
         parts = [f"Global: ${self.config.lead_promotion_global:.2f}/mo"]
         if self.config.lead_promotion_by_group:
@@ -2583,11 +2620,15 @@ class AgentTools:
         """
         valid_groups = set(INITIAL_CUSTOMER_GROUPS.keys()) | set(get_discovered_groups(self.conn))
         valid_plans = {'A', 'B', 'C'}
+        parsed_global = None
+        parsed_group = None
+        parsed_customer = None
+        parsed_group_plan = None
 
         if global_promotion is not None:
             if not isinstance(global_promotion, (int, float)) or global_promotion < 0:
                 return ToolResult(False, "Global promotion must be non-negative")
-            self.config.promotion_global = float(global_promotion)
+            parsed_global = float(global_promotion)
 
         if by_group is not None:
             if not isinstance(by_group, dict):
@@ -2598,12 +2639,12 @@ class AgentTools:
             for gid, val in by_group.items():
                 if not isinstance(val, (int, float)) or val < 0:
                     return ToolResult(False, f"Promotion for {gid} must be non-negative")
-            self.config.promotion_by_group = {k: float(v) for k, v in by_group.items()}
+            parsed_group = {k: float(v) for k, v in by_group.items()}
 
         if by_customer is not None:
             if not isinstance(by_customer, dict):
                 return ToolResult(False, "by_customer must be a dict of {customer_id: $/month}")
-            parsed = {}
+            parsed_customer = {}
             for k, v in by_customer.items():
                 try:
                     cid = int(k)
@@ -2611,8 +2652,7 @@ class AgentTools:
                     return ToolResult(False, f"Customer ID '{k}' must be an integer")
                 if not isinstance(v, (int, float)) or v < 0:
                     return ToolResult(False, f"Promotion for customer {k} must be non-negative")
-                parsed[cid] = float(v)
-            self.config.promotion_by_customer = parsed
+                parsed_customer[cid] = float(v)
 
         if by_group_plan is not None:
             if not isinstance(by_group_plan, dict):
@@ -2620,7 +2660,7 @@ class AgentTools:
             invalid_groups = set(by_group_plan.keys()) - valid_groups
             if invalid_groups:
                 return ToolResult(False, f"Invalid group IDs in by_group_plan: {invalid_groups}. Valid: {sorted(valid_groups)}")
-            parsed_gp = {}
+            parsed_group_plan = {}
             for gid, plans_dict in by_group_plan.items():
                 if not isinstance(plans_dict, dict):
                     return ToolResult(False, f"Value for group {gid} must be a dict of {{plan: $/month}}")
@@ -2632,8 +2672,17 @@ class AgentTools:
                     if not isinstance(val, (int, float)) or val < 0:
                         return ToolResult(False, f"Promotion for {gid}/{plan} must be non-negative")
                     parsed_inner[plan] = float(val)
-                parsed_gp[gid] = parsed_inner
-            self.config.promotion_by_group_plan = parsed_gp
+                parsed_group_plan[gid] = parsed_inner
+
+        # 促销的四个范围作为一次原子调整，不保留失败调用的部分结果。
+        if parsed_global is not None:
+            self.config.promotion_global = parsed_global
+        if parsed_group is not None:
+            self.config.promotion_by_group = parsed_group
+        if parsed_customer is not None:
+            self.config.promotion_by_customer = parsed_customer
+        if parsed_group_plan is not None:
+            self.config.promotion_by_group_plan = parsed_group_plan
 
         parts = [f"Global: ${self.config.promotion_global:.2f}/mo"]
         if self.config.promotion_by_group:
