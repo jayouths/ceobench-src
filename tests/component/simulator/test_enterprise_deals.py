@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+import saas_bench.simulator.enterprise as enterprise_module
+from saas_bench.simulator.config import BenchmarkConfig
 from saas_bench.simulator.enterprise import create_negotiation_thread
 
 
@@ -113,3 +115,49 @@ def test_enterprise_deal_rejects_agent_supplied_contract_duration(
         (thread_id,),
     ).fetchone()[0]
     assert agent_turns == 0
+
+
+def test_existing_enterprise_evaluates_offer_at_promoted_price(
+    make_initialized_sim,
+    make_agent_tools,
+    monkeypatch,
+):
+    """存量企业按促销后净价接受报价，成交仍保留促销前报价。"""
+    benchmark_config = BenchmarkConfig(seed=42, promotion_global=20.0)
+    conn, simulator, config = make_initialized_sim(
+        config=benchmark_config,
+        seed=42,
+    )
+    customer_id, thread_id = _create_active_enterprise_thread(conn)
+    monkeypatch.setattr(
+        enterprise_module,
+        "get_qualities_for_all_plans_batch",
+        lambda _conn, customer_ids, _config: {
+            customer_id: {"A": 0.5, "B": 0.5, "C": 0.5}
+            for customer_id in customer_ids
+        },
+    )
+
+    result = make_agent_tools(conn, config).send_enterprise_deal(
+        [[customer_id, [["B", 100.0]]]],
+    )
+    assert result.success
+
+    reply_day = conn.execute(
+        """
+        SELECT next_reply_day FROM enterprise_turns
+        WHERE thread_id = ? ORDER BY message_id DESC LIMIT 1
+        """,
+        (thread_id,),
+    ).fetchone()["next_reply_day"]
+    simulator.current_day = reply_day
+    simulator._process_scheduled_replies(simulator.get_current_config(), [])
+
+    subscription = conn.execute(
+        """
+        SELECT listed_price, promotion, effective_price
+        FROM subscriptions WHERE customer_id = ?
+        """,
+        (customer_id,),
+    ).fetchone()
+    assert tuple(subscription) == pytest.approx((100.0, 20.0, 80.0))

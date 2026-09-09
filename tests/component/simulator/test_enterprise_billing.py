@@ -54,17 +54,26 @@ def _insert_enterprise_subscription(
     billing_day: int,
     seats: int = 10,
     price: float = 80.0,
+    promotion: float = 0.0,
 ) -> None:
     conn.execute(
         """
         INSERT INTO subscriptions (
-            customer_id, plan, listed_price, effective_price, seat_count,
+            customer_id, plan, listed_price, promotion, effective_price, seat_count,
             start_day, status, billing_day_mod30, first_billing_done,
             contract_months, contract_end_day
         )
-        VALUES (?, 'B', ?, ?, ?, 1, 'subscribed', ?, 1, 1, ?)
+        VALUES (?, 'B', ?, ?, ?, ?, 1, 'subscribed', ?, 1, 1, ?)
         """,
-        (customer_id, price, price, seats, billing_day % 30, billing_day + 30),
+        (
+            customer_id,
+            price,
+            promotion,
+            max(0.0, price - promotion),
+            seats,
+            billing_day % 30,
+            billing_day + 30,
+        ),
     )
 
 
@@ -313,3 +322,43 @@ def test_outage_can_trigger_enterprise_churn_prevention(
         (customer_id,),
     ).fetchone()
     assert thread["thread_type"] == "churn_prevention"
+
+
+def test_enterprise_churn_uses_effective_subscription_price(
+    make_initialized_sim,
+    monkeypatch,
+):
+    """企业流失判断应使用当前实际支付价格，而不是促销前原价。"""
+    conn, simulator, _ = make_initialized_sim(seed=42)
+    customer_id = _insert_enterprise_customer(conn)
+    _insert_enterprise_subscription(
+        conn,
+        customer_id,
+        billing_day=5,
+        price=100.0,
+        promotion=20.0,
+    )
+    simulator.current_day = 5
+    config = simulator.get_current_config()
+    simulator._cache_step_day_globals(config)
+    evaluated_prices = []
+
+    def record_price(_left, _right, _c_max, _quality, price, _q_max, _q_min):
+        evaluated_prices.append(price)
+        return 1.0
+
+    monkeypatch.setattr(simulator, "_compute_satisfaction", record_price)
+    monkeypatch.setattr(
+        simulator,
+        "_check_plan_change_opportunity",
+        lambda *args, **kwargs: None,
+    )
+
+    simulator._check_negotiation_triggers(
+        config,
+        overload=0.0,
+        outage=False,
+        active_thread_customers=set(),
+    )
+
+    assert evaluated_prices == [80.0]

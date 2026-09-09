@@ -513,12 +513,16 @@ def evaluate_offerings(
     state: NegotiationState,
     offerings: List[Dict],
     qualities: Dict[str, float],
-    config: BenchmarkConfig
+    config: BenchmarkConfig,
+    promotions_by_plan: Optional[Dict[str, float]] = None,
 ) -> OfferingEvaluation:
     """Evaluate agent's offerings (up to 3) and pick the best one.
 
     Each offering is a dict with keys: price, plan, contract_months.
     qualities maps plan -> perceived quality for that customer.
+    promotions_by_plan maps plan -> ongoing dollar deduction. The customer
+    evaluates the net price, while the returned offer price remains the
+    pre-promotion price agreed with the agent.
 
     Decision logic:
     1. Customer picks offering with highest satisfaction
@@ -529,6 +533,8 @@ def evaluate_offerings(
     Returns OfferingEvaluation with decision and details.
     """
     is_final = state.negotiation_turn >= state.max_negotiation_turns
+
+    promotions_by_plan = promotions_by_plan or {}
 
     # Evaluate each offering
     best_idx = 0
@@ -542,9 +548,10 @@ def evaluate_offerings(
         price = off.get('price', off.get('price_per_seat', 0))
         months = off.get('contract_months', 1)
         quality = qualities.get(plan, 0.0)
+        effective_price = max(0.0, price - promotions_by_plan.get(plan, 0.0))
 
         sat = compute_offering_satisfaction(
-            price, plan, months, quality,
+            effective_price, plan, months, quality,
             state.steepness_left, state.steepness_right, state.c_max,
             state.contract_lockin_penalty, state.q_max, state.q_min
         )
@@ -585,11 +592,13 @@ def evaluate_offerings(
 
     # Counter-offer: use the best offering's plan and months, but with customer's price
     quality = qualities.get(best_plan, 0.0)
-    counter_price = compute_customer_counter_offer(state, quality, best_months, config)
+    effective_counter_price = compute_customer_counter_offer(
+        state, quality, best_months, config
+    )
 
     # If quality < q_min for the best plan, max_accepting_price is 0 — ghost immediately
     # (product doesn't meet minimum standards, no price would work)
-    if counter_price <= 0:
+    if effective_counter_price <= 0:
         return OfferingEvaluation(
             decision='ghost',
             best_offering_idx=best_idx,
@@ -600,6 +609,9 @@ def evaluate_offerings(
             counter_offer_price=None,
             is_ghosting=True,
         )
+
+    # 客户按促销后净价判断，但对外还价仍是促销前的每席报价。
+    counter_price = effective_counter_price + promotions_by_plan.get(best_plan, 0.0)
 
     return OfferingEvaluation(
         decision='counter',

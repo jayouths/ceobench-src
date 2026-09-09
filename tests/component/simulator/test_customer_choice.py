@@ -237,6 +237,7 @@ def test_enterprise_plan_change_uses_weekly_quota_multiplier(
     enterprise = {
         "plan": "A",
         "listed_price": 10.0,
+        "effective_price": 10.0,
         "relationship": 0.5,
         "start_day": 0,
         "open_issue_days": 0,
@@ -258,6 +259,57 @@ def test_enterprise_plan_change_uses_weekly_quota_multiplier(
         q_max=0.8,
         q_min=0.2,
     )
+
+
+def test_enterprise_plan_change_compares_promoted_prices(
+    make_initialized_sim,
+    monkeypatch,
+):
+    config = BenchmarkConfig(
+        seed=123,
+        promotion_by_group_plan={"E1": {"B": 20.0}},
+    )
+    _conn, sim, _config = make_initialized_sim(config=config, seed=123)
+    plan_config = {
+        "price_A": 10.0,
+        "price_B": 25.0,
+        "price_C": 40.0,
+        "tier_A": 4,
+        "tier_B": 4,
+        "tier_C": 4,
+        "quota_A": 10,
+        "quota_B": 20,
+        "quota_C": 30,
+    }
+    evaluated_prices = []
+    monkeypatch.setattr(
+        sim,
+        "_compute_comprehensive_quality_inline",
+        lambda *args, **kwargs: 0.6,
+    )
+
+    def record_price(_left, _right, _c_max, _quality, price, _q_max, _q_min):
+        evaluated_prices.append(price)
+        return 0.0
+
+    monkeypatch.setattr(sim, "_compute_satisfaction", record_price)
+
+    sim._check_plan_change_opportunity(
+        customer_id=1,
+        ent={"plan": "A", "effective_price": 10.0, "group_id": "E1"},
+        current_quality=0.6,
+        steepness_left=0.8,
+        steepness_right=1.6,
+        c_max=100.0,
+        config=plan_config,
+        overload=0.0,
+        outage=False,
+        q_max=0.8,
+        q_min=0.2,
+        weekly_usage_mult=1.0,
+    )
+
+    assert evaluated_prices == [10.0, 5.0, 40.0]
 
 
 def test_quota_factor_drives_daily_quota_event(make_initialized_sim):

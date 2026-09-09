@@ -6126,8 +6126,28 @@ Guidelines:
                 # No valid offerings — treat as no response, skip
                 continue
 
+            # 存量企业报价属于促销前基础价；客户按持续促销后的净价评估。
+            # 新线索的首期优惠由 lead promotion 链路单独处理，不能在这里混用。
+            promotions_by_plan = {}
+            if state.thread_type != 'new_lead':
+                offered_plans = {
+                    off.get('plan', 'B') for off in offerings
+                }
+                promotions_by_plan = {
+                    plan: self._get_effective_promotion(
+                        state.customer_id, state.group_id, plan
+                    )
+                    for plan in offered_plans
+                }
+
             # V2.1: Evaluate offerings using structured satisfaction model
-            evaluation = evaluate_offerings(state, offerings, qualities, self.config)
+            evaluation = evaluate_offerings(
+                state,
+                offerings,
+                qualities,
+                self.config,
+                promotions_by_plan,
+            )
 
             if evaluation.decision == 'ghost':
                 # Max turns reached — customer stops responding
@@ -6514,7 +6534,7 @@ Guidelines:
                    cs.current_steepness_left, cs.current_steepness_right, cs.current_c_max, cs.relationship,
                    cs.open_issue_days,
                    c.usage_demand, c.ads_quality_sensitivity,
-                   s.plan, s.listed_price, s.start_day, s.daily_usage_rate,
+                   s.plan, s.listed_price, s.effective_price, s.start_day, s.daily_usage_rate,
                    s.contract_months, s.contract_end_day
             FROM customers c
             JOIN customer_state cs ON c.customer_id = cs.customer_id
@@ -6580,7 +6600,7 @@ Guidelines:
             q_min, q_max, c_max = self._apply_drift_offsets(ent['group_id'], q_min, q_max, c_max)
 
             # Check participation constraint using asymmetric sigmoid curve
-            price = ent['listed_price']
+            price = ent['effective_price']
             satisfaction = self._compute_satisfaction(steepness_left, steepness_right, c_max, quality, price, q_max, q_min)
 
             # Trigger churn prevention only if satisfaction < 0 AND in churn window
@@ -6631,7 +6651,7 @@ Guidelines:
         Uses the normalized sigmoid curve (0 to 1 as price goes 0 to c_max).
         """
         current_plan = ent['plan']
-        current_price = ent['listed_price']
+        current_price = ent['effective_price']
         current_satisfaction = self._compute_satisfaction(steepness_left, steepness_right, c_max, current_quality, current_price, q_max, q_min)
 
         if weekly_usage_mult is None:
@@ -6645,11 +6665,15 @@ Guidelines:
             if plan == current_plan:
                 continue
 
-            # Get list price for this plan
+            # 备选套餐沿用同一持续促销规则，按切换后真实支付价格比较。
             list_price = config[f'price_{plan}']
+            promotion = self._get_effective_promotion(
+                customer_id, ent['group_id'], plan
+            )
+            effective_price = max(0.0, list_price - promotion)
 
             # Budget constraint
-            if list_price > c_max:
+            if effective_price > c_max:
                 continue
 
             quality = self._compute_comprehensive_quality_inline(
@@ -6660,7 +6684,15 @@ Guidelines:
                 outage,
                 weekly_usage_mult,
             )
-            satisfaction = self._compute_satisfaction(steepness_left, steepness_right, c_max, quality, list_price, q_max, q_min)
+            satisfaction = self._compute_satisfaction(
+                steepness_left,
+                steepness_right,
+                c_max,
+                quality,
+                effective_price,
+                q_max,
+                q_min,
+            )
 
             # Check participation constraint (satisfaction > 0 means acceptable)
             if satisfaction > 0 and satisfaction > best_satisfaction:
