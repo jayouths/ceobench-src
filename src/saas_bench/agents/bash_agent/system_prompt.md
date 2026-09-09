@@ -84,7 +84,7 @@ projects = nm.research.list_research_projects()
 
 # === Analytics & Monitoring ===
 posts = nm.analytics.get_social_posts(days=7, limit=50)
-nm.analytics.set_targeted_ops_spend(targeted_spend={"E1": 100.0})
+nm.analytics.set_targeted_ops_spend(by_group={"E1": 100.0})
 nm.analytics.set_targeted_dev_spend(targeted_spend={"S1": 200.0})
 # Note: rationale is now a required argument of `next-week` (see CLI section below).
 # The standalone `log_rationale` tool has been removed.

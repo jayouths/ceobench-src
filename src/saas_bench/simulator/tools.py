@@ -332,11 +332,6 @@ TOOL_DOCS = {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "targeted_spend": {
-                    "type": "object",
-                    "description": "LEGACY alias for by_group: {group_id: $/day}",
-                    "additionalProperties": {"type": "number"},
-                },
                 "by_group": {
                     "type": "object",
                     "description": "{group_id: $/day}",
@@ -361,7 +356,6 @@ TOOL_DOCS = {
             "required": [],
         },
         "parameters": {
-            "targeted_spend": "LEGACY alias for by_group (kept for backward compatibility).",
             "by_group": "Dict[str, float] — {group_id: $/day}. Groups: S1-S3, E1-E3, discovered.",
             "by_plan": "Dict[str, float] — {plan: $/day}, plan ∈ {A, B, C}. Applies across all groups.",
             "by_group_plan": "Dict[str, Dict[str, float]] — {group_id: {plan: $/day}}. Intersection of group and plan.",
@@ -377,7 +371,6 @@ TOOL_DOCS = {
             "by_group_plan": "Dict[str, Dict[str, float]]",
             "by_customer": "Dict[str, float] — keys are customer_id as strings",
             "total_extra_per_day": "float — sum of all scopes",
-            "targeted_spend": "Dict[str, float] — legacy alias for by_group",
         },
         "mechanics": {
             "per_scope_resolution": f"Each scope runs its OWN Poisson pool, partitioned by customer group. Within a pool of size |P|, each group g contributes n_g members and draws Poisson(scale_g × spend × n_g / |P|) resolutions, where scale_g = {DEFAULT_INDIVIDUAL_OPS_SCALE:g} for individual groups (S*, D_S*) and scale_g = {DEFAULT_ENTERPRISE_OPS_SCALE:g} for enterprise groups (E*, D_E*). Enterprise issues require ~{DEFAULT_INDIVIDUAL_OPS_SCALE / DEFAULT_ENTERPRISE_OPS_SCALE:g}× as much spend to resolve as individual issues. Pure-group pools (by_group, by_group_plan, by_customer when the customer is in a single group) collapse to scale_g × spend. Mixed pools (by_plan with mixed groups) yield a composition-weighted rate. Scopes are processed independently AFTER the global ops pool; a customer covered by multiple scopes is skipped after first resolution in the day.",
@@ -396,7 +389,7 @@ TOOL_DOCS = {
         },
         "sample_io": {
             "success": [
-                {"label": "Legacy: two enterprise groups", "input": {"targeted_spend": {"E1": 300, "E2": 200}}, "output": "Targeted ops spend updated (extra $500/day on top of global ops):\n  Groups: E1: +$300/day, E2: +$200/day"},
+                {"label": "Two enterprise groups", "input": {"by_group": {"E1": 300, "E2": 200}}, "output": "Targeted ops spend updated (extra $500/day on top of global ops):\n  Groups: E1: +$300/day, E2: +$200/day"},
                 {"label": "Mixed scopes", "input": {"by_group": {"E1": 300}, "by_plan": {"A": 200}, "by_customer": {"42": 50}}, "output": "Targeted ops spend updated (extra $550/day on top of global ops):\n  Groups: E1: +$300/day\n  Plans: A: +$200/day\n  Customers: 1 target(s), +$50/day total"},
                 {"label": "Group-plan intersection", "input": {"by_group_plan": {"E1": {"A": 200}, "E2": {"C": 100}}}, "output": "Targeted ops spend updated (extra $300/day on top of global ops):\n  Group-Plans: E1/A: +$200/day, E2/C: +$100/day"},
                 {"label": "Clear one scope", "input": {"by_group": {}}, "output": "Targeted ops spend updated (extra $0/day on top of global ops):\n  (all scopes empty — no targeted ops spend)"},
@@ -404,7 +397,6 @@ TOOL_DOCS = {
             "failure": [
                 {"label": "Invalid group", "input": {"by_group": {"INVALID": 100}}, "output": "Invalid group IDs: {'INVALID'}. Valid: ['E1', 'E2', 'E3', 'S1', 'S2', 'S3']"},
                 {"label": "Invalid plan", "input": {"by_plan": {"D": 100}}, "output": "Invalid plans: {'D'}. Valid: ['A', 'B', 'C']"},
-                {"label": "Both legacy + new", "input": {"targeted_spend": {"E1": 100}, "by_group": {"E2": 100}}, "output": "Pass either `targeted_spend` (legacy) or `by_group`, not both."},
             ],
         }
     },
@@ -2241,7 +2233,6 @@ class AgentTools:
 
     def set_targeted_ops_spend(
         self,
-        targeted_spend: Optional[Dict[str, float]] = None,
         by_group: Optional[Dict[str, float]] = None,
         by_plan: Optional[Dict[str, float]] = None,
         by_group_plan: Optional[Dict[str, Dict[str, float]]] = None,
@@ -2263,18 +2254,11 @@ class AgentTools:
         Any argument left as None is unchanged; passing {} clears that scope.
 
         Args:
-            targeted_spend: LEGACY alias for by_group. {group_id: $/day}.
             by_group: {group_id: $/day}. Valid group_ids: S1-S3, E1-E3, discovered.
             by_plan: {plan: $/day}. Plan ∈ {A, B, C}. Applies to all subscribers on that plan.
             by_group_plan: {group_id: {plan: $/day}}. Intersection of group + plan.
             by_customer: {customer_id_str: $/day}. Single-customer boost (like promotion).
         """
-        # Legacy alias: targeted_spend == by_group
-        if targeted_spend is not None and by_group is None:
-            by_group = targeted_spend
-        elif targeted_spend is not None and by_group is not None:
-            return ToolResult(False, "Pass either `targeted_spend` (legacy) or `by_group`, not both.")
-
         valid_groups = set(INITIAL_CUSTOMER_GROUPS.keys()) | set(get_discovered_groups(self.conn))
         valid_plans = {'A', 'B', 'C'}
 
@@ -2386,8 +2370,6 @@ class AgentTools:
             'by_group_plan': gp,
             'by_customer': {str(k): v for k, v in c.items()},
             'total_extra_per_day': total_extra,
-            # Legacy alias
-            'targeted_spend': g,
         })
 
     def set_targeted_dev_spend(self, targeted_spend: Dict[str, float]) -> ToolResult:

@@ -1095,7 +1095,6 @@ Set ADDITIONAL operations spending targeted at specific scopes (group, plan, gro
 
 **Parameters:**
 
-- `targeted_spend`: LEGACY alias for by_group (kept for backward compatibility).
 - `by_group`: Dict[str, float] — {group_id: $/day}. Groups: S1-S3, E1-E3, discovered.
 - `by_plan`: Dict[str, float] — {plan: $/day}, plan ∈ {A, B, C}. Applies across all groups.
 - `by_group_plan`: Dict[str, Dict[str, float]] — {group_id: {plan: $/day}}. Intersection of group and plan.
@@ -1106,13 +1105,6 @@ Set ADDITIONAL operations spending targeted at specific scopes (group, plan, gro
 {
   "type": "object",
   "properties": {
-    "targeted_spend": {
-      "type": "object",
-      "description": "LEGACY alias for by_group: {group_id: $/day}",
-      "additionalProperties": {
-        "type": "number"
-      }
-    },
     "by_group": {
       "type": "object",
       "description": "{group_id: $/day}",

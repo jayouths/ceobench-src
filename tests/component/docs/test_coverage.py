@@ -7,6 +7,7 @@ import tempfile
 from inspect import Parameter, signature
 from pathlib import Path
 
+from saas_bench.novamind_api.analytics import set_targeted_ops_spend
 from saas_bench.novamind_api.market import research_group
 from saas_bench.simulator.config import (
     BenchmarkConfig,
@@ -123,6 +124,16 @@ def test_group_research_requires_explicit_target_level():
         signature(research_group).parameters["target_level"].default
         is Parameter.empty
     )
+
+
+def test_targeted_ops_docs_match_public_sdk():
+    """定向运营的四种范围必须在文档和公开客户端中同时可用。"""
+    expected_scopes = {"by_group", "by_plan", "by_group_plan", "by_customer"}
+    docs = TOOL_DOCS["set_targeted_ops_spend"]
+    sdk_parameters = set(signature(set_targeted_ops_spend).parameters)
+
+    assert set(docs["inputSchema"]["properties"]) == expected_scopes
+    assert sdk_parameters == expected_scopes
 
 
 def test_research_docs_follow_configured_tiers(tmp_path):

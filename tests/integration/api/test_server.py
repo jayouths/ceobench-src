@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from saas_bench.runtime.api_server import NovaMindAPIServer, _APIHandler
+from saas_bench.novamind_api import analytics
 from saas_bench.agents.bash_agent.analysis.signals import SignalCollector
 from saas_bench.simulator.database import get_mrr
 from saas_bench.simulator.public_week_snapshot import build_public_week_snapshot
@@ -28,6 +29,64 @@ from saas_bench.novamind_api._transport import request_json
 from tests.support.harness import (
     EMPTY_ENVIRONMENT_LLM_USAGE,
 )
+
+
+def test_targeted_ops_sdk_sends_all_four_scopes(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        analytics._client,
+        "call",
+        lambda tool, args: calls.append((tool, args)) or {"updated": True},
+    )
+
+    result = analytics.set_targeted_ops_spend(
+        by_group={"E1": 300},
+        by_plan={"A": 200},
+        by_group_plan={"E2": {"B": 100}},
+        by_customer={"42": 50},
+    )
+
+    assert result == {"updated": True}
+    assert calls == [
+        (
+            "set_targeted_ops_spend",
+            {
+                "by_group": {"E1": 300},
+                "by_plan": {"A": 200},
+                "by_group_plan": {"E2": {"B": 100}},
+                "by_customer": {"42": 50},
+            },
+        )
+    ]
+
+
+def test_targeted_ops_api_dispatches_all_four_scopes():
+    calls = []
+    tools = SimpleNamespace(
+        current_day=0,
+        set_targeted_ops_spend=lambda **kwargs: calls.append(kwargs) or "ok",
+    )
+    server = NovaMindAPIServer(tools=tools)
+
+    result = server.execute_tool(
+        "set_targeted_ops_spend",
+        {
+            "by_group": {"E1": 300},
+            "by_plan": {"A": 200},
+            "by_group_plan": {"E2": {"B": 100}},
+            "by_customer": {"42": 50},
+        },
+    )
+
+    assert result == "ok"
+    assert calls == [
+        {
+            "by_group": {"E1": 300},
+            "by_plan": {"A": 200},
+            "by_group_plan": {"E2": {"B": 100}},
+            "by_customer": {"42": 50},
+        }
+    ]
 
 def test_api_rejects_checkpoint_while_week_state_is_unstable():
     calls = []

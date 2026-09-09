@@ -63,7 +63,7 @@
 | P0-22 | 企业新线索丢失新客促销 | 企业线索转化、首期收入和促销投入评价 | 已修复 |
 | P0-23 | 客群研究的默认等级不会按说明递增 | 研究支出、市场信息精度和决策依据 | 已修复 |
 | P0-24 | 客户级广告在关键去留决策中被漏算 | 广告收入、个人续费、企业流失和套餐切换 | 已修复 |
-| P0-25 | 定向运营的三种公开能力无法通过正式 API 使用 | Agent 可行动作、工单解决和组间策略差异 | 待复核 |
+| P0-25 | 定向运营的三种公开能力无法通过正式 API 使用 | Agent 可行动作、工单解决和组间策略差异 | 已复核，已修复（公开 SDK 与 API 分发测试通过） |
 | P0-26 | Agent 被错误告知 `ads_strength` 会放大广告获客 | 广告决策、获客、感知质量和留存 | 待复核 |
 | P0-27 | 多参数配置工具失败后仍可能部分改变世界 | 广告、促销、运营投入和轨迹可解释性 | 待复核 |
 | P0-28 | 已累积的市场偏好漂移会被写入快照后再次叠加 | 客户预算、质量门槛、满意度、续费和流失 | 待复核 |
@@ -815,7 +815,7 @@ Agent 可以对高价值客户施加客户级广告：模拟器会按该强度�
 ### 证据
 
 - `TOOL_DOCS['set_targeted_ops_spend']` 的 schema、参数、返回值和示例都公开了 `by_group`、`by_plan`、`by_group_plan` 和 `by_customer`，该内容已生成到 Agent 可读的 `public/docs/api/analytics.json` 和工具参考文档。
-- `AgentTools.set_targeted_ops_spend` 确实有五个参数：四种新范围加一个按客群的旧别名 `targeted_spend`。
+- 修复前，`AgentTools.set_targeted_ops_spend` 有五个参数：四种新范围加一个按客群的旧别名 `targeted_spend`。
 - 正式公开包 `novamind_api/analytics.py` 的函数签名只是 `set_targeted_ops_spend(targeted_spend)`；直接传入 `by_plan` 等关键字会在客户端触发 `TypeError`。
 - 即使绕过公开包直接请求服务端，`runtime/api_server.py` 也使用 `tools.set_targeted_ops_spend(args.get('targeted_spend', args))`，会把 `{'by_plan': ...}` 当成按客群字典，随后以非法客群 ID 拒绝。
 - Bash Agent 的系统提示明确指引它阅读 `docs/api/analytics.json`，因此这不是仅开发者可见的内部文档。
@@ -824,9 +824,13 @@ Agent 可以对高价值客户施加客户级广告：模拟器会按该强度�
 
 Agent 可能根据正式文档试图为某个套餐、某个客群下的某个套餐，或某个高价值客户增加运营支持，但调用必然失败。模拟器仍然会对这些工单施加服务压力和流失惩罚，却不提供文档承诺的对应精准干预能力。不同 Agent 是否尝试这些动作，还会额外影响工具轮次、耗时和决策质量。
 
-### 候选修复方向
+### 作者原意
 
-先确定主实验是否需要保留四种定向范围。若保留，公开 Python 函数、HTTP 分发、底层方法和文档必须使用同一组语义参数；若只保留按客群定向，就应删除其余三种实现和所有 Agent 可见说明，避免将不可达能力留在决策空间中。
+作者在 `v3.4h` 提交中明确将旧的单一“按客群”定向扩展为四种独立范围，提交说明直接写明 `4-scope targeted_ops_spend handler`，并表示该设计与促销工具保持一致。同一提交同时实现了四类配置、工单处理、成本汇总、Agent 可见文档及 26 个无 LLM 测试。因此四种范围是正式经营规则，公开 SDK 和 API Server 未同步修改属于集成遗漏。
+
+### 已采用修复
+
+公开 Python SDK 改为显式接受 `by_group`、`by_plan`、`by_group_plan` 和 `by_customer`；API Server 按同名参数逐项分发给底层工具。工具 schema、示例、系统提示和返回数据也只保留这四种正式表达，删除旧 `targeted_spend` 别名。新增测试分别验证 SDK 请求体和服务端分发参数，避免以后再出现“文档可见、底层存在、中间链路不可达”的情况。
 
 ## 28. P0-26：Agent 被错误告知 `ads_strength` 会放大广告获客
 
@@ -1781,7 +1785,7 @@ end_day = max(contract_end_day, current_day)
 - 客户对 CEO 帖子的高传播回复会向 `social_media_posts.reputation_impact` 写入非零值，但唯一会将该字段应用到声誉的 `process_social_media_reputation` 从未被正式日推进调用。当前公开规则只承诺 CEO 帖子通过 `effect_by_group` 改变获客倍率，尚不能确定这是遗漏的声誉效果，还是废弃字段和死代码。
 - `daily_usage` 对 Agent 和离线分析公开为“每客户每日用量记录”，但 `_compute_usage` 每 10 天会删除 30 天前的行。服务总用量仍可从 `service_day` 长期查询，但客户级和套餐级长期用量无法从最终数据库复原。当前新评价事实已保留所需的日级汇总，因此先按公开数据保留口径候选记录，不改变主实验规则。
 - `set_usage_quotas` 的正式 schema 要求 A/B/C 全部传入，但公开 Python 签名与成功示例又允许只修改一个套餐；底层实现会拒绝这种部分请求。完整请求可正常生效，当前先按工具契约矛盾记录，不提前定性为 P0。
-- 底层 `set_targeted_ops_spend(by_customer=...)` 只校验客户 ID 能否转为整数，不校验客户是否存在、是否仍在订阅或是否有开放工单。无效目标没有工单解决效果，但配置金额仍会每日全额计入运营成本。当前主实验的公开 Python API 只能调用按客群的旧入口，Agent 尚无法传入 `by_customer`，因此暂不计为可触发的主实验 P0。未来修复 P0-25、正式开放客户级定向运营时，必须同时补齐目标有效性校验和失效目标的自动清理口径。
+- 底层 `set_targeted_ops_spend(by_customer=...)` 只校验客户 ID 能否转为整数，不校验客户是否存在、是否仍在订阅或是否有开放工单。无效目标没有工单解决效果，但配置金额仍会每日全额计入运营成本。作者原测试明确使用当时不存在的客户 ID `42` 并期望配置成功，因此“必须已存在”不是现有权威契约。是否改为只允许存量订阅客户、客户离开后是否自动清理，会改变经营规则，需后续单独对齐。
 - 每日先更新客户满意度，再生成新工单；但工单生成为了避免再次查表，使用了满意度更新前缓存的订阅者行。因此质量对新工单概率的影响滞后一天，而当日故障仍通过独立的 `issue_outage_factor` 立即生效。当前先按日内时序口径候选记录，不提前定性为 P0。
 - 真实满意度计算使用 `service_overload_weight=0.08` 和 `service_outage_weight=0.20`，但传给社交内容生成上下文的 `penalty` 字段使用另一组 `overload_satisfaction_weight=0.15` 和 `outage_satisfaction_weight=0.25`。这不改变满意度、去留或成本，但可能使生成的客户帖子对事件强度的描述与真实扣减不一致，暂按解释口径候选记录。
 - `_detect_churn_reason` 希望通过 `global_state.overload_rate` 和 `global_state.outage_active` 识别可靠性流失，但模拟器从未写入这两个键，因此该分支不会命中。当前实际去留已由其他质量逻辑决定，这里主要污染订阅表的 `churn_reason` 归因标签；在论文指标未使用流失原因分布前，先按评价口径候选记录。

@@ -5,7 +5,6 @@
     "category": "Marketing & Spend",
     "description": "Set ADDITIONAL operations spending targeted at specific scopes (group, plan, group+plan, individual customer). Each scope runs its own independent Poisson resolution pool on top of the global ops pool.",
     "parameters": {
-      "targeted_spend": "LEGACY alias for by_group (kept for backward compatibility).",
       "by_group": "Dict[str, float] \u2014 {group_id: $/day}. Groups: S1-S3, E1-E3, discovered.",
       "by_plan": "Dict[str, float] \u2014 {plan: $/day}, plan \u2208 {A, B, C}. Applies across all groups.",
       "by_group_plan": "Dict[str, Dict[str, float]] \u2014 {group_id: {plan: $/day}}. Intersection of group and plan.",
@@ -14,13 +13,6 @@
     "inputSchema": {
       "type": "object",
       "properties": {
-        "targeted_spend": {
-          "type": "object",
-          "description": "LEGACY alias for by_group: {group_id: $/day}",
-          "additionalProperties": {
-            "type": "number"
-          }
-        },
         "by_group": {
           "type": "object",
           "description": "{group_id: $/day}",
@@ -61,8 +53,7 @@
       "by_plan": "Dict[str, float]",
       "by_group_plan": "Dict[str, Dict[str, float]]",
       "by_customer": "Dict[str, float] \u2014 keys are customer_id as strings",
-      "total_extra_per_day": "float \u2014 sum of all scopes",
-      "targeted_spend": "Dict[str, float] \u2014 legacy alias for by_group"
+      "total_extra_per_day": "float \u2014 sum of all scopes"
     },
     "impact": "Fine-grained targeting of operations spend. Use by_customer to rescue a high-value individual, by_plan for tier-wide support surge, by_group for segment-wide, and by_group_plan for the most precise segment\u00d7tier investment.",
     "example_call": {
