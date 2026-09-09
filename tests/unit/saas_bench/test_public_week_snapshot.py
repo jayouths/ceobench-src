@@ -2,7 +2,9 @@
 
 from saas_bench.simulator.public_week_snapshot import (
     build_public_week_snapshot,
+    load_public_week_snapshot,
     render_weekly_dashboard,
+    save_public_week_snapshot,
 )
 from saas_bench.simulator.simulation import DayResult
 
@@ -106,3 +108,51 @@ def test_weekly_activity_has_one_structured_source(make_initialized_sim):
     assert "Outage: YES (15 min total)" in dashboard
     assert "[forecast]\n" + "x" * 500 in dashboard
     assert "  • 3 new enterprise leads" in dashboard
+
+
+def test_public_week_snapshot_round_trips_complete_week(make_initialized_sim):
+    conn, _, _ = make_initialized_sim()
+    result = DayResult(
+        day=7,
+        total_usage=1_080,
+        overload=0.125,
+        outage=True,
+        downtime_minutes=15,
+        p95_ms=284.4,
+        error_rate=0.004,
+        new_subscribers=5,
+        new_leads=299,
+        individual_cancellations=2,
+        enterprise_cancellations=1,
+        enterprise_cancelled_seats=12,
+        individual_upgrades=1,
+        enterprise_upgrades=2,
+        individual_downgrades=3,
+        enterprise_downgrades=4,
+        payments_received=0,
+        total_costs=0,
+        cash=1_000_000,
+        mrr=0,
+        new_individual_leads=296,
+        new_enterprise_leads=3,
+        new_individual_subscribers=5,
+        new_enterprise_subscriber_accounts=1,
+        new_enterprise_subscribers_seats=20,
+        total_individual_subscribers=5,
+        total_enterprise_subscribers=1,
+        total_enterprise_subscription_seats=20,
+    )
+    snapshot = build_public_week_snapshot(
+        conn,
+        day=7,
+        day_result=result,
+        inbox_items=["研发项目已完成"],
+    )
+
+    save_public_week_snapshot(conn, snapshot)
+    conn.commit()
+
+    restored = load_public_week_snapshot(conn)
+    assert restored == snapshot
+    assert restored.weekly_activity == snapshot.weekly_activity
+    assert restored.inbox_items == ["研发项目已完成"]

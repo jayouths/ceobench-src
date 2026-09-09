@@ -28,6 +28,7 @@ from saas_bench.simulator.config import BenchmarkConfig, SCENARIO_PACKS, Scenari
 from saas_bench.simulator.database import (
     get_total_api_costs,
     init_database,
+    initialize_runtime_state_schema,
     restore_config_overrides,
 )
 from saas_bench.simulator.simulation import Simulator
@@ -355,6 +356,9 @@ def cmd_start_server(args, base: Path):
         conn.execute("ALTER TABLE agent_social_media_posts ADD COLUMN reasoning_by_group TEXT NOT NULL DEFAULT '{}'")
     except Exception:
         pass  # Column already exists
+    # 加载已有加密会话时不会再跑 init_database，恢复所需的私有表必须在此补齐。
+    initialize_runtime_state_schema(conn)
+    conn.commit()
 
     # Reconstruct simulator state
     rng = Generator(PCG64(seed))

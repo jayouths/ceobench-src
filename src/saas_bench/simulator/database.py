@@ -329,6 +329,18 @@ TABLE_DOCS = {
 }
 
 
+def initialize_runtime_state_schema(conn: sqlite3.Connection) -> None:
+    """初始化断点恢复所需的私有运行时状态表。"""
+
+    # 该表不注册到 TABLE_DOCS，因此不会扩大普通 Agent 的数据可见性。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _runtime_state (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL
+        )
+    """)
+
+
 def init_database(db_path: Path) -> sqlite3.Connection:
     """Initialize the world database with all required tables."""
     conn = sqlite3.connect(db_path)
@@ -1084,6 +1096,7 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         END;
     """)
 
+    initialize_runtime_state_schema(conn)
     initialize_evaluation_schema(conn)
 
     # 成本表只保存实验元数据。旧表把所有金额误标为 USD，不能与新原币口径混用。

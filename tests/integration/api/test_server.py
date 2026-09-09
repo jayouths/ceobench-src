@@ -16,7 +16,12 @@ from saas_bench.runtime.api_server import NovaMindAPIServer, _APIHandler
 from saas_bench.novamind_api import analytics
 from saas_bench.agents.bash_agent.analysis.signals import SignalCollector
 from saas_bench.simulator.database import get_mrr
-from saas_bench.simulator.public_week_snapshot import build_public_week_snapshot
+from saas_bench.simulator.public_week_snapshot import (
+    build_public_week_snapshot,
+    load_public_week_snapshot,
+    save_public_week_snapshot,
+)
+from saas_bench.simulator.simulation import DayResult
 from saas_bench.simulator.tools import _PUBLIC_CURRENT_MRR_SQL
 
 from saas_bench.runtime import _public_cli
@@ -29,6 +34,39 @@ from saas_bench.novamind_api._transport import request_json
 from tests.support.harness import (
     EMPTY_ENVIRONMENT_LLM_USAGE,
 )
+
+
+def _sample_week_result() -> DayResult:
+    return DayResult(
+        day=7,
+        total_usage=1_080,
+        overload=0.125,
+        outage=True,
+        downtime_minutes=15,
+        p95_ms=284.4,
+        error_rate=0.004,
+        new_subscribers=5,
+        new_leads=299,
+        individual_cancellations=2,
+        enterprise_cancellations=1,
+        enterprise_cancelled_seats=12,
+        individual_upgrades=1,
+        enterprise_upgrades=2,
+        individual_downgrades=3,
+        enterprise_downgrades=4,
+        payments_received=0,
+        total_costs=0,
+        cash=1_000_000,
+        mrr=0,
+        new_individual_leads=296,
+        new_enterprise_leads=3,
+        new_individual_subscribers=5,
+        new_enterprise_subscriber_accounts=1,
+        new_enterprise_subscribers_seats=20,
+        total_individual_subscribers=5,
+        total_enterprise_subscribers=1,
+        total_enterprise_subscription_seats=20,
+    )
 
 
 def test_targeted_ops_sdk_sends_all_four_scopes(monkeypatch):
@@ -171,6 +209,91 @@ def test_dashboard_api_returns_text_and_public_snapshot(make_initialized_sim):
     )
 
 
+def test_dashboard_api_restores_complete_week_snapshot(make_initialized_sim):
+    conn, _, _ = make_initialized_sim()
+    snapshot = build_public_week_snapshot(
+        conn,
+        day=7,
+        day_result=_sample_week_result(),
+        inbox_items=["研发项目已完成"],
+    )
+    save_public_week_snapshot(conn, snapshot)
+    conn.commit()
+
+    # 新服务实例没有任何内存快照，模拟从 Day 7 断点恢复。
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=7), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_dashboard_get()
+
+    payload, status = responses[0]
+    assert status == 200
+    assert payload["public_week_snapshot"] == snapshot.to_dict()
+    assert "Usage: 1,080 units" in payload["dashboard"]
+    assert "  • 研发项目已完成" in payload["dashboard"]
+
+
+@pytest.mark.parametrize("snapshot_day", [None, 14])
+def test_dashboard_api_rejects_missing_or_stale_snapshot_after_day_zero(
+    make_initialized_sim,
+    snapshot_day,
+):
+    conn, _, _ = make_initialized_sim()
+    if snapshot_day is not None:
+        save_public_week_snapshot(
+            conn,
+            build_public_week_snapshot(conn, day=snapshot_day),
+        )
+        conn.commit()
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=7), conn=conn)
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._send_json = lambda data, status=200: None
+
+    with pytest.raises(RuntimeError, match="[Pp]ublic week snapshot"):
+        handler._handle_dashboard_get()
+
+
+def test_week_advance_commits_public_snapshot_before_checkpoint_callback(
+    make_initialized_sim,
+    monkeypatch,
+):
+    conn, _, _ = make_initialized_sim()
+    monkeypatch.setattr(
+        "saas_bench.simulator.environment.get_thread_inbox_items",
+        lambda *args, **kwargs: [],
+    )
+    tools = SimpleNamespace(current_day=0)
+    tools.set_current_day = lambda day: setattr(tools, "current_day", day)
+    callback_observations = []
+
+    def day_callback(day, dashboard):
+        callback_observations.append(
+            (day, dashboard, conn.in_transaction, load_public_week_snapshot(conn))
+        )
+
+    server = NovaMindAPIServer(
+        tools=tools,
+        simulator=SimpleNamespace(step_week=_sample_week_result),
+        conn=conn,
+        day_callback=day_callback,
+    )
+
+    result = server.advance_week()
+
+    assert result["success"] is True
+    callback_day, callback_dashboard, in_transaction, persisted_snapshot = (
+        callback_observations[0]
+    )
+    assert callback_day == 7
+    assert callback_dashboard == result["dashboard"]
+    assert in_transaction is False
+    assert persisted_snapshot == server._last_public_week_snapshot
+
+
 def test_analysis_signal_queries_pass_public_query_policy(
     make_initialized_sim,
     make_agent_tools,
@@ -209,6 +332,7 @@ def test_analysis_signal_queries_pass_public_query_policy(
 @pytest.mark.parametrize(
     "table_name",
     [
+        "_runtime_state",
         "_eval_subscription_day",
         "_eval_subscription_event",
         "_eval_segment_day",

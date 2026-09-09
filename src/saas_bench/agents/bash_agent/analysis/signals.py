@@ -6,9 +6,10 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from pydantic import TypeAdapter
-
-from saas_bench.simulator.public_week_snapshot import PublicWeekSnapshot
+from saas_bench.simulator.public_week_snapshot import (
+    PublicWeekSnapshot,
+    parse_public_week_snapshot,
+)
 
 from . import signal_queries
 from .signal_models import (
@@ -58,13 +59,6 @@ from .signal_models import (
 
 
 PublicQuery = Callable[[str], list[dict[str, Any]]]
-_SNAPSHOT_ADAPTER = TypeAdapter(PublicWeekSnapshot)
-
-
-def parse_public_week_snapshot(payload: Any) -> PublicWeekSnapshot:
-    """校验 API 返回的快照，禁止结构变化静默进入实验。"""
-
-    return _SNAPSHOT_ADAPTER.validate_python(payload)
 
 
 def _window(day: int, required_days: int, offset_days: int = 0) -> ObservationWindow:

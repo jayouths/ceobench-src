@@ -7,6 +7,8 @@ import sqlite3
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Sequence
 
+from pydantic import TypeAdapter
+
 from .config import BenchmarkConfig, MODEL_TIERS
 from .database import get_cash, get_config, get_discovered_groups
 from .simulation import DayResult
@@ -110,6 +112,54 @@ class PublicWeekSnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+_SNAPSHOT_ADAPTER = TypeAdapter(PublicWeekSnapshot)
+_LAST_PUBLIC_WEEK_SNAPSHOT_KEY = "last_public_week_snapshot"
+
+
+def parse_public_week_snapshot(payload: Any) -> PublicWeekSnapshot:
+    """校验序列化快照，禁止结构变化静默进入实验。"""
+
+    return _SNAPSHOT_ADAPTER.validate_python(payload)
+
+
+def save_public_week_snapshot(
+    conn: sqlite3.Connection,
+    snapshot: PublicWeekSnapshot,
+) -> None:
+    """保存最后一份完整公开周快照，由调用方控制事务边界。"""
+
+    payload = json.dumps(
+        snapshot.to_dict(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    conn.execute(
+        """
+        INSERT INTO _runtime_state (key, value_json)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json
+        """,
+        (_LAST_PUBLIC_WEEK_SNAPSHOT_KEY, payload),
+    )
+
+
+def load_public_week_snapshot(
+    conn: sqlite3.Connection,
+) -> PublicWeekSnapshot | None:
+    """读取断点中的完整公开周快照；未产生过周快照时返回 None。"""
+
+    row = conn.execute(
+        "SELECT value_json FROM _runtime_state WHERE key = ?",
+        (_LAST_PUBLIC_WEEK_SNAPSHOT_KEY,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return parse_public_week_snapshot(json.loads(row[0]))
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError("Invalid persisted public week snapshot") from exc
 
 
 def _get_subscriber_counts(

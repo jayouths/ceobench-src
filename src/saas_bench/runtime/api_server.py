@@ -29,7 +29,9 @@ from ..simulator.database import TABLE_DOCS
 from ..simulator.public_week_snapshot import (
     PublicWeekSnapshot,
     build_public_week_snapshot,
+    load_public_week_snapshot,
     render_weekly_dashboard,
+    save_public_week_snapshot,
 )
 
 
@@ -734,15 +736,28 @@ class _APIHandler(BaseHTTPRequestHandler):
     def _handle_dashboard_get(self):
         """Return current dashboard: GET /dashboard.
 
-        Returns the last built dashboard (from advance_week), or builds
-        a fresh one for the current day if none exists yet.
+        Returns the last built dashboard (from advance_week), restoring the
+        persisted complete snapshot after a process restart.
         """
         server: NovaMindAPIServer = self.server._api_server
         snapshot = server._last_public_week_snapshot
         dashboard = server._last_dashboard
         if snapshot is None and server.conn:
             day = server.tools.current_day
-            snapshot = build_public_week_snapshot(server.conn, day)
+            snapshot = load_public_week_snapshot(server.conn)
+            if snapshot is None:
+                # Day 0 尚未有上一周活动，可以直接从初始库生成。
+                if day != 0:
+                    raise RuntimeError(
+                        f"Missing public week snapshot for simulation day {day}"
+                    )
+                snapshot = build_public_week_snapshot(server.conn, day)
+            elif snapshot.day != day:
+                # 错日快照会把另一周的活动反馈交给 Agent，必须中止恢复。
+                raise RuntimeError(
+                    "Public week snapshot day mismatch: "
+                    f"snapshot={snapshot.day}, current={day}"
+                )
             server._last_public_week_snapshot = snapshot
         if not dashboard and snapshot is not None:
             dashboard = render_weekly_dashboard(snapshot)
@@ -1209,6 +1224,11 @@ class NovaMindAPIServer:
             build_public_week_snapshot(self.conn, new_day, week_result, None, inbox)
             if self.conn else None
         )
+        if public_week_snapshot is not None:
+            # 先持久化完整观察，再生成断点；恢复后才能与连续运行看到同一份 Dashboard。
+            with self._lock:
+                save_public_week_snapshot(self.conn, public_week_snapshot)
+                self.conn.commit()
         if self.dashboard_callback:
             dashboard = self.dashboard_callback(new_day, week_result)
         elif public_week_snapshot is not None:
