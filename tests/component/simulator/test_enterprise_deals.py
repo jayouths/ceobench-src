@@ -52,6 +52,18 @@ def _insert_enterprise_customer(conn) -> int:
 
 
 def _create_active_enterprise_thread(conn) -> tuple[int, int]:
+    customer_id = _create_enterprise_subscriber(conn)
+    thread_id, _ = create_negotiation_thread(
+        conn,
+        customer_id,
+        "renegotiation",
+        0,
+    )
+    conn.commit()
+    return customer_id, thread_id
+
+
+def _create_enterprise_subscriber(conn) -> int:
     customer_id = _insert_enterprise_customer(conn)
     conn.execute(
         """
@@ -64,14 +76,8 @@ def _create_active_enterprise_thread(conn) -> tuple[int, int]:
         """,
         (customer_id,),
     )
-    thread_id, _ = create_negotiation_thread(
-        conn,
-        customer_id,
-        "renegotiation",
-        0,
-    )
     conn.commit()
-    return customer_id, thread_id
+    return customer_id
 
 
 def _create_rejectable_enterprise_thread(
@@ -480,6 +486,42 @@ def test_enterprise_deal_rejects_non_integer_customer_id(
 
     assert not result.success
     assert "customer_id must be a positive integer" in result.message
+
+
+def test_enterprise_deal_rejects_duplicate_customer_before_creating_threads(
+    make_initialized_sim,
+    make_agent_tools,
+):
+    """同批重复客户必须整批失败，不能创建两条互相冲突的谈判。"""
+    conn, _, config = make_initialized_sim(seed=42)
+    customer_id = _create_enterprise_subscriber(conn)
+
+    result = make_agent_tools(conn, config).send_enterprise_deal([
+        [customer_id, [["B", 50.0]]],
+        [customer_id, [["B", 45.0]]],
+    ])
+
+    assert not result.success
+    assert "duplicate customer_id" in result.message
+    assert result.data["results"] == [{
+        "customer_id": customer_id,
+        "error": "duplicate customer_id",
+    }]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM enterprise_turns WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()[0] == 0
+
+    malformed_duplicate = make_agent_tools(conn, config).send_enterprise_deal([
+        [customer_id, [["B", 50.0]]],
+        [customer_id, []],
+    ])
+    assert not malformed_duplicate.success
+    assert "duplicate customer_id" in malformed_duplicate.message
+    assert conn.execute(
+        "SELECT COUNT(*) FROM enterprise_turns WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(

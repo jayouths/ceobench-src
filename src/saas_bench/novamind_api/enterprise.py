@@ -14,7 +14,8 @@ def send_enterprise_deal(deals: List) -> Dict:
     If customer has an open thread, this replies; otherwise initiates renegotiation.
 
     Args:
-        deals: List of [customer_id, [offerings]] pairs.
+        deals: List of [customer_id, [offerings]] pairs. Each customer ID may
+            appear only once; duplicates reject the entire call.
 
     Returns:
         Dict with per-customer results.

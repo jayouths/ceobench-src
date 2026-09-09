@@ -578,7 +578,7 @@ TOOL_DOCS = {
         "parameters": {
             "deals": {
                 "type": "list[list]",
-                "description": "List of [customer_id, offerings] tuples. offerings = list of [plan, price_per_seat] tuples. All contracts are month-to-month. If customer has an open thread, replies to it; otherwise initiates renegotiation.",
+                "description": "List of [customer_id, offerings] tuples. Each customer_id may appear only once per call; duplicates reject the entire call. offerings = list of [plan, price_per_seat] tuples. All contracts are month-to-month. If customer has an open thread, replies to it; otherwise initiates renegotiation.",
                 "example": [[312, [["A", 9.00], ["B", 14.00]]], [88, [["B", 12.00]]]]
             }
         },
@@ -2431,6 +2431,8 @@ class AgentTools:
 
         # --- Phase 1: Parse all deals (no SQL) ---
         parsed_deals = []  # list of (customer_id, deal_offerings)
+        seen_customer_ids = set()
+        duplicate_customer_ids = set()
         for deal in deals:
             if isinstance(deal, (list, tuple)) and len(deal) == 2:
                 customer_id = deal[0]
@@ -2451,6 +2453,10 @@ class AgentTools:
                 summaries.append("Error: customer_id must be a positive integer")
                 results.append({'error': 'invalid customer_id'})
                 continue
+
+            if customer_id in seen_customer_ids:
+                duplicate_customer_ids.add(customer_id)
+            seen_customer_ids.add(customer_id)
 
             deal_offerings = []
             if not raw_offerings or not isinstance(raw_offerings, list):
@@ -2542,6 +2548,24 @@ class AgentTools:
                 continue
 
             parsed_deals.append((customer_id, deal_offerings))
+
+        # 同一客户同时收到两组报价会产生互相冲突的谈判状态，必须在写库前整批拒绝。
+        if duplicate_customer_ids:
+            duplicates = sorted(duplicate_customer_ids)
+            return ToolResult(
+                False,
+                "No deals sent: duplicate customer_id values in one batch: "
+                + ", ".join(str(customer_id) for customer_id in duplicates),
+                {
+                    'results': [
+                        {
+                            'customer_id': customer_id,
+                            'error': 'duplicate customer_id',
+                        }
+                        for customer_id in duplicates
+                    ]
+                },
+            )
 
         if not parsed_deals:
             # All deals failed parsing

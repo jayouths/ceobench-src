@@ -581,7 +581,7 @@ Send enterprise deal offerings. Compact tuple format: each deal = [customer_id, 
 
 **Parameters:**
 
-- `deals`: {'type': 'list[list]', 'description': 'List of [customer_id, offerings] tuples. offerings = list of [plan, price_per_seat] tuples. All contracts are month-to-month. If customer has an open thread, replies to it; otherwise initiates renegotiation.', 'example': [[312, [['A', 9.0], ['B', 14.0]]], [88, [['B', 12.0]]]]}
+- `deals`: {'type': 'list[list]', 'description': 'List of [customer_id, offerings] tuples. Each customer_id may appear only once per call; duplicates reject the entire call. offerings = list of [plan, price_per_seat] tuples. All contracts are month-to-month. If customer has an open thread, replies to it; otherwise initiates renegotiation.', 'example': [[312, [['A', 9.0], ['B', 14.0]]], [88, [['B', 12.0]]]]}
 
 **Input Schema:**
 ```json
