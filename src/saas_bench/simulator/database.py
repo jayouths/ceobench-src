@@ -1770,7 +1770,8 @@ def compute_social_media_multiplier(conn: sqlite3.Connection, current_day: int,
     Formula: multiplier = clamp(1.0 + sum(contribution_i * decay_i), 0.75, 1.25)
     Only posts where |effect| >= viral_threshold contribute.
     Each post contributes: sign(effect) * ((|effect| - threshold) / (1 - threshold)) * max_boost
-    Decay: exp(-age / half_life) with half_life=3 days (fast decay)
+    Decay starts after the first acquisition day following publication:
+    exp(-effective_age / half_life) with half_life=3 days (fast decay)
 
     Returns: float multiplier in [0.75, 1.25]
     """
@@ -1782,7 +1783,8 @@ def compute_social_media_multiplier(conn: sqlite3.Connection, current_day: int,
 
     total_contribution = 0.0
     for post in posts:
-        age = current_day - post['day']
+        # Agent 在当日经营结束后发帖，下一模拟日才首次参与获客；首次生效日年龄为 0。
+        effective_age = max(0, current_day - post['day'] - 1)
         effects = json.loads(post['effect_by_group'])
         effect = effects.get(group_id, 0.0)
 
@@ -1795,7 +1797,7 @@ def compute_social_media_multiplier(conn: sqlite3.Connection, current_day: int,
         contribution = sign * magnitude * max_boost_per_post
 
         # Exponential decay (half_life=3 days — effects fade quickly)
-        decay = math.exp(-age * math.log(2) / half_life_days)
+        decay = math.exp(-effective_age * math.log(2) / half_life_days)
         total_contribution += contribution * decay
 
     # Clamp to [0.75, 1.25] range

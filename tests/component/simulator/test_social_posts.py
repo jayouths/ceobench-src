@@ -1,8 +1,14 @@
-"""社交媒体查询口径回归测试。"""
+"""社交媒体查询与 Agent 帖子生效时序回归测试。"""
+
+import math
 
 import pytest
 
-from saas_bench.simulator.database import add_social_media_post
+from saas_bench.simulator.database import (
+    add_agent_social_post,
+    add_social_media_post,
+    compute_social_media_multiplier,
+)
 
 
 def _first_customer_id(conn) -> int:
@@ -84,3 +90,54 @@ def test_social_posts_reject_invalid_windows(
 
     assert not result.success
     assert result.message == expected_message
+
+
+def test_agent_post_uses_full_effect_on_first_acquisition_day(
+    make_initialized_sim,
+):
+    conn, _, _ = make_initialized_sim(seed=42)
+    add_agent_social_post(
+        conn,
+        day=7,
+        content="A useful product update.",
+        effect_by_group={"S1": 1.0},
+    )
+
+    first_day = compute_social_media_multiplier(conn, current_day=8, group_id="S1")
+    second_day = compute_social_media_multiplier(conn, current_day=9, group_id="S1")
+
+    assert first_day == pytest.approx(1.25)
+    assert second_day == pytest.approx(
+        1.0 + 0.25 * math.exp(-math.log(2) / 3.0)
+    )
+
+
+def test_step_day_judges_agent_posts_before_generating_customers(
+    make_initialized_sim,
+    monkeypatch,
+):
+    _, simulator, _ = make_initialized_sim(seed=42)
+    calls = []
+
+    monkeypatch.setattr(
+        simulator,
+        "_process_agent_social_posts",
+        lambda config: calls.append("judge_agent_posts"),
+    )
+
+    def generate_customers(config):
+        calls.append("generate_customers")
+        return {
+            "total_new": 0,
+            "total_leads": 0,
+            "new_individual_leads": 0,
+            "new_enterprise_leads": 0,
+            "new_individual_subscribers": 0,
+            "segment_acquisition": {},
+        }
+
+    monkeypatch.setattr(simulator, "_generate_new_customers", generate_customers)
+
+    simulator.step_day()
+
+    assert calls == ["judge_agent_posts", "generate_customers"]

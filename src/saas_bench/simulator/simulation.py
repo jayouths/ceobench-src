@@ -7409,8 +7409,8 @@ Guidelines:
 
         # LLM-replay: if source had an agent_social_media_post on (current_day - 1)
         # and replay's DB doesn't have one for that day yet, insert it with
-        # effect_by_group='{}' so `_process_agent_social_posts` (later in this
-        # step_day) judges it via the cached judge — replicating source's RNG
+        # effect_by_group='{}' so `_process_agent_social_posts` judges it via
+        # the cached judge before today's acquisition — replicating source's RNG
         # consumption exactly. No-op (early-return inside the helper) when
         # LLM replay is disabled — production runs see zero behavior change.
         try:
@@ -7517,6 +7517,11 @@ Guidelines:
 
         # === These DB operations run WHILE social post LLM calls are in-flight ===
 
+        # Agent 帖子在上一经营日结束后发布，必须先完成评分，才能影响今天的新客。
+        _t0 = _time.monotonic()
+        self._process_agent_social_posts(config)
+        _timings['agent_social_posts'] = _time.monotonic() - _t0
+
         # Generate new customers (subscribe directly based on curve)
         _t0 = _time.monotonic()
         gen_result = self._generate_new_customers(config)
@@ -7537,11 +7542,6 @@ Guidelines:
         _t0_collect = _time.monotonic()
         self._collect_social_posts_async(social_posts_async)
         _timings['social_posts'] = _t_social_submit + (_time.monotonic() - _t0_collect)
-
-        # Social media — PHASE 3: judge agent posts + generate customer replies for viral ones
-        _t0 = _time.monotonic()
-        self._process_agent_social_posts(config)
-        _timings['agent_social_posts'] = _time.monotonic() - _t0
 
         # Check cash constraint - GAME OVER IMMEDIATELY if cash < 0
         cash = get_cash(self.conn)
