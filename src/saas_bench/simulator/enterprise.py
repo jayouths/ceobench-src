@@ -436,6 +436,11 @@ def compute_offering_satisfaction(
     Returns:
         Satisfaction score. Positive = acceptable, negative = unacceptable.
     """
+    # c_max 是每席实际支付价格的硬预算上限。超预算报价不能通过更高质量、
+    # 研发积累或关系加成变得可接受。
+    if price > c_max:
+        return float('-inf')
+
     q_required = _compute_required_quality(price, steepness_left, steepness_right, c_max, q_max, q_min)
 
     # Contract lock-in penalty: longer contracts reduce satisfaction (customer dislikes lock-in)
@@ -577,7 +582,9 @@ def evaluate_offerings(
             state.contract_lockin_penalty, state.q_max, state.q_min
         )
 
-        if sat > best_sat:
+        # 第一项即使超预算也要保留为还价所依据的方案；后续预算内方案
+        # 会以有限满意度自然替换它。
+        if i == 0 or sat > best_sat:
             best_sat = sat
             best_idx = i
             best_plan = plan

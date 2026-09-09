@@ -428,7 +428,7 @@ def test_existing_enterprise_evaluates_offer_at_promoted_price(
     monkeypatch,
 ):
     """存量企业按促销后净价接受报价，成交仍保留促销前报价。"""
-    benchmark_config = BenchmarkConfig(seed=42, promotion_global=20.0)
+    benchmark_config = BenchmarkConfig(seed=42, promotion_global=60.0)
     conn, simulator, config = make_initialized_sim(
         config=benchmark_config,
         seed=42,
@@ -438,13 +438,13 @@ def test_existing_enterprise_evaluates_offer_at_promoted_price(
         enterprise_module,
         "get_qualities_for_all_plans_batch",
         lambda _conn, customer_ids, _config, *, current_day: {
-            customer_id: {"A": 0.5, "B": 0.5, "C": 0.5}
+            customer_id: {"A": 1.0, "B": 1.0, "C": 1.0}
             for customer_id in customer_ids
         },
     )
 
     result = make_agent_tools(conn, config).send_enterprise_deal(
-        [[customer_id, [["B", 100.0]]]],
+        [[customer_id, [["B", 250.0]]]],
     )
     assert result.success
 
@@ -465,7 +465,93 @@ def test_existing_enterprise_evaluates_offer_at_promoted_price(
         """,
         (customer_id,),
     ).fetchone()
-    assert tuple(subscription) == pytest.approx((100.0, 20.0, 80.0))
+    # 报价高于 200 的预算，但促销后实际支付 190，仍应允许客户接受。
+    assert tuple(subscription) == pytest.approx((250.0, 60.0, 190.0))
+
+
+def test_enterprise_rejects_over_budget_offer_even_with_extreme_quality(
+    make_initialized_sim,
+    make_agent_tools,
+    monkeypatch,
+):
+    """质量任意高都不能突破企业客户的每席预算硬上限。"""
+    conn, simulator, config = make_initialized_sim(seed=42)
+    customer_id, thread_id = _create_active_enterprise_thread(conn)
+    monkeypatch.setattr(
+        enterprise_module,
+        "get_qualities_for_all_plans_batch",
+        lambda _conn, customer_ids, _config, *, current_day: {
+            customer_id: {"A": 100.0, "B": 100.0, "C": 100.0}
+            for customer_id in customer_ids
+        },
+    )
+
+    assert make_agent_tools(conn, config).send_enterprise_deal(
+        [[customer_id, [["B", 500.0]]]],
+    ).success
+    reply_day = conn.execute(
+        """
+        SELECT next_reply_day FROM enterprise_turns
+        WHERE thread_id = ? ORDER BY message_id DESC LIMIT 1
+        """,
+        (thread_id,),
+    ).fetchone()["next_reply_day"]
+    simulator.current_day = reply_day
+    simulator._process_scheduled_replies(simulator.get_current_config(), [])
+
+    reply = conn.execute(
+        """
+        SELECT message_text, current_offer_price FROM enterprise_turns
+        WHERE thread_id = ? AND sender = 'customer'
+        ORDER BY message_id DESC LIMIT 1
+        """,
+        (thread_id,),
+    ).fetchone()
+    subscription = conn.execute(
+        "SELECT listed_price FROM subscriptions WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()
+    assert reply["message_text"].startswith("Counter-offer:")
+    assert reply["current_offer_price"] <= 200.0
+    assert subscription["listed_price"] == pytest.approx(50.0)
+
+
+def test_enterprise_prefers_affordable_offer_over_higher_quality_over_budget_offer(
+    make_initialized_sim,
+    make_agent_tools,
+    monkeypatch,
+):
+    """多方案择优时必须排除超预算方案，而不是让质量优势覆盖预算。"""
+    conn, simulator, config = make_initialized_sim(seed=42)
+    customer_id, thread_id = _create_active_enterprise_thread(conn)
+    monkeypatch.setattr(
+        enterprise_module,
+        "get_qualities_for_all_plans_batch",
+        lambda _conn, customer_ids, _config, *, current_day: {
+            customer_id: {"A": 100.0, "B": 1.0, "C": 0.0}
+            for customer_id in customer_ids
+        },
+    )
+
+    assert make_agent_tools(conn, config).send_enterprise_deal(
+        [[customer_id, [["A", 500.0], ["B", 100.0]]]],
+    ).success
+    reply_day = conn.execute(
+        """
+        SELECT next_reply_day FROM enterprise_turns
+        WHERE thread_id = ? ORDER BY message_id DESC LIMIT 1
+        """,
+        (thread_id,),
+    ).fetchone()["next_reply_day"]
+    simulator.current_day = reply_day
+    simulator._process_scheduled_replies(simulator.get_current_config(), [])
+
+    subscription = conn.execute(
+        "SELECT plan, listed_price FROM subscriptions WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()
+    assert subscription["plan"] == "B"
+    assert subscription["listed_price"] == pytest.approx(100.0)
 
 
 def test_enterprise_lead_uses_snapshotted_promotion_for_first_period(
