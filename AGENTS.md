@@ -18,7 +18,7 @@
    Deliberation 依赖 Analysis，Reflection 依赖前两个模块。不要为了形式上的完全组合而创建没有有效输入的 `deliberation-only` 或 `reflection-only`。
 4. **默认难度承担主实验结论。** 可以统一调整模拟器参数建立低、中、高难度场景，但只能作为明确标记的敏感性或稳健性实验。同一场景内所有实验组必须使用相同规则，降低难度不能在查看结果后替代默认主结果。
 5. **不得把模拟企业现金解释为真实利润。** API 成本是真实调用成本，CEO-Bench 现金是模拟经营指标。可以报告二者的关系，但必须明确语义不同。
-6. **复核模拟器问题时必须先推敲作者原意。** 结合 Git 历史、论文与公开材料、Agent 提示词、工具契约、代码注释和真实执行链路，分别确认作者原意、真实实现和冲突性质。不得仅根据代码表象修复；涉及世界规则、Agent 信息边界、任务难度或实验口径时，必须先与用户对齐。详细方法见 [模拟世界 P0 审查](docs/engineering/simulator-p0-audit.md#11-复核原则)。
+6. **复核模拟器问题时必须先推敲作者原意。** 结合 Git 历史、论文与公开材料、Agent 提示词、工具契约、代码注释和真实执行链路，分别确认作者原意、真实实现和冲突性质。不得仅根据代码表象修复；涉及世界规则、Agent 信息边界、任务难度或实验口径时，必须先与用户对齐。详细方法见 [模拟世界 P0 审查](docs/audits/simulator-p0-audit.md#11-复核原则)。
 
 ## 2. 配置是实验的唯一入口
 
@@ -104,7 +104,7 @@
 1. 普通决策 Agent 和三个创新模块只能通过公开 Dashboard、文档和工具了解经营世界。不得把数据库密钥、模拟器内部状态、实验评价事实、未来事件或宿主源码暴露给它们。Oracle 白盒上界实验可以读取模拟器内部状态和 `_eval_*` 实验事实。
 2. 正式实验应在 Linux 沙箱中运行，禁止 Agent 任意联网，只开放完成实验所需的模拟器本地接口。macOS 本机调试不能被当作正式隔离证明。
 3. 修改挂载、文件权限、网络或模拟器接口前，必须检查 Agent 是否能够读取 `world.nmdb`、密钥、宿主环境变量或实验配置中的敏感信息。
-4. 数据库加密和威胁边界见 [docs/engineering/database-encryption.md](docs/engineering/database-encryption.md) 与 [docs/experiments/analyze-trajectory.md](docs/experiments/analyze-trajectory.md)。
+4. 数据库加密和威胁边界见 [docs/engineering/database-encryption.md](docs/engineering/database-encryption.md) 与 [docs/experiments/artifacts-and-evaluation.md](docs/experiments/artifacts-and-evaluation.md)。
 
 ## 8. 测试要求
 
@@ -130,7 +130,7 @@
 
 ## 9. 文档与注释
 
-1. [README.md](README.md) 是项目和文档体系的统一入口。新增稳定文档后必须更新其中的文档导航。
+1. [README.md](README.md) 是项目入口，[docs/README.md](docs/README.md) 是详细文档导航。新增稳定文档时只在所属目录和 `docs/README.md` 中登记，避免根 README 重复维护完整目录树。
 2. Analysis 设计以 [docs/modules/analysis.md](docs/modules/analysis.md) 为准。修改模块输入、输出、流程或消融边界时必须同步该文档。
 3. 关键业务边界、恢复逻辑、隔离逻辑、计费口径和不直观算法应保留简洁中文注释。不要为显而易见的赋值和流程增加旁白式注释。
 4. 文档和代码不得声称尚未实现的 Deliberation、Reflection 或正式隔离能力已经完成。

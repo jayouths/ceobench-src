@@ -236,9 +236,9 @@ class BashAgentToolExecutor:
             raise ValueError(f"Path escapes workspace: {path_str}")
         return resolved
 
-    # Env vars that MUST never be passed into the agent sandbox. The DB key
-    # in particular is a hard secret — if the agent saw it, the .nmdb
-    # encryption is meaningless.
+    # Environment copies of the DB key must never enter the Agent process.
+    # Public builds also embed the key in the CLI, so SQLCipher remains only
+    # one layer of protection rather than the complete isolation boundary.
     _FORBIDDEN_SANDBOX_ENV = frozenset({
         'NMDB_KEY',
     })

@@ -4,10 +4,10 @@ This module is compiled into ``novamind-operation`` at build time. The engine
 inside the zipapp imports it via ``saas_bench.runtime._embedded_key`` to obtain the
 key it needs to encrypt/decrypt ``world.nmdb``.
 
-The same value lives in ``docs/database-encryption.md`` so that humans can
-decrypt session artifacts after a benchmark run for analysis. The agent is
-explicitly told (via the public-repo README) not to inspect the zipapp or
-``world.nmdb`` — see the README's anti-cheat clause.
+Humans should use the host-side decode script to inspect completed runs. The
+key is intentionally not duplicated in documentation, but it remains
+extractable from this Agent-visible zipapp; SQLCipher is therefore not the
+formal isolation boundary. See ``docs/engineering/database-encryption.md``.
 
 If you regenerate this key, every previously-recorded ``world.nmdb`` becomes
 permanently undecryptable. Don't rotate without intent.

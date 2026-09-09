@@ -10,46 +10,7 @@
 
 先确定论文需要回答什么问题、哪些指标能够形成证据，再决定使用折线图、点图、瀑布图或结果表。图表使用自身实验产物和统一指标口径生成。
 
-当前只进行指标和结果方案设计。正式实验结果必须从 `outputs/runs/` 的原始产物统一生成，不手工维护中间 CSV。
-
-单次运行结束后使用以下命令计算指标：
-
-```bash
-uv run --frozen python scripts/evaluate_run.py <run_dir>
-```
-
-默认生成：
-
-```text
-<run_dir>/evaluation/
-├── metrics.json       # 保留完整标量、日级时序和分组明细
-└── metrics_long.csv   # 统一长表，供多次运行拼接、统计和画图
-```
-
-多次运行完成后，按实验组目录聚合并与 Baseline 比较：
-
-```bash
-uv run --frozen python scripts/evaluate_experiment.py \
-  outputs/runs/baseline \
-  outputs/runs/analysis \
-  --baseline baseline \
-  --output-dir outputs/evaluation/opening
-```
-
-默认生成：
-
-```text
-outputs/evaluation/opening/
-├── experiment_metrics.json  # 完整的组内描述统计和组间差异
-├── group_summary.csv         # 各组标量指标的均值、标准差和有效样本数
-├── group_comparisons.csv     # 破产率、标量指标和账本类别的组间差异
-└── group_series.csv          # 按模拟日聚合的经营时序
-```
-
-提前破产运行只进入破产率、生存天数、回撤和实际存续期时序；终态现金、终态经营指标和累计账本差额只聚合跑满统一期限的运行。
-每组只有一次运行时也可使用同一入口：输出保留 `n=1`，标准差为 `null`，绘图时不生成误差带或显著性结论。
-
-评价程序只读 `world.nmdb`、运行配置、终态结果和调用日志，不修改模拟器状态。未满 28 天的运行无法形成完整末四周指标，对应值明确记录为 `null`。
+本目录只维护指标和结果呈现方案。评价命令、输入产物和导出文件统一见 [实验产物与离线评价](../artifacts-and-evaluation.md)，不在此重复维护。开题初步结果和后续多随机种子结果都必须从 `outputs/runs/` 的原始产物生成，不手工维护中间数据。
 
 ## 2. 文档结构
 
@@ -69,6 +30,9 @@ outputs/evaluation/opening/
 - 仅固定 `seed=42` 重复运行时，波动只表示 LLM 和 Provider 的随机性，不代表对不同模拟环境的泛化能力。
 - `world.nmdb` 是经营状态和经营结果的权威数据源；运行日志负责记录 LLM 调用、模块成本和过程事件。
 - 运行提前破产时保留真实生存轨迹，不补零、不外推，也不把破产日终态与第 497 天终态直接混算。
+- 终止日不同的组先比较生存期；其他经营指标只在共同完整周或完成相同实验时长的运行之间比较，并标注时点和有效样本数。
+- 每组只有一次运行时保留 `n=1`，标准差为 `null`，不绘制误差带或声称统计显著。
+- 未覆盖完整统计窗口的指标记录为 `null`，不把缺失值解释为零。
 - 正式结果汇总所有满足实验协议的运行，不挑选表现最好的一次。
 - 主结果使用 CEO-Bench 默认难度。统一调整模拟器难度的场景只作为敏感性或稳健性分析，与默认主结果分开报告。
 
@@ -78,12 +42,12 @@ outputs/evaluation/opening/
 
 | 方案 | 主要回答的问题 | 状态 |
 |---|---|---|
-| 核心结果表 | Analysis 是否提高最终现金和生存表现，代价是多少 | 待正式实验 |
-| [现金轨迹](figures/cash-trajectory.md) | 现金优势何时形成，是否稳定 | 核心图 |
-| [多维经营结果](figures/operating-outcomes.md) | 是否同时改善持续收入、客户规模和近期盈利能力 | 核心图 |
-| [现金差额来源](figures/cash-gap-waterfall.md) | 现金优势来自增收还是节支 | 优先机制图 |
+| 核心结果表 | Analysis 是否提高同日现金和生存表现，代价是多少 | 开题初步结果已完成 |
+| [现金轨迹](figures/cash-trajectory.md) | 现金优势何时形成，是否稳定 | 开题核心图已完成 |
+| [多维经营结果](figures/operating-outcomes.md) | 是否同时改善持续收入、客户规模和近期盈利能力 | 开题核心图已完成 |
+| [现金差额来源](figures/cash-gap-waterfall.md) | 现金优势来自增收还是节支 | 开题机制图已完成 |
 | [现金预测准确性](figures/cash-forecast-accuracy.md) | Analysis 是否改善经营状态理解 | 优先机制图 |
-| [模型成本收益](figures/model-cost-benefit.md) | 经营提升是否值得额外 API 成本 | 核心成本分析 |
+| [模型成本收益](figures/model-cost-benefit.md) | 经营提升是否值得额外 API 成本 | 开题结果表已报告成本，独立图待多次运行 |
 
 ### 4.2 候选机制图
 

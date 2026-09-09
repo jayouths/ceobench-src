@@ -17,7 +17,7 @@
 | 破产率 | P0 | 破产运行数除以全部合规运行数 | 运行结果 + `ledger` | Analysis |
 | 生存天数 | P0 | 运行实际完成的模拟天数 | 运行结果 | Analysis |
 | 最终现金 | P0 | 截止终止日全部 `ledger.amount` 累计值 | `ledger` | Analysis |
-| 现金轨迹 | P0 | 按日累计 `ledger.amount`，主图按周取样 | `ledger` | Analysis |
+| 现金轨迹 | P0 | 按日累计 `ledger.amount` 并保留每日数据点，横轴按周标注 | `ledger` | Analysis |
 | 最大绝对现金回撤 | P1 | 历史现金峰值与后续最低点的最大差额 | `ledger` | Analysis |
 | 最大现金回撤率 | P1 | 各次峰值后的现金降幅除以对应峰值，取最大值 | `ledger` | Analysis |
 
@@ -27,9 +27,9 @@
 
 | 指标 | 优先级 | 计算口径 | 数据来源 | 可用阶段 |
 |---|---|---|---|---|
-| 最终 MRR | P0 | 终止日所有有效个人和企业订阅的实际月费 | `subscriptions` + `customers` | Analysis |
-| 活跃个人订阅数 | P0 | 终止日有效个人订阅数量 | `subscriptions` + `customers` | Analysis |
-| 企业订阅席位数 | P0 | 终止日有效企业订阅覆盖席位之和 | `subscriptions` + `customers` | Analysis |
+| 最终 MRR | P0 | 终止日所有有效个人和企业订阅的实际月费 | `_eval_subscription_day` | Analysis |
+| 活跃个人订阅数 | P0 | 终止日有效个人订阅数量 | `_eval_subscription_day` | Analysis |
+| 企业订阅席位数 | P0 | 终止日有效企业订阅覆盖席位之和 | `_eval_subscription_day` | Analysis |
 | 末四周平均每周净现金流 | P0 | 最后 28 天账本净额除以 4 | `ledger` | Analysis |
 | 末四周实际订阅收入 | P1 | 最后 28 天 `subscription_payment` 合计 | `ledger` | Analysis |
 | 末四周个人订阅净增长 | P1 | 终止日个人订阅数减去 28 天前数值 | `_eval_subscription_day` | Analysis |
@@ -115,4 +115,4 @@ MRR 表示当前订阅结构未来每月可持续产生的收入，与历史累�
 - 正式实验前需要锁定方向预测阈值。服务故障直接报告宕机、错误率、延迟和过载等实际表现，不再人为划分“严重故障”。
 - 潜在 TODO（低优先级）：如果最终实验出现稳定且有解释价值的故障分层，可在正式统计前固定“严重故障”阈值，仅作附录补充；不用于开题阶段和主结论。
 - 潜在 TODO：只有最终实验确实需要分析“渠道投入→订阅回款”时，才补充客户级结构化回款事实和归因窗口；开题阶段不实现。
-- 单次运行指标已可从 `world.nmdb` 和运行日志统一复算，并导出完整 JSON 与长表 CSV。多运行聚合、显著性检验和图表代码尚未开发。
+- 单次运行复算、JSON 与长表导出、多运行描述统计聚合和开题核心图已经实现。统计显著性检验尚未锁定；客群级汇总和部分候选图仍需按最终论文方案补充。

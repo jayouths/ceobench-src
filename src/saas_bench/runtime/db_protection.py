@@ -4,14 +4,16 @@ The `.nmdb` file IS a SQLCipher database — page-level AES-256 encryption at th
 SQLite page layer. There is no separate ciphertext wire format: the file is a
 normal SQLite database that has been encrypted page-by-page by SQLCipher.
 
-Security properties:
+Operational properties:
 - Without the key, opening the file fails with "file is not a database".
-- Vanilla `sqlite3` (stdlib) cannot open it either — SQLCipher's file layout is
-  binary-incompatible with vanilla SQLite. This preserves the anti-cheat
-  property for the agent sandbox (which only has stdlib sqlite3 available).
-- The key is read from the `NMDB_KEY` environment variable at runtime. The host
-  harness sets it; the bwrap sandbox strips it before spawning the agent.
-  The key is NOT derivable from any bundled artifact in `public/`.
+- Vanilla `sqlite3` cannot open SQLCipher's page format.
+- The public zipapp uses an embedded key; private development may instead use
+  `NMDB_KEY`. The Agent environment must never inherit the environment copy.
+
+The public zipapp and session database are both Agent-visible artifacts, so
+encryption is a guard against accidental access rather than a standalone
+security boundary. Filesystem/network isolation, API authorization, the
+experiment protocol, and trajectory review remain necessary.
 
 Public API:
     open_encrypted(path)        → sqlcipher3 connection (file-backed, on-demand decrypt)
@@ -36,7 +38,7 @@ import sqlcipher3
 
 
 # --------------------------------------------------------------------------- #
-# Key handling — read from NMDB_KEY env var only. Never bundle a fallback.
+# Key handling: public builds use the embedded module; private runs may use env.
 # --------------------------------------------------------------------------- #
 
 def _get_key() -> str:

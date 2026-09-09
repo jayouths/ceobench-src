@@ -236,7 +236,7 @@ role_report_concurrency = 4
 
 达到上限后仍无法校验通过时，实验直接失败，不用空数组、默认标签或旧报告静默降级。首次调用和修复调用都必须记录 Token、成本、耗时和原始响应。
 
-本节只规定工程 Schema 校验。利用隐藏环境状态评价识别准确率，属于论文实验层的效果校验，暂留 TODO。
+本节只规定工程 Schema 校验。Analysis 的效果通过后续经营结果和过程证据评价，不为经营画像额外构造隐藏状态分类标签。
 
 ## 7. 过程产物
 
@@ -286,18 +286,18 @@ Analysis 汇总同时包含总用量、市场/财务/产品/客户四角色用�
 - 不生成状态简报。
 - Dashboard 原样交给 ReAct Agent。
 
-实验组只增加 Analysis，决策模型、社交环境模型、随机种子、模拟天数和模拟器配置必须与 Baseline 一致。等成本对照组和利用隐藏状态的离线准确性评价暂留 TODO。
+实验组只增加 Analysis，决策模型、社交环境模型、随机种子、模拟天数和模拟器配置必须与 Baseline 一致。Analysis 新增的调用次数、Token、耗时和成本属于方法的真实开销，与经营结果一并报告，不另设等调用次数或等 Token 成本对照组。
 
-## 10. 代码改动边界
+## 10. 当前实现位置
 
-| 位置 | 计划改动 |
+| 位置 | 当前职责 |
 | --- | --- |
 | `src/saas_bench/simulator/public_week_snapshot.py` | 统一构建公开周度经营事实并确定性渲染 Dashboard |
 | `src/saas_bench/runtime/api_server.py` 与 `simulator/environment.py` | 在 `/dashboard` 暴露结构化快照，Dashboard 复用同一数据来源 |
 | `src/saas_bench/experiment/llm_provider.py` | 在统一 LLM 返回结构中补充推理 Token |
-| `src/saas_bench/agents/bash_agent/analysis/` | 新增 Schema、统计信号、Prompt、流程编排和简报生成 |
+| `src/saas_bench/agents/bash_agent/analysis/` | 实现 Schema、统计信号、Prompt、流程编排和简报生成 |
 | `src/saas_bench/agents/bash_agent/runner.py` | 接入独立模型、每周调用、简报注入、用量与恢复 |
-| `src/saas_bench/experiment/experiment_config.py` 与 `config/*.toml` | 补齐模块和模型配置 |
-| `tests/` | 分别覆盖 Schema、信号、流程、产物、消融和恢复 |
+| `src/saas_bench/experiment/experiment_config.py` 与 `config/config_template.toml` | 定义模块和模型配置 |
+| `tests/` | 覆盖 Schema、信号、流程、产物、消融和恢复 |
 
 本模块不修改 `simulator/simulation.py`、`simulator/database.py`、`simulator/config.py` 等模拟器底层规则，不修改 Agent 可见的公开工具权限。
