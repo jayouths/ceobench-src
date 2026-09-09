@@ -4,8 +4,10 @@ Run: uv run python -m pytest tests/test_docs_coverage.py -v
 """
 import json
 import tempfile
+from inspect import Parameter, signature
 from pathlib import Path
 
+from saas_bench.novamind_api.market import research_group
 from saas_bench.simulator.config import (
     BenchmarkConfig,
     DEFAULT_ENTERPRISE_OPS_SCALE,
@@ -111,6 +113,16 @@ def test_enterprise_deal_docs_only_advertise_monthly_contracts():
     assert "month-to-month" in docs["description"]
     assert "duration is not configurable" in docs["impact"]
     assert "longer contracts" not in docs["impact"]
+
+
+def test_group_research_requires_explicit_target_level():
+    """工具 schema 与公开 Python 客户端都必须要求研究目标等级。"""
+    docs = TOOL_DOCS["research_group"]
+    assert "target_level" in docs["inputSchema"]["required"]
+    assert (
+        signature(research_group).parameters["target_level"].default
+        is Parameter.empty
+    )
 
 
 def test_research_docs_follow_configured_tiers(tmp_path):

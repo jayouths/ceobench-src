@@ -1,6 +1,6 @@
 """Market discovery and research tools."""
 
-from typing import Dict, Optional
+from typing import Dict
 from . import _client
 
 
@@ -15,22 +15,22 @@ def research_market() -> Dict:
     return _client.call('research_market')
 
 
-def research_group(group_id: str, target_level: Optional[int] = None) -> Dict:
-    """Upgrade information level for a discovered group.
+def research_group(group_id: str, target_level: int) -> Dict:
+    """Research a discovered group at an explicit information level.
 
     Higher info levels give more accurate data about the group.
 
     Args:
         group_id: The group identifier (e.g., 'D_S01').
-        target_level: Target info level (default: current + 1).
+        target_level: Target info level (2-5). Use the current level to refresh.
 
     Returns:
         Dict with research result.
     """
-    args = {'group_id': group_id}
-    if target_level is not None:
-        args['target_level'] = target_level
-    return _client.call('research_group', args)
+    return _client.call(
+        'research_group',
+        {'group_id': group_id, 'target_level': target_level},
+    )
 
 
 def get_market_overview() -> Dict:

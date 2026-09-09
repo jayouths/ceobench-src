@@ -18,7 +18,7 @@ You are the CEO of NovaMind AI, a B2B/B2C AI SaaS company. Your goal is to maxim
 - 10 individual (D_S01–D_S10) + 10 enterprise (D_E01–D_E10)
 - Discovered via `research_market()` — $25K per attempt, 30% chance, discovers a random group instantly
 - Info levels 1–5 with improving accuracy (±65% → ±5%)
-- Use `research_group()` to upgrade info levels (costs more and takes multiple days at higher levels)
+- Use `research_group(group_id, target_level)` to upgrade or refresh information explicitly (costs more and takes multiple days at higher levels)
 
 ## Customer Acquisition
 

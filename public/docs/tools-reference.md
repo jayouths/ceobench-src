@@ -30,7 +30,7 @@ and run scripts with `./novamind-operation python <script.py>` or
 | `research_market` | Conduct market research to discover new customer segments. Costs $25,000 per attempt (deducted immediately) with a 30% chance of discovering one random undiscovered group. Result is instant (no delay). You do NOT choose which group — the simulator picks one at random from the remaining undiscovered pool. Discovered groups start at Info Level 1 (±65% accuracy). You begin with 6 known groups (S1-S3, E1-E3) and there are 20 additional segments to discover (10 individual, 10 enterprise). |
 | `research_group` | Research a discovered customer group to a specific info level. Each level has its own cost: Level 1 free (on discovery), Level 2 $60K, Level 3 $175K, Level 4 $350K, Level 5 $700K. Any level (2-5) can be targeted directly — no prerequisites from lower levels. Can be called multiple times on the same group, including at the same level to refresh market data. Each call deducts cost immediately. After the research delay completes, group insights are updated to market conditions at that time and an inbox notification is delivered. Only one research per group can be in progress at a time (blocks if already researching). Use get_group_insights() to retrieve the data. |
 | `get_market_overview` | Get an overview of all known customer segments, their info levels, how many segments remain undiscovered, and latest published macroeconomic conditions (ISM PMI — published monthly with ~30 day delay, showing average PMI over the measurement period). |
-| `get_group_insights` | Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() again (costs money, results after delay). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only. |
+| `get_group_insights` | Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() with an explicit target level (costs money, results after delay). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only. |
 | `start_research_project` | Start an R&D research tier. Costs deducted immediately. Completes after sampled duration with sampled quality boost. Tiers are REPEATABLE — same tier can be started again after completion. Only one invocation per tier can be in-progress at a time. Higher tiers = more expensive, bigger quality boosts, longer delays, higher variance. |
 | `list_research_projects` | List all 20 R&D research tiers with their status. Shows cost, duration distribution, quality distribution, in-progress invocations, and completion history for each tier. Tiers are repeatable. |
 | `list_all_tables` | List all available database tables with their descriptions. Quick overview of what data is available — use describe_tables() for detailed column schemas. |
@@ -665,7 +665,7 @@ Send enterprise deal offerings. Compact tuple format: each deal = [customer_id, 
 
 **Python:** `novamind_api.market.get_group_insights(...)`
 
-Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() again (costs money, results after delay). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.
+Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() with an explicit target level (costs money, results after delay). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.
 
 **Parameters:**
 
@@ -725,10 +725,10 @@ Incoming (other groups' events → this group):
   ← S3: ~0.120
 
 Note: All estimates have ±40% uncertainty at Level 2.
-Use research_group('D_S01') to upgrade to Level 3 (±25%).
+Use research_group('D_S01', target_level=3) to upgrade to Level 3 (±25%).
 - data: {'group_id': 'S1', 'group_name': 'Price-Sensitive Individuals', 'segment': 'Individual', 'info_level': 1, 'noise': '±65%', 'estimates': {'willingness_to_pay': 25.86, 'usage_volume': 91.0, 'quality_floor_q_min': 0.452, 'contract_lockin_aversion': 0.0045, 'market_cap': 802000, 'annual_market_cap_growth_rate': 0.035}, 'network_influence': {'self_referral': 0.0015, 'outgoing': {'S3': 0.002}, 'incoming': {'S2': 0.001}}, 'reputation_influence': {'outgoing': {'E1': 0.36}, 'incoming': {}}, '_enterprise_extra_fields': ['seat_range', 'negotiation_rounds', 'negotiation_pace_days']}
 
-**Impact:** Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() again (costs money, updated after delay). Info levels are dynamic; use the current tool result rather than sample values as the source of truth. Also shows network and reputation influence relationships between discovered groups.
+**Impact:** Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() with the current target level (costs money, updated after delay). Info levels are dynamic; use the current tool result rather than sample values as the source of truth. Also shows network and reputation influence relationships between discovered groups.
 
 **Example:**
 ```json
@@ -760,7 +760,7 @@ Known Segments:
 
 Undiscovered segments: 15
 Use research_market() to discover new segments ($25K/attempt).
-Use research_group(group_id) to improve accuracy.
+Use research_group(group_id, target_level) to improve accuracy or refresh data.
 - data: {'known_groups': [{'group_id': 'S1', 'group_name': 'Price-Sensitive Individuals', 'segment': 'Individual', 'info_level': 1, 'noise': '±65%'}], 'undiscovered_count': 14, 'macroeconomic': {'ism_pmi': 54.2, 'change': 1.3, 'phase': 'expansion', 'cycle': 'recovering'}}
 
 **Impact:** Read-only. No cost. Info levels are dynamic; use the current tool result rather than sample values as the source of truth.
@@ -784,7 +784,7 @@ Research a discovered customer group to a specific info level. Each level has it
 **Parameters:**
 
 - `group_id`: {'type': 'string', 'description': "The group ID to research (e.g., 'D_S01', 'D_E03'). Must be discovered (Level 1+).", 'examples': ['D_S01', 'D_E05']}
-- `target_level`: {'type': 'integer', 'description': 'Target level (2-5). Optional — defaults to current_level + 1. Can jump directly to any level.', 'examples': [2, 3, 4, 5]}
+- `target_level`: {'type': 'integer', 'description': 'Required target level (2-5). Can jump directly to a higher level; use the current level for a same-level refresh.', 'examples': [2, 3, 4, 5]}
 
 **Input Schema:**
 ```json
@@ -797,11 +797,12 @@ Research a discovered customer group to a specific info level. Each level has it
     },
     "target_level": {
       "type": "integer",
-      "description": "Target info level (2-5). If omitted, defaults to current_level + 1."
+      "description": "Required target info level (2-5). Specify a higher level to improve accuracy or the current level to refresh market data."
     }
   },
   "required": [
-    "group_id"
+    "group_id",
+    "target_level"
   ]
 }
 ```
@@ -817,7 +818,7 @@ New parameter accuracy will be: ±5%
 - failure_in_progress: Research already in progress for group 'D_S01'. Expected completion: day 18.
 - failure_insufficient_funds: Insufficient funds. Research Level 5 costs $700,000. Available: $45,000
 
-**Impact:** Cost deducted immediately. After research delay completes, group insights are updated to market conditions at completion time and inbox notification is delivered. get_group_insights() returns data from the last completed research — to get fresh market data, call research_group() again. Blocks if already in progress.
+**Impact:** Target level is required. Cost is deducted immediately. After the research delay, group insights are updated to market conditions at completion time and an inbox notification is delivered. Specify a higher level to improve accuracy or the current level to refresh data. Blocks if already in progress.
 
 **Example:**
 ```json
@@ -852,7 +853,7 @@ Info Level: 1 (noisy estimates ±65%)
   Market cap growth:    ~9.2%/year
 
 Use get_group_insights('D_S01') for full parameter estimates.
-Use research_group('D_S01') to improve accuracy.
+Use research_group('D_S01', target_level=2) to improve accuracy.
 - failure: Market research complete ($25,000). No new segments discovered this time. Try again for another chance.
 - no_funds: Insufficient funds. Market research costs $25,000. Available: $12,000
 - data_on_success: {'discovered_group_id': 'D_S01', 'group_name': 'Niche Creators', 'segment': 'Individual', 'info_level': 1, 'cost': 25000}

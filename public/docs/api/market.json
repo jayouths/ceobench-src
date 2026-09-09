@@ -10,7 +10,7 @@
       "properties": {}
     },
     "returns": {
-      "success": "=== Market Research Success ===\nCost: $25,000\nDiscovered: Niche Creators (D_S01) \u2014 Individual segment\nInfo Level: 1 (noisy estimates \u00b165%)\n\n--- Initial Estimates (\u00b165% accuracy) ---\n  Willingness to pay:   ~$85/mo\n  Usage volume:         ~35 units/day\n  Quality expectations: ~0.58\n  Market cap:           ~185,000 customers\n  Market cap growth:    ~9.2%/year\n\nUse get_group_insights('D_S01') for full parameter estimates.\nUse research_group('D_S01') to improve accuracy.",
+      "success": "=== Market Research Success ===\nCost: $25,000\nDiscovered: Niche Creators (D_S01) \u2014 Individual segment\nInfo Level: 1 (noisy estimates \u00b165%)\n\n--- Initial Estimates (\u00b165% accuracy) ---\n  Willingness to pay:   ~$85/mo\n  Usage volume:         ~35 units/day\n  Quality expectations: ~0.58\n  Market cap:           ~185,000 customers\n  Market cap growth:    ~9.2%/year\n\nUse get_group_insights('D_S01') for full parameter estimates.\nUse research_group('D_S01', target_level=2) to improve accuracy.",
       "failure": "Market research complete ($25,000). No new segments discovered this time. Try again for another chance.",
       "no_funds": "Insufficient funds. Market research costs $25,000. Available: $12,000",
       "data_on_success": {
@@ -50,7 +50,7 @@
       },
       "target_level": {
         "type": "integer",
-        "description": "Target level (2-5). Optional \u2014 defaults to current_level + 1. Can jump directly to any level.",
+        "description": "Required target level (2-5). Can jump directly to a higher level; use the current level for a same-level refresh.",
         "examples": [
           2,
           3,
@@ -68,11 +68,12 @@
         },
         "target_level": {
           "type": "integer",
-          "description": "Target info level (2-5). If omitted, defaults to current_level + 1."
+          "description": "Required target info level (2-5). Specify a higher level to improve accuracy or the current level to refresh market data."
         }
       },
       "required": [
-        "group_id"
+        "group_id",
+        "target_level"
       ]
     },
     "returns": {
@@ -86,7 +87,7 @@
       "expected_completion_day": "int \u2014 sim day when research completes",
       "_access": "result['expected_completion_day'] \u2192 when results arrive"
     },
-    "impact": "Cost deducted immediately. After research delay completes, group insights are updated to market conditions at completion time and inbox notification is delivered. get_group_insights() returns data from the last completed research \u2014 to get fresh market data, call research_group() again. Blocks if already in progress.",
+    "impact": "Target level is required. Cost is deducted immediately. After the research delay, group insights are updated to market conditions at completion time and an inbox notification is delivered. Specify a higher level to improve accuracy or the current level to refresh data. Blocks if already in progress.",
     "example_call": {
       "tool": "research_group",
       "arguments": {
@@ -106,7 +107,7 @@
       "properties": {}
     },
     "returns": {
-      "example": "=== Market Overview ===\n\nKnown Segments:\n  S1: Price-Sensitive Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  S2: Quality-Focused Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  E1: Small Enterprise \u2014 Enterprise (initial) \u2014 Level 4 (\u00b115%)\n  D_S01: Niche Creators \u2014 Individual \u2014 Level 2 (\u00b140%)\n  D_E01: Government Agencies \u2014 Enterprise \u2014 Level 1 (\u00b165%)\n\nUndiscovered segments: 15\nUse research_market() to discover new segments ($25K/attempt).\nUse research_group(group_id) to improve accuracy.",
+      "example": "=== Market Overview ===\n\nKnown Segments:\n  S1: Price-Sensitive Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  S2: Quality-Focused Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  E1: Small Enterprise \u2014 Enterprise (initial) \u2014 Level 4 (\u00b115%)\n  D_S01: Niche Creators \u2014 Individual \u2014 Level 2 (\u00b140%)\n  D_E01: Government Agencies \u2014 Enterprise \u2014 Level 1 (\u00b165%)\n\nUndiscovered segments: 15\nUse research_market() to discover new segments ($25K/attempt).\nUse research_group(group_id, target_level) to improve accuracy or refresh data.",
       "data": {
         "known_groups": [
           {
@@ -143,7 +144,7 @@
     "name": "get_group_insights",
     "python_call": "novamind_api.market.get_group_insights(...)",
     "category": "Market Discovery",
-    "description": "Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed \u2014 to get updated market data, call research_group() again (costs money, results after delay). Accuracy depends on info level (Level 1: \u00b165%, Level 5: \u00b15%). Attributes returned: (1) willingness_to_pay \u2014 max monthly budget, (2) usage_volume \u2014 daily compute usage, (3) quality_floor_q_min \u2014 minimum quality needed at $0, (4) contract_lockin_aversion \u2014 satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap \u2014 total addressable customers, (6) market_cap_growth \u2014 annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.",
+    "description": "Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed \u2014 to get updated market data, call research_group() with an explicit target level (costs money, results after delay). Accuracy depends on info level (Level 1: \u00b165%, Level 5: \u00b15%). Attributes returned: (1) willingness_to_pay \u2014 max monthly budget, (2) usage_volume \u2014 daily compute usage, (3) quality_floor_q_min \u2014 minimum quality needed at $0, (4) contract_lockin_aversion \u2014 satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap \u2014 total addressable customers, (6) market_cap_growth \u2014 annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.",
     "parameters": {
       "group_id": {
         "type": "string",
@@ -168,7 +169,7 @@
       ]
     },
     "returns": {
-      "example": "=== Group Insights: Niche Creators (D_S01) ===\nSegment: Individual\nInfo Level: 2 (estimates accurate to \u00b140%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$92/mo (max monthly budget)\n  Usage volume:          ~38 units/day\n  Quality floor (q_min): ~0.61 (minimum quality needed at $0)\n  Contract lock-in aversion: ~0.0072/month (satisfaction penalty per extra contract month)\n  Market cap:            ~185,000 (total addressable customers)\n  Market cap growth:     ~9.2%/year (annual market expansion)\n\n--- Network Influence (word-of-mouth referrals) ---\nUnit: leads per 1000 subscribers per day (at neutral reputation)\n  Self-referral rate: ~4.2 leads per 1000 subs/day\n\nOutgoing (this group's subs \u2192 leads in other groups):\n  \u2192 Music Producers (D_S10): ~1.8 leads per 1000 subs/day\n  \u2192 Indie Game Devs (D_S05): ~1.2 leads per 1000 subs/day\n  \u2192 S1: ~0.9 leads per 1000 subs/day\n\nIncoming (other groups' subs \u2192 leads in this group):\n  \u2190 S1: ~1.3 leads per 1000 subs/day\n  \u2190 Music Producers (D_S10): ~0.8 leads per 1000 subs/day\n\n--- Reputation Influence (cross-group sentiment spread) ---\nUnit: dimensionless weight (0-1, higher = stronger influence)\n\nOutgoing (this group's reputation events \u2192 other groups):\n  \u2192 S1: ~0.150\n  \u2192 Indie Game Devs (D_S05): ~0.120\n\nIncoming (other groups' events \u2192 this group):\n  \u2190 S1: ~0.150\n  \u2190 S3: ~0.120\n\nNote: All estimates have \u00b140% uncertainty at Level 2.\nUse research_group('D_S01') to upgrade to Level 3 (\u00b125%).",
+      "example": "=== Group Insights: Niche Creators (D_S01) ===\nSegment: Individual\nInfo Level: 2 (estimates accurate to \u00b140%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$92/mo (max monthly budget)\n  Usage volume:          ~38 units/day\n  Quality floor (q_min): ~0.61 (minimum quality needed at $0)\n  Contract lock-in aversion: ~0.0072/month (satisfaction penalty per extra contract month)\n  Market cap:            ~185,000 (total addressable customers)\n  Market cap growth:     ~9.2%/year (annual market expansion)\n\n--- Network Influence (word-of-mouth referrals) ---\nUnit: leads per 1000 subscribers per day (at neutral reputation)\n  Self-referral rate: ~4.2 leads per 1000 subs/day\n\nOutgoing (this group's subs \u2192 leads in other groups):\n  \u2192 Music Producers (D_S10): ~1.8 leads per 1000 subs/day\n  \u2192 Indie Game Devs (D_S05): ~1.2 leads per 1000 subs/day\n  \u2192 S1: ~0.9 leads per 1000 subs/day\n\nIncoming (other groups' subs \u2192 leads in this group):\n  \u2190 S1: ~1.3 leads per 1000 subs/day\n  \u2190 Music Producers (D_S10): ~0.8 leads per 1000 subs/day\n\n--- Reputation Influence (cross-group sentiment spread) ---\nUnit: dimensionless weight (0-1, higher = stronger influence)\n\nOutgoing (this group's reputation events \u2192 other groups):\n  \u2192 S1: ~0.150\n  \u2192 Indie Game Devs (D_S05): ~0.120\n\nIncoming (other groups' events \u2192 this group):\n  \u2190 S1: ~0.150\n  \u2190 S3: ~0.120\n\nNote: All estimates have \u00b140% uncertainty at Level 2.\nUse research_group('D_S01', target_level=3) to upgrade to Level 3 (\u00b125%).",
       "data": {
         "group_id": "S1",
         "group_name": "Price-Sensitive Individuals",
@@ -216,7 +217,7 @@
       "reputation_influence": "Dict \u2014 keys: outgoing (Dict[str,float]), incoming (Dict[str,float]) \u2014 influence weights 0-1",
       "_access": "result['estimates']['willingness_to_pay'] \u2192 group's WTP"
     },
-    "impact": "Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() again (costs money, updated after delay). Info levels are dynamic; use the current tool result rather than sample values as the source of truth. Also shows network and reputation influence relationships between discovered groups.",
+    "impact": "Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() with the current target level (costs money, updated after delay). Info levels are dynamic; use the current tool result rather than sample values as the source of truth. Also shows network and reputation influence relationships between discovered groups.",
     "example_call": {
       "tool": "get_group_insights",
       "arguments": {

@@ -74,7 +74,7 @@ nm.enterprise.reject_enterprise_deal(deals=[[customer_id]])
 
 # === Market Research ===
 nm.market.research_market()               # $25K, 30% chance to discover a new group
-nm.market.research_group(group_id="D_S01") # Upgrade info level on a discovered group
+nm.market.research_group(group_id="D_S01", target_level=2) # Upgrade or refresh explicitly
 overview = nm.market.get_market_overview()
 insights = nm.market.get_group_insights(group_id="S1")
 

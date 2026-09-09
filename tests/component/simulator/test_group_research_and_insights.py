@@ -10,6 +10,26 @@ from saas_bench.simulator.config import (
 from saas_bench.simulator.database import get_cash, get_group_info_level
 
 
+def test_group_research_requires_explicit_target_before_charging(
+    make_initialized_sim,
+    make_agent_tools,
+):
+    """目标等级缺失时不得猜测升级或刷新意图，更不能扣款。"""
+    conn, _sim, config = make_initialized_sim()
+    tools = make_agent_tools(conn, config)
+    cash_before = get_cash(conn)
+
+    result = tools.research_group("S1")
+
+    assert not result.success
+    assert "target_level is required" in result.message
+    assert get_cash(conn) == pytest.approx(cash_before)
+    pending_count = conn.execute(
+        "SELECT COUNT(*) FROM pending_group_research"
+    ).fetchone()[0]
+    assert pending_count == 0
+
+
 def test_group_research_is_delayed_and_updates_visibility_on_completion(
     make_initialized_sim,
     make_agent_tools,

@@ -1197,7 +1197,7 @@ TOOL_DOCS = {
         "inputSchema": {"type": "object", "properties": {}},
         "parameters": {},
         "returns": {
-            "success": "=== Market Research Success ===\nCost: $25,000\nDiscovered: Niche Creators (D_S01) \u2014 Individual segment\nInfo Level: 1 (noisy estimates \u00b165%)\n\n--- Initial Estimates (\u00b165% accuracy) ---\n  Willingness to pay:   ~$85/mo\n  Usage volume:         ~35 units/day\n  Quality expectations: ~0.58\n  Market cap:           ~185,000 customers\n  Market cap growth:    ~9.2%/year\n\nUse get_group_insights('D_S01') for full parameter estimates.\nUse research_group('D_S01') to improve accuracy.",
+            "success": "=== Market Research Success ===\nCost: $25,000\nDiscovered: Niche Creators (D_S01) \u2014 Individual segment\nInfo Level: 1 (noisy estimates \u00b165%)\n\n--- Initial Estimates (\u00b165% accuracy) ---\n  Willingness to pay:   ~$85/mo\n  Usage volume:         ~35 units/day\n  Quality expectations: ~0.58\n  Market cap:           ~185,000 customers\n  Market cap growth:    ~9.2%/year\n\nUse get_group_insights('D_S01') for full parameter estimates.\nUse research_group('D_S01', target_level=2) to improve accuracy.",
             "failure": "Market research complete ($25,000). No new segments discovered this time. Try again for another chance.",
             "no_funds": "Insufficient funds. Market research costs $25,000. Available: $12,000",
             "data_on_success": {
@@ -1241,9 +1241,9 @@ TOOL_DOCS = {
             "type": "object",
             "properties": {
                 "group_id": {"type": "string", "description": "Group ID to research (e.g., 'D_S01')"},
-                "target_level": {"type": "integer", "description": "Target info level (2-5). If omitted, defaults to current_level + 1."}
+                "target_level": {"type": "integer", "description": "Required target info level (2-5). Specify a higher level to improve accuracy or the current level to refresh market data."}
             },
-            "required": ["group_id"]
+            "required": ["group_id", "target_level"]
         },
         "parameters": {
             "group_id": {
@@ -1253,7 +1253,7 @@ TOOL_DOCS = {
             },
             "target_level": {
                 "type": "integer",
-                "description": "Target level (2-5). Optional — defaults to current_level + 1. Can jump directly to any level.",
+                "description": "Required target level (2-5). Can jump directly to a higher level; use the current level for a same-level refresh.",
                 "examples": [2, 3, 4, 5]
             }
         },
@@ -1285,7 +1285,7 @@ TOOL_DOCS = {
             "expected_completion_day": "int — sim day when research completes",
             "_access": "result['expected_completion_day'] → when results arrive"
         },
-        "impact": "Cost deducted immediately. After research delay completes, group insights are updated to market conditions at completion time and inbox notification is delivered. get_group_insights() returns data from the last completed research — to get fresh market data, call research_group() again. Blocks if already in progress.",
+        "impact": "Target level is required. Cost is deducted immediately. After the research delay, group insights are updated to market conditions at completion time and an inbox notification is delivered. Specify a higher level to improve accuracy or the current level to refresh data. Blocks if already in progress.",
         "example_call": {
             "tool": "research_group",
             "arguments": {"group_id": "D_S01", "target_level": 5},
@@ -1293,7 +1293,7 @@ TOOL_DOCS = {
         "sample_io": {
             "success": [
                 {"label": "Jump to Level 5", "input": {"group_id": "D_S01", "target_level": 5}, "output": "=== Research Started ===\nGroup: Niche Creators (D_S01)\nLevel: 1 → 5\nCost: $700,000 (deducted)\nExpected completion: day 25 (~10 days)\nNew parameter accuracy: ±5%"},
-                {"label": "Default next level", "input": {"group_id": "D_E01"}, "output": "=== Research Started ===\nGroup: Government Agencies (D_E01)\nLevel: 1 → 2\nCost: $60,000 (deducted)\nExpected completion: day 18 (~3 days)\nNew parameter accuracy: ±40%"},
+                {"label": "Level 1→2", "input": {"group_id": "D_E01", "target_level": 2}, "output": "=== Research Started ===\nGroup: Government Agencies (D_E01)\nLevel: 1 → 2\nCost: $60,000 (deducted)\nExpected completion: day 18 (~3 days)\nNew parameter accuracy: ±40%"},
                 {"label": "Level 2→3", "input": {"group_id": "D_E01", "target_level": 3}, "output": "=== Research Started ===\nGroup: Government Agencies (D_E01)\nLevel: 2 → 3\nCost: $175,000 (deducted)\nExpected completion: day 35 (~5 days)\nNew parameter accuracy: ±25%"},
                 {"label": "Refresh at same level", "input": {"group_id": "D_S01", "target_level": 3}, "output": "=== Research Started (Refresh) ===\nGroup: Niche Creators (D_S01)\nLevel: 3 (refresh — market data will be updated on completion)\nCost: $175,000 (deducted)\nExpected completion: day 85 (~5 days)\nResults will be delivered to your inbox when complete.\nMarket insights will be updated to conditions at completion time."}
             ],
@@ -1312,7 +1312,7 @@ TOOL_DOCS = {
         "inputSchema": {"type": "object", "properties": {}},
         "parameters": {},
         "returns": {
-            "example": "=== Market Overview ===\n\nKnown Segments:\n  S1: Price-Sensitive Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  S2: Quality-Focused Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  E1: Small Enterprise \u2014 Enterprise (initial) \u2014 Level 4 (\u00b115%)\n  D_S01: Niche Creators \u2014 Individual \u2014 Level 2 (\u00b140%)\n  D_E01: Government Agencies \u2014 Enterprise \u2014 Level 1 (\u00b165%)\n\nUndiscovered segments: 15\nUse research_market() to discover new segments ($25K/attempt).\nUse research_group(group_id) to improve accuracy.",
+            "example": "=== Market Overview ===\n\nKnown Segments:\n  S1: Price-Sensitive Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  S2: Quality-Focused Individuals \u2014 Individual (initial) \u2014 Level 4 (\u00b115%)\n  E1: Small Enterprise \u2014 Enterprise (initial) \u2014 Level 4 (\u00b115%)\n  D_S01: Niche Creators \u2014 Individual \u2014 Level 2 (\u00b140%)\n  D_E01: Government Agencies \u2014 Enterprise \u2014 Level 1 (\u00b165%)\n\nUndiscovered segments: 15\nUse research_market() to discover new segments ($25K/attempt).\nUse research_group(group_id, target_level) to improve accuracy or refresh data.",
             "data": {
                 "known_groups": [{"group_id": "S1", "group_name": "Price-Sensitive Individuals", "segment": "Individual", "info_level": 1, "noise": "±65%"}],
                 "undiscovered_count": 14,
@@ -1342,7 +1342,7 @@ TOOL_DOCS = {
     "get_group_insights": {
         "name": "get_group_insights",
         "category": "Market Discovery",
-        "description": "Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() again (costs money, results after delay). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.",
+        "description": "Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() with an explicit target level (costs money, results after delay). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1358,7 +1358,7 @@ TOOL_DOCS = {
             }
         },
         "returns": {
-            "example": "=== Group Insights: Niche Creators (D_S01) ===\nSegment: Individual\nInfo Level: 2 (estimates accurate to \u00b140%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$92/mo (max monthly budget)\n  Usage volume:          ~38 units/day\n  Quality floor (q_min): ~0.61 (minimum quality needed at $0)\n  Contract lock-in aversion: ~0.0072/month (satisfaction penalty per extra contract month)\n  Market cap:            ~185,000 (total addressable customers)\n  Market cap growth:     ~9.2%/year (annual market expansion)\n\n--- Network Influence (word-of-mouth referrals) ---\nUnit: leads per 1000 subscribers per day (at neutral reputation)\n  Self-referral rate: ~4.2 leads per 1000 subs/day\n\nOutgoing (this group's subs \u2192 leads in other groups):\n  \u2192 Music Producers (D_S10): ~1.8 leads per 1000 subs/day\n  \u2192 Indie Game Devs (D_S05): ~1.2 leads per 1000 subs/day\n  \u2192 S1: ~0.9 leads per 1000 subs/day\n\nIncoming (other groups' subs \u2192 leads in this group):\n  \u2190 S1: ~1.3 leads per 1000 subs/day\n  \u2190 Music Producers (D_S10): ~0.8 leads per 1000 subs/day\n\n--- Reputation Influence (cross-group sentiment spread) ---\nUnit: dimensionless weight (0-1, higher = stronger influence)\n\nOutgoing (this group's reputation events \u2192 other groups):\n  \u2192 S1: ~0.150\n  \u2192 Indie Game Devs (D_S05): ~0.120\n\nIncoming (other groups' events \u2192 this group):\n  \u2190 S1: ~0.150\n  \u2190 S3: ~0.120\n\nNote: All estimates have \u00b140% uncertainty at Level 2.\nUse research_group('D_S01') to upgrade to Level 3 (\u00b125%).",
+            "example": "=== Group Insights: Niche Creators (D_S01) ===\nSegment: Individual\nInfo Level: 2 (estimates accurate to \u00b140%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$92/mo (max monthly budget)\n  Usage volume:          ~38 units/day\n  Quality floor (q_min): ~0.61 (minimum quality needed at $0)\n  Contract lock-in aversion: ~0.0072/month (satisfaction penalty per extra contract month)\n  Market cap:            ~185,000 (total addressable customers)\n  Market cap growth:     ~9.2%/year (annual market expansion)\n\n--- Network Influence (word-of-mouth referrals) ---\nUnit: leads per 1000 subscribers per day (at neutral reputation)\n  Self-referral rate: ~4.2 leads per 1000 subs/day\n\nOutgoing (this group's subs \u2192 leads in other groups):\n  \u2192 Music Producers (D_S10): ~1.8 leads per 1000 subs/day\n  \u2192 Indie Game Devs (D_S05): ~1.2 leads per 1000 subs/day\n  \u2192 S1: ~0.9 leads per 1000 subs/day\n\nIncoming (other groups' subs \u2192 leads in this group):\n  \u2190 S1: ~1.3 leads per 1000 subs/day\n  \u2190 Music Producers (D_S10): ~0.8 leads per 1000 subs/day\n\n--- Reputation Influence (cross-group sentiment spread) ---\nUnit: dimensionless weight (0-1, higher = stronger influence)\n\nOutgoing (this group's reputation events \u2192 other groups):\n  \u2192 S1: ~0.150\n  \u2192 Indie Game Devs (D_S05): ~0.120\n\nIncoming (other groups' events \u2192 this group):\n  \u2190 S1: ~0.150\n  \u2190 S3: ~0.120\n\nNote: All estimates have \u00b140% uncertainty at Level 2.\nUse research_group('D_S01', target_level=3) to upgrade to Level 3 (\u00b125%).",
             "data": {
                 "group_id": "S1", "group_name": "Price-Sensitive Individuals", "segment": "Individual",
                 "info_level": 1, "noise": "±65%",
@@ -1394,7 +1394,7 @@ TOOL_DOCS = {
             "reputation_influence": "Dict — keys: outgoing (Dict[str,float]), incoming (Dict[str,float]) — influence weights 0-1",
             "_access": "result['estimates']['willingness_to_pay'] → group's WTP"
         },
-        "impact": "Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() again (costs money, updated after delay). Info levels are dynamic; use the current tool result rather than sample values as the source of truth. Also shows network and reputation influence relationships between discovered groups.",
+        "impact": "Read-only. No cost. Returns data frozen at the time the last research_group() completed for this group. Calling multiple times returns the same data. To refresh with current market conditions, call research_group() with the current target level (costs money, updated after delay). Info levels are dynamic; use the current tool result rather than sample values as the source of truth. Also shows network and reputation influence relationships between discovered groups.",
         "example_call": {
             "tool": "get_group_insights",
             "arguments": {"group_id": "D_S01"},
@@ -4363,7 +4363,7 @@ os.chdir('{self.workspace_path}')
                 f"Remaining undiscovered segments: {remaining}\n"
                 f"{preview_text}\n"
                 f"Use get_group_insights('{discovered_gid}') for full parameter estimates.\n"
-                f"Use research_group('{discovered_gid}') to improve accuracy.",
+                f"Use research_group('{discovered_gid}', target_level=2) to improve accuracy.",
                 data={'discovered_group_id': discovered_gid}
             )
         else:
@@ -4393,19 +4393,19 @@ os.chdir('{self.workspace_path}')
 
         Args:
             group_id: The group to research (must be discovered, Level 1+)
-            target_level: The target info level (2-5). Defaults to current_level + 1.
-                          Can target the same level to refresh market data without upgrading.
+            target_level: Required target info level (2-5). A higher level upgrades
+                          accuracy; the current level refreshes market data.
         """
         from .database import get_cash, get_group_parameters
+
+        # 研究会立即扣除大额现金，目标不明确时必须在任何状态修改前失败。
+        if target_level is None:
+            return ToolResult(False, "target_level is required (2-5)")
 
         current_level = get_group_info_level(self.conn, group_id)
 
         if current_level == 0:
             return ToolResult(False, f"Group '{group_id}' has not been discovered yet. Use research_market() first.")
-
-        # Determine target level
-        if target_level is None:
-            target_level = max(current_level, 2)  # At least level 2; same-level refresh if already >=2
 
         if not isinstance(target_level, int) or target_level < 2 or target_level > 5:
             return ToolResult(False, f"Target level must be 2, 3, 4, or 5. Got: {target_level}")
@@ -4530,7 +4530,7 @@ os.chdir('{self.workspace_path}')
 
         output += f"\nUndiscovered segments: {undiscovered_count}\n"
         output += "Use research_market() to discover new segments ($25K/attempt).\n"
-        output += "Use research_group(group_id) to improve accuracy.\n"
+        output += "Use research_group(group_id, target_level) to improve accuracy or refresh data.\n"
 
         # Add current macroeconomic conditions
         macro_row = None
@@ -4589,7 +4589,7 @@ os.chdir('{self.workspace_path}')
         """Get estimated parameters for a discovered customer group based on current info level.
 
         Returns estimates frozen at the time of the last research_group() call for this group.
-        To get updated market data, call research_group() again (costs money).
+        To get updated market data, call research_group() with the current level (costs money).
         Accuracy depends on info level (±65% at Level 1, ±5% at Level 5).
 
         Args:
@@ -4810,7 +4810,10 @@ os.chdir('{self.workspace_path}')
         }
 
         output += f"\nNote: All estimates have {noise_label} uncertainty at Level {info_level}.\n"
-        output += f"Data frozen at day {snapshot_day}. Call research_group('{group_id}') to refresh with current market data"
+        output += (
+            f"Data frozen at day {snapshot_day}. Call research_group("
+            f"'{group_id}', target_level={info_level}) to refresh with current market data"
+        )
         if info_level < 5:
             next_noise = {2: '±40%', 3: '±25%', 4: '±15%', 5: '±5%'}[info_level + 1]
             output += f" or upgrade to Level {info_level + 1} ({next_noise})"
