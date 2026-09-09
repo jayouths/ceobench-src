@@ -127,6 +127,7 @@ class NegotiationState:
     # V2.1: Contract info
     current_contract_months: Optional[int] = None
     current_contract_end_day: Optional[int] = None
+    lead_promotion: float = 0.0  # 获客时快照的新客首期优惠
 
 
 def _get_drift_offsets(conn: sqlite3.Connection, group_id: str) -> Tuple[float, float]:
@@ -183,13 +184,18 @@ def get_negotiation_state(conn: sqlite3.Connection, thread_id: int) -> Optional[
                cs.relationship, cs.current_steepness_left, cs.current_steepness_right,
                cs.current_c_max, cs.current_q_max, cs.current_q_min, cs.current_slope,
                s.plan as current_plan, s.listed_price as current_price,
+               s.promotion as lead_promotion,
                s.contract_months as current_contract_months,
                s.contract_end_day as current_contract_end_day
         FROM enterprise_turns et
         JOIN customers c ON et.customer_id = c.customer_id
         LEFT JOIN customer_state cs ON c.customer_id = cs.customer_id
         LEFT JOIN subscriptions s ON c.customer_id = s.customer_id
-            AND s.status = 'subscribed' AND s.end_day IS NULL
+            AND (
+                (et.thread_type = 'new_lead' AND s.status = 'lead')
+                OR
+                (et.thread_type != 'new_lead' AND s.status = 'subscribed' AND s.end_day IS NULL)
+            )
         WHERE et.thread_id = ?
         ORDER BY et.turn_number DESC
         LIMIT 1
@@ -246,6 +252,11 @@ def get_negotiation_state(conn: sqlite3.Connection, thread_id: int) -> Optional[
         current_price=row['current_price'],
         current_contract_months=row['current_contract_months'],
         current_contract_end_day=row['current_contract_end_day'],
+        lead_promotion=(
+            (row['lead_promotion'] or 0.0)
+            if row['thread_type'] == 'new_lead'
+            else 0.0
+        ),
     )
 
 
@@ -273,6 +284,7 @@ def get_negotiation_states_batch(conn: sqlite3.Connection, thread_ids: List[int]
                cs.relationship, cs.current_steepness_left, cs.current_steepness_right,
                cs.current_c_max, cs.current_q_max, cs.current_q_min, cs.current_slope,
                s.plan as current_plan, s.listed_price as current_price,
+               s.promotion as lead_promotion,
                s.contract_months as current_contract_months,
                s.contract_end_day as current_contract_end_day
         FROM enterprise_turns et
@@ -285,7 +297,11 @@ def get_negotiation_states_batch(conn: sqlite3.Connection, thread_ids: List[int]
         JOIN customers c ON et.customer_id = c.customer_id
         LEFT JOIN customer_state cs ON c.customer_id = cs.customer_id
         LEFT JOIN subscriptions s ON c.customer_id = s.customer_id
-            AND s.status = 'subscribed' AND s.end_day IS NULL
+            AND (
+                (et.thread_type = 'new_lead' AND s.status = 'lead')
+                OR
+                (et.thread_type != 'new_lead' AND s.status = 'subscribed' AND s.end_day IS NULL)
+            )
     """, thread_ids)
 
     # Pre-fetch drift offsets once (same for all threads in this batch)
@@ -350,6 +366,11 @@ def get_negotiation_states_batch(conn: sqlite3.Connection, thread_ids: List[int]
             current_price=row['current_price'],
             current_contract_months=row['current_contract_months'],
             current_contract_end_day=row['current_contract_end_day'],
+            lead_promotion=(
+                (row['lead_promotion'] or 0.0)
+                if row['thread_type'] == 'new_lead'
+                else 0.0
+            ),
         )
     return result
 

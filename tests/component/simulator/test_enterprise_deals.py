@@ -9,7 +9,7 @@ from saas_bench.simulator.config import BenchmarkConfig
 from saas_bench.simulator.enterprise import create_negotiation_thread
 
 
-def _create_active_enterprise_thread(conn) -> tuple[int, int]:
+def _insert_enterprise_customer(conn) -> int:
     cursor = conn.execute(
         """
         INSERT INTO customers (
@@ -38,6 +38,11 @@ def _create_active_enterprise_thread(conn) -> tuple[int, int]:
         """,
         (customer_id,),
     )
+    return customer_id
+
+
+def _create_active_enterprise_thread(conn) -> tuple[int, int]:
+    customer_id = _insert_enterprise_customer(conn)
     conn.execute(
         """
         INSERT INTO subscriptions (
@@ -161,3 +166,78 @@ def test_existing_enterprise_evaluates_offer_at_promoted_price(
         (customer_id,),
     ).fetchone()
     assert tuple(subscription) == pytest.approx((100.0, 20.0, 80.0))
+
+
+def test_enterprise_lead_uses_snapshotted_promotion_for_first_period(
+    make_initialized_sim,
+    make_agent_tools,
+    monkeypatch,
+):
+    """企业新客谈判和首期收费使用获客时快照的优惠，之后自动取消。"""
+    benchmark_config = BenchmarkConfig(
+        seed=42,
+        lead_promotion_by_channel_group={"linkedin": {"E1": 20.0}},
+    )
+    conn, simulator, config = make_initialized_sim(
+        config=benchmark_config,
+        seed=42,
+    )
+    customer_id = _insert_enterprise_customer(conn)
+    simulator._create_enterprise_lead(
+        customer_id,
+        {
+            "group_id": "E1",
+            "seat_count": 20,
+            "_lead_channel": "linkedin",
+            "_lead_promo_used": 20.0,
+        },
+    )
+    lead = conn.execute(
+        "SELECT promotion FROM subscriptions WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()
+    assert lead["promotion"] == pytest.approx(20.0)
+
+    # 快照完成后即使优惠配置变化，本条线索仍沿用获客时看到的价格。
+    simulator.config.lead_promotion_by_channel_group = {}
+    monkeypatch.setattr(
+        enterprise_module,
+        "get_qualities_for_all_plans_batch",
+        lambda _conn, customer_ids, _config: {
+            customer_id: {"A": 0.5, "B": 0.5, "C": 0.5}
+            for customer_id in customer_ids
+        },
+    )
+    assert make_agent_tools(conn, config).send_enterprise_deal(
+        [[customer_id, [["B", 100.0]]]],
+    ).success
+
+    thread = conn.execute(
+        """
+        SELECT thread_id, next_reply_day FROM enterprise_turns
+        WHERE customer_id = ? ORDER BY message_id DESC LIMIT 1
+        """,
+        (customer_id,),
+    ).fetchone()
+    simulator.current_day = thread["next_reply_day"]
+    simulator._process_scheduled_replies(simulator.get_current_config(), [])
+
+    first_period = conn.execute(
+        """
+        SELECT listed_price, promotion, effective_price, first_billing_done
+        FROM subscriptions WHERE customer_id = ?
+        """,
+        (customer_id,),
+    ).fetchone()
+    assert tuple(first_period) == pytest.approx((100.0, 20.0, 80.0, 0))
+
+    payment = simulator._process_billing(simulator.get_current_config())
+    assert payment == pytest.approx(1_600.0)
+    next_period = conn.execute(
+        """
+        SELECT promotion, effective_price, first_billing_done
+        FROM subscriptions WHERE customer_id = ?
+        """,
+        (customer_id,),
+    ).fetchone()
+    assert tuple(next_period) == pytest.approx((0.0, 100.0, 1))

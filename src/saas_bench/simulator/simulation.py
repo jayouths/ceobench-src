@@ -1697,6 +1697,14 @@ class Simulator:
         if self._customer_has_churned(customer_id):
             return  # Silently skip - lost leads cannot retry
 
+        # 线索产生时快照新客优惠，保证后续谈判和首期收费使用同一价格口径。
+        lead_promo = params.get('_lead_promo_used')
+        if lead_promo is None:
+            lead_promo = self._get_lead_promotion(
+                params.get('group_id', 'E1'),
+                channel=params.get('_lead_channel'),
+            )
+
         # Leads don't use the service yet - usage rate will be sampled when they convert
         # Create lead subscription (not active yet) — plan/price are placeholders,
         # will be set by _finalize_deal when the customer accepts an offering
@@ -1710,9 +1718,9 @@ class Simulator:
                 seat_count,
                 start_day, status, billing_day_mod30,
                 daily_usage_rate, billing_period_usage
-            ) VALUES (?, ?, 0, 0, 0, ?, ?, 'lead', ?, 0, 0)
+            ) VALUES (?, ?, 0, ?, 0, ?, ?, 'lead', ?, 0, 0)
         """, (
-            customer_id, 'pending', lead_seat_count, self.current_day,
+            customer_id, 'pending', lead_promo, lead_seat_count, self.current_day,
             self.current_day % 30
         ))
 
@@ -6126,18 +6134,21 @@ Guidelines:
                 # No valid offerings — treat as no response, skip
                 continue
 
-            # 存量企业报价属于促销前基础价；客户按持续促销后的净价评估。
-            # 新线索的首期优惠由 lead promotion 链路单独处理，不能在这里混用。
-            promotions_by_plan = {}
-            if state.thread_type != 'new_lead':
-                offered_plans = {
-                    off.get('plan', 'B') for off in offerings
-                }
+            # 企业报价统一视为促销前基础价，客户按最终实际支付价格评估。
+            offered_plans = {
+                off.get('plan', 'B') for off in offerings
+            }
+            promotions_by_plan = {
+                plan: self._get_effective_promotion(
+                    state.customer_id, state.group_id, plan
+                )
+                for plan in offered_plans
+            }
+            if state.thread_type == 'new_lead':
+                # 新客优惠只在获客时确定，谈判期间不随后续配置变化。
                 promotions_by_plan = {
-                    plan: self._get_effective_promotion(
-                        state.customer_id, state.group_id, plan
-                    )
-                    for plan in offered_plans
+                    plan: promotion + state.lead_promotion
+                    for plan, promotion in promotions_by_plan.items()
                 }
 
             # V2.1: Evaluate offerings using structured satisfaction model
@@ -6367,6 +6378,9 @@ Guidelines:
         deal_c_max = (cust_row['current_c_max'] or cust_row['c_max']) if cust_row else 100.0
         deal_plan = agreed_plan or 'C'  # Enterprise typically on plan C
         deal_promo = self._get_effective_promotion(customer_id, deal_group_id, deal_plan)
+        if state.thread_type == 'new_lead':
+            # 首期同时享受获客时快照的新客优惠和当前持续促销。
+            deal_promo += state.lead_promotion
         deal_eff_price = max(0.0, agreed_price - deal_promo)
 
         if state.thread_type == 'new_lead':
