@@ -368,7 +368,8 @@ class Simulator:
 
         Includes ALL terms that affect daily satisfaction:
         delivered_quality = (base_product_quality + q_shared_bonus + q_group_bonus) × tier_multiplier
-        Q_perceived = (delivered_quality + relationship_bonus + stickiness_bonus) × quota_factor
+        Q_perceived = (delivered_quality - service_penalty
+                       + relationship_bonus + stickiness_bonus) × quota_factor
                     - issue_penalty - ads_penalty
 
         sub_row must have: usage_demand, seat_count, group_id, ads_quality_sensitivity,
@@ -416,7 +417,14 @@ class Simulator:
                 effective_ads = math.log(1.0 + 9.0 * strength) / math.log(10.0)
                 ads_penalty = ads_sensitivity * effective_ads
 
-        quality_before_incident_penalties = q_shared + relationship_bonus + stickiness_bonus
+        service_penalty = (
+            self.config.service_overload_weight * overload
+            + (self.config.service_outage_weight if outage else 0.0)
+        )
+        # 续费和新客选择使用与每日满意度相同的当日服务扣减。
+        quality_before_incident_penalties = (
+            q_shared - service_penalty + relationship_bonus + stickiness_bonus
+        )
         return quality_before_incident_penalties * quota_factor - issue_penalty - ads_penalty
 
     def _select_best_plan_inline(self, steepness_left: float, steepness_right: float,
@@ -1203,7 +1211,7 @@ class Simulator:
         """Compute comprehensive PERCEIVED quality for a specific customer.
 
         delivered_quality = (base_product_quality + q_shared_bonus + q_group_bonus) × tier_multiplier
-        Q_perceived = (delivered_quality + bonuses) × quota_factor - penalties
+        Q_perceived = (delivered_quality - service_penalty + bonuses) × quota_factor
 
         product_quality = base_product_quality + q_shared_bonus + q_group_bonus
         - base_product_quality: Starting product quality (config, default 0.50)
@@ -1277,8 +1285,15 @@ class Simulator:
         plan_quota = config.get(f'quota_{plan}', 100)  # Default to 100 if not set
         quota_factor = compute_quota_quality_factor(plan_quota, daily_demand)
 
-        # Perceived quality = (delivered quality + bonuses) × quota factor
-        quality_before_quota = q_shared + relationship_bonus + stickiness_bonus
+        service_penalty = (
+            self.config.service_overload_weight * overload
+            + (self.config.service_outage_weight if outage else 0.0)
+        )
+
+        # Perceived quality = (delivered quality - service penalty + bonuses) × quota factor
+        quality_before_quota = (
+            q_shared - service_penalty + relationship_bonus + stickiness_bonus
+        )
         Q_perceived = quality_before_quota * quota_factor
 
         return Q_perceived
@@ -5727,7 +5742,12 @@ Guidelines:
     # Enterprise Negotiation Processing
     # =========================================================================
 
-    def _process_enterprise_negotiations(self, config: dict) -> list:
+    def _process_enterprise_negotiations(
+        self,
+        config: dict,
+        overload: float,
+        outage: bool,
+    ) -> list:
         """Process enterprise customer negotiations - replies and triggers.
 
         This handles:
@@ -5789,7 +5809,10 @@ Guidelines:
         # Check for new negotiation triggers
         _t0 = _time.monotonic()
         newly_suspended_customers = self._check_negotiation_triggers(
-            config, active_thread_customers
+            config,
+            overload,
+            outage,
+            active_thread_customers,
         )
         _ent_timings['negotiation_triggers'] = _time.monotonic() - _t0
 
@@ -6458,7 +6481,13 @@ Guidelines:
                 seat_count=seat_count
             )
 
-    def _check_negotiation_triggers(self, config: dict, active_thread_customers: set = None):
+    def _check_negotiation_triggers(
+        self,
+        config: dict,
+        overload: float,
+        outage: bool,
+        active_thread_customers: set = None,
+    ):
         """Check for conditions that trigger new enterprise negotiations.
 
         V2.1: Contract-aware — churn_prevention and plan_change only trigger
@@ -6466,6 +6495,8 @@ Guidelines:
         (or on month-to-month with contract_months=1).
 
         Args:
+            overload: Current-day service overload ratio.
+            outage: Whether the service is down today.
             active_thread_customers: Pre-computed set of customer_ids with active threads.
                 If None, falls back to per-customer query (backward compat).
 
@@ -6529,43 +6560,16 @@ Guidelines:
                 or (contract_end_day - self.current_day) <= pre_expiry_days
             )
 
-            # Get current perceived quality — include ALL terms that affect daily satisfaction
+            # 企业流失与个人续费复用同一份当日感知质量口径。
             plan = ent['plan']
-            group_id = ent['group_id']
-            relationship = ent['relationship'] or 0.5
-            rel_bonus = self.config.relationship_quality_bonus_max * (relationship - 0.5) * 2
-
-            q_shared = self._cached_q_shared_per_plan.get(plan, 0.5)
-            # Add per-group quality bonus (from R&D investments) × tier multiplier
-            if self._cached_q_group_bonus and group_id in self._cached_q_group_bonus:
-                q_shared += self._cached_q_group_bonus[group_id] * self._cached_tier_multiplier_per_plan.get(plan, 1.0)
-
-            # Stickiness bonus (loyalty from tenure)
-            days_subscribed = self.current_day - ent['start_day'] if ent['start_day'] else 0
-            stickiness_bonus = self.config.stickiness_log_scale * math.log(1 + days_subscribed / 30) if days_subscribed > 0 else 0.0
-
-            # Issue penalty (unresolved support tickets)
-            issue_penalty = 0.03 * (ent['open_issue_days'] or 0)
-
-            # Quota quality factor (use actual sampled daily_usage_rate, consistent with satisfaction loop)
-            daily_usage_rate = ent['daily_usage_rate'] if ent['daily_usage_rate'] else 0.0
-            total_demand = daily_usage_rate * weekly_usage_mult
-            plan_quota = config.get(f'quota_{plan}', 100) if config else 100
-            quota_factor = compute_quota_quality_factor(plan_quota, total_demand)
-
-            # Ads penalty
-            ads_sensitivity = ent['ads_quality_sensitivity'] or 0.0
-            ads_penalty = 0.0
-            if ads_sensitivity > 0:
-                ads_global = self.config.ads_strength_global
-                ads_group = self.config.ads_strength_by_group.get(group_id, 0.0)
-                strength = min(max(ads_global + ads_group, 0.0), 1.0)
-                if strength > 0:
-                    effective_ads = math.log(1.0 + 9.0 * strength) / math.log(10.0)
-                    ads_penalty = ads_sensitivity * effective_ads
-
-            quality_before_incident_penalties = q_shared + rel_bonus + stickiness_bonus
-            quality = quality_before_incident_penalties * quota_factor - issue_penalty - ads_penalty
+            quality = self._compute_comprehensive_quality_inline(
+                ent,
+                plan,
+                config,
+                overload,
+                outage,
+                weekly_usage_mult,
+            )
 
             # Get asymmetric sigmoid params (use drifted values + drift offsets)
             steepness_left = ent['current_steepness_left'] or ent['initial_steepness_left']
@@ -6589,7 +6593,8 @@ Guidelines:
             if in_churn_window:
                 self._check_plan_change_opportunity(
                     customer_id, ent, quality, steepness_left, steepness_right,
-                    c_max, config, q_max, q_min, weekly_usage_mult,
+                    c_max, config, overload, outage, q_max, q_min,
+                    weekly_usage_mult,
                 )
 
         return newly_suspended_customers
@@ -6616,6 +6621,7 @@ Guidelines:
     def _check_plan_change_opportunity(
         self, customer_id: int, ent: dict, current_quality: float,
         steepness_left: float, steepness_right: float, c_max: float, config: dict,
+        overload: float, outage: bool,
         q_max: float = 0.75, q_min: float = 0.25,
         weekly_usage_mult: Optional[float] = None,
     ):
@@ -6635,23 +6641,6 @@ Guidelines:
         best_satisfaction = current_satisfaction
         best_quality = current_quality
 
-        # Pre-compute per-customer terms that don't change across plans
-        relationship = ent['relationship'] or 0.5
-        rel_bonus = self.config.relationship_quality_bonus_max * (relationship - 0.5) * 2
-        days_subscribed = self.current_day - ent['start_day'] if ent['start_day'] else 0
-        stickiness_bonus = self.config.stickiness_log_scale * math.log(1 + days_subscribed / 30) if days_subscribed > 0 else 0.0
-        issue_penalty = 0.03 * (ent['open_issue_days'] or 0)
-        ads_sensitivity = ent['ads_quality_sensitivity'] or 0.0
-        ads_penalty = 0.0
-        if ads_sensitivity > 0:
-            group_id = ent['group_id']
-            ads_global = self.config.ads_strength_global
-            ads_group = self.config.ads_strength_by_group.get(group_id, 0.0)
-            strength = min(max(ads_global + ads_group, 0.0), 1.0)
-            if strength > 0:
-                effective_ads = math.log(1.0 + 9.0 * strength) / math.log(10.0)
-                ads_penalty = ads_sensitivity * effective_ads
-
         for plan in ['A', 'B', 'C']:
             if plan == current_plan:
                 continue
@@ -6663,18 +6652,14 @@ Guidelines:
             if list_price > c_max:
                 continue
 
-            # Get perceived quality using ALL terms (matches daily satisfaction computation)
-            q_shared = self._cached_q_shared_per_plan.get(plan, 0.5)
-            # Add per-group quality bonus (from R&D investments) × tier multiplier
-            group_id_pc = ent['group_id']
-            if self._cached_q_group_bonus and group_id_pc in self._cached_q_group_bonus:
-                q_shared += self._cached_q_group_bonus[group_id_pc] * self._cached_tier_multiplier_per_plan.get(plan, 1.0)
-            daily_usage_rate_pc = ent['daily_usage_rate'] if ent['daily_usage_rate'] else 0.0
-            total_demand = daily_usage_rate_pc * weekly_usage_mult
-            plan_quota = config.get(f'quota_{plan}', 100) if config else 100
-            quota_factor = compute_quota_quality_factor(plan_quota, total_demand)
-            quality_before_incident_penalties = q_shared + rel_bonus + stickiness_bonus
-            quality = quality_before_incident_penalties * quota_factor - issue_penalty - ads_penalty
+            quality = self._compute_comprehensive_quality_inline(
+                ent,
+                plan,
+                config,
+                overload,
+                outage,
+                weekly_usage_mult,
+            )
             satisfaction = self._compute_satisfaction(steepness_left, steepness_right, c_max, quality, list_price, q_max, q_min)
 
             # Check participation constraint (satisfaction > 0 means acceptable)
@@ -7393,7 +7378,11 @@ Guidelines:
 
         # Process enterprise negotiations
         _t0 = _time.monotonic()
-        enterprise_churn_events = self._process_enterprise_negotiations(config)
+        enterprise_churn_events = self._process_enterprise_negotiations(
+            config,
+            overload,
+            outage,
+        )
         _timings['enterprise_negs'] = _time.monotonic() - _t0
 
         # Social media + reputation system — PHASE 1: submit LLM calls (non-blocking)

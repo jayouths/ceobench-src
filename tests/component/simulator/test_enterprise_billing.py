@@ -2,7 +2,10 @@
 
 import pytest
 
-from saas_bench.simulator.config import ENTERPRISE_RESPONSE_TIMEOUT_DAYS
+from saas_bench.simulator.config import (
+    BenchmarkConfig,
+    ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
+)
 from saas_bench.simulator.enterprise import (
     close_thread,
     create_negotiation_thread,
@@ -201,11 +204,15 @@ def test_billing_resumes_when_churn_prevention_closes_today(
     monkeypatch.setattr(
         simulator,
         "_check_negotiation_triggers",
-        lambda config, active_customers: set(),
+        lambda config, overload, outage, active_customers: set(),
     )
 
     config = simulator.get_current_config()
-    simulator._process_enterprise_negotiations(config)
+    simulator._process_enterprise_negotiations(
+        config,
+        overload=0.0,
+        outage=False,
+    )
     payments = simulator._process_billing(config)
 
     assert payments == pytest.approx(800.0)
@@ -228,7 +235,7 @@ def test_billing_pauses_when_churn_prevention_starts_today(
         lambda config, events: None,
     )
 
-    def create_churn_prevention(config, active_customers):
+    def create_churn_prevention(config, overload, outage, active_customers):
         create_negotiation_thread(
             conn, customer_id, "churn_prevention", simulator.current_day
         )
@@ -241,7 +248,68 @@ def test_billing_pauses_when_churn_prevention_starts_today(
     )
 
     config = simulator.get_current_config()
-    simulator._process_enterprise_negotiations(config)
+    simulator._process_enterprise_negotiations(
+        config,
+        overload=0.0,
+        outage=False,
+    )
     payments = simulator._process_billing(config)
 
     assert payments == 0.0
+
+
+def test_outage_can_trigger_enterprise_churn_prevention(
+    make_initialized_sim,
+    monkeypatch,
+):
+    """企业客户的去留判断必须感知当日故障。"""
+    benchmark_config = BenchmarkConfig(seed=42, base_product_quality=0.6)
+    conn, simulator, _ = make_initialized_sim(
+        config=benchmark_config,
+        seed=42,
+    )
+    customer_id = _insert_enterprise_customer(conn)
+    _insert_enterprise_subscription(conn, customer_id, billing_day=5)
+    simulator.current_day = 5
+    config = simulator.get_current_config()
+    config.update({"tier_A": 4, "tier_B": 4, "tier_C": 4})
+    simulator._cache_step_day_globals(config)
+
+    # 把参与约束固定在 0.5，单独验证故障惩罚是否进入企业链路。
+    monkeypatch.setattr(
+        simulator,
+        "_compute_satisfaction",
+        lambda _left, _right, _c_max, quality, _price, _q_max, _q_min: (
+            quality - 0.5
+        ),
+    )
+    monkeypatch.setattr(
+        simulator,
+        "_check_plan_change_opportunity",
+        lambda *args, **kwargs: None,
+    )
+
+    without_outage = simulator._check_negotiation_triggers(
+        config,
+        overload=0.0,
+        outage=False,
+        active_thread_customers=set(),
+    )
+    with_outage = simulator._check_negotiation_triggers(
+        config,
+        overload=0.0,
+        outage=True,
+        active_thread_customers=set(),
+    )
+
+    assert without_outage == set()
+    assert with_outage == {customer_id}
+    thread = conn.execute(
+        """
+        SELECT thread_type FROM enterprise_turns
+        WHERE customer_id = ?
+        ORDER BY message_id DESC LIMIT 1
+        """,
+        (customer_id,),
+    ).fetchone()
+    assert thread["thread_type"] == "churn_prevention"
