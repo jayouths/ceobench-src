@@ -88,6 +88,12 @@ def create_new_runner(config_path: Path):
     file_config = load_experiment_config(config_path)
     experiment = file_config.experiment
     decision = file_config.decision_agent
+    simulator_llm_config = file_config.simulator_overrides()
+    # 服务进程可能从不同工作目录启动，缓存地址在主进程中一次性固定。
+    cache_path = Path(simulator_llm_config["social_post_llm_response_cache_path"])
+    simulator_llm_config["social_post_llm_response_cache_path"] = str(
+        cache_path.expanduser().resolve()
+    )
     return BashAgentRunner(
         model=decision.model,
         experiment_name=experiment.name,
@@ -111,7 +117,7 @@ def create_new_runner(config_path: Path):
         request_options=decision.request_options,
         pricing=decision.pricing,
         pricing_model_map=decision.pricing_model_map,
-        simulator_llm_config=file_config.simulator_overrides(),
+        simulator_llm_config=simulator_llm_config,
         analysis_module_config=asdict(file_config.modules.analysis),
         analysis_model_config=(
             file_config.analysis.as_dict() if file_config.analysis else None

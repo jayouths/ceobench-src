@@ -13,7 +13,7 @@ _REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 _MODEL_KEYS = {
     "api_type", "model", "base_url", "api_key_env", "api_key_required", "reasoning_effort",
     "temperature", "top_p", "tool_choice", "max_output_tokens", "timeout_seconds",
-    "pricing", "pricing_model_map", "request_options", "tasks",
+    "pricing", "pricing_model_map", "request_options", "tasks", "response_cache_path",
 }
 _TASK_KEYS = {
     "reasoning_effort", "temperature", "top_p", "max_output_tokens", "request_options",
@@ -79,6 +79,7 @@ class ModelSettings:
     top_p: Optional[float] = None
     tool_choice: Optional[str] = None
     timeout_seconds: float = 600.0
+    response_cache_path: Optional[str] = None
     pricing: dict[str, dict[str, Any]] = field(default_factory=dict)
     pricing_model_map: dict[str, str] = field(default_factory=dict)
     request_options: dict[str, Any] = field(default_factory=dict)
@@ -139,6 +140,7 @@ def load_experiment_config(path: Optional[Path]) -> ExperimentConfig:
         _required_table(models_raw.get("social_llm"), "models.social_llm"),
         "models.social_llm",
         valid_tasks=_SOCIAL_TASKS,
+        require_response_cache=True,
     )
 
     modules_raw = _required_table(raw.get("modules"), "modules")
@@ -272,11 +274,14 @@ def _load_model(
     section: str,
     valid_tasks: set[str],
     require_tool_choice: bool = False,
+    require_response_cache: bool = False,
 ) -> ModelSettings:
     _reject_unknown(raw, _MODEL_KEYS, section)
     required = {"api_type", "model", "max_output_tokens"}
     if require_tool_choice:
         required.add("tool_choice")
+    if require_response_cache:
+        required.add("response_cache_path")
     missing = sorted(required - set(raw))
     if missing:
         raise ValueError(
@@ -326,6 +331,7 @@ def _load_model(
         "tool_choice": raw.get("tool_choice"),
         "max_output_tokens": raw["max_output_tokens"],
         "timeout_seconds": raw.get("timeout_seconds", 600.0),
+        "response_cache_path": raw.get("response_cache_path"),
         "pricing": pricing,
         "pricing_model_map": pricing_model_map,
         "request_options": _load_request_options(
@@ -350,9 +356,15 @@ def _load_model(
     timeout = values["timeout_seconds"]
     if not isinstance(timeout, (int, float)) or timeout <= 0:
         raise ValueError(f"{section}.timeout_seconds must be positive")
-    for key in ("base_url", "api_key_env", "reasoning_effort"):
+    for key in ("base_url", "api_key_env", "reasoning_effort", "response_cache_path"):
         if values[key] is not None and not isinstance(values[key], str):
             raise ValueError(f"{section}.{key} must be a string")
+    if require_response_cache and not values["response_cache_path"]:
+        raise ValueError(f"{section}.response_cache_path must be a non-empty string")
+    if not require_response_cache and values["response_cache_path"] is not None:
+        raise ValueError(
+            f"{section}.response_cache_path is only valid for models.social_llm"
+        )
     if not isinstance(values["api_key_required"], bool):
         raise ValueError(f"{section}.api_key_required must be a boolean")
     if values["api_key_required"] and not values["api_key_env"]:
@@ -388,6 +400,7 @@ def _model_overrides(prefix: str, settings: ModelSettings) -> dict[str, Any]:
         f"{prefix}_top_p": settings.top_p,
         f"{prefix}_max_tokens": settings.max_output_tokens,
         f"{prefix}_timeout_seconds": settings.timeout_seconds,
+        f"{prefix}_response_cache_path": settings.response_cache_path,
         f"{prefix}_pricing": settings.pricing,
         f"{prefix}_pricing_model_map": settings.pricing_model_map,
         f"{prefix}_request_options": settings.request_options,

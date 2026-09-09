@@ -689,6 +689,7 @@ class BenchmarkConfig:
     social_post_llm_top_p: Optional[float] = None
     social_post_llm_max_tokens: Optional[int] = None
     social_post_llm_timeout_seconds: float = 600.0
+    social_post_llm_response_cache_path: Optional[str] = None
     social_post_llm_pricing: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     social_post_llm_pricing_model_map: Dict[str, str] = field(default_factory=dict)
     social_post_llm_request_options: Dict[str, Any] = field(default_factory=dict)

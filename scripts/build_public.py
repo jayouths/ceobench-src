@@ -68,6 +68,7 @@ _ENGINE_MODULES = [
     "experiment/__init__",
     "experiment/json_io",
     "experiment/llm_provider",
+    "experiment/llm_response_cache",
     "evaluation/__init__",
     "evaluation/fact_recorder",
     "evaluation/schema",

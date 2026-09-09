@@ -57,6 +57,7 @@ _SIMULATOR_LLM_CONFIG_FIELDS = (
     "social_post_llm_top_p",
     "social_post_llm_max_tokens",
     "social_post_llm_timeout_seconds",
+    "social_post_llm_response_cache_path",
     "social_post_llm_pricing",
     "social_post_llm_pricing_model_map",
     "social_post_llm_request_options",
@@ -156,6 +157,7 @@ def _apply_simulator_llm_config(config: BenchmarkConfig) -> dict:
         top_p = getattr(config, f"{prefix}_top_p")
         max_tokens = getattr(config, f"{prefix}_max_tokens")
         timeout = getattr(config, f"{prefix}_timeout_seconds")
+        response_cache_path = getattr(config, f"{prefix}_response_cache_path")
         if temperature is not None and not 0 <= temperature <= 2:
             print(f"Error: invalid temperature for {prefix}: {temperature}", file=sys.stderr)
             sys.exit(1)
@@ -167,6 +169,12 @@ def _apply_simulator_llm_config(config: BenchmarkConfig) -> dict:
             sys.exit(1)
         if max_tokens <= 0 or timeout <= 0:
             print(f"Error: max_tokens and timeout must be positive for {prefix}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(response_cache_path, str) or not response_cache_path.strip():
+            print(
+                f"Error: response_cache_path must be configured for {prefix}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         pricing = getattr(config, f"{prefix}_pricing")
         pricing_model_map = getattr(config, f"{prefix}_pricing_model_map")

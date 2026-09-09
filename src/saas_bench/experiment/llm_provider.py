@@ -39,6 +39,7 @@ class TextLLMResult:
     cached_tokens: int
     reasoning_tokens: Optional[int]
     raw_response: Any
+    response_cache_hit: bool = False
 
 
 @dataclass(frozen=True)

@@ -86,6 +86,7 @@ from .subscription_activity import (
     latest_subscription_activity_event_id,
     subscription_activity_after,
 )
+from .randomness import event_rng
 from ..experiment.llm_provider import MissingModelPricingError
 from ..evaluation.fact_recorder import (
     PlanQualityFact,
@@ -4211,7 +4212,8 @@ class Simulator:
                         'input_tokens': response.input_tokens,
                         'cached_tokens': response.cached_tokens,
                         'output_tokens': response.output_tokens,
-                        'model': response.model}
+                        'model': response.model,
+                        'response_cache_hit': response.response_cache_hit}
 
             unified_calls.append(_make_regular_call)
 
@@ -4233,7 +4235,8 @@ class Simulator:
                         'input_tokens': llm_response.input_tokens,
                         'cached_tokens': llm_response.cached_tokens,
                         'output_tokens': llm_response.output_tokens,
-                        'model': llm_response.model}
+                        'model': llm_response.model,
+                        'response_cache_hit': llm_response.response_cache_hit}
 
             unified_calls.append(_make_macro_call)
 
@@ -4347,7 +4350,8 @@ class Simulator:
                     self.current_day, purpose,
                     result['input_tokens'], result['output_tokens'],
                     cached_tokens=result['cached_tokens'],
-                    model=result['model']
+                    model=result['model'],
+                    response_cache_hit=result.get('response_cache_hit', False),
                 )
 
     def _generate_posts_template(self, selected: list, influence_cache: dict):
@@ -4578,13 +4582,22 @@ class Simulator:
                 # Python 3.7+) — not `as_completed`, which yields in completion
                 # order and would make DB write ordering non-deterministic.
                 for future, gid in judge_futures.items():
-                    effect, reasoning, in_tok, out_tok, cached_tok, served_model = future.result()
+                    (
+                        effect,
+                        reasoning,
+                        in_tok,
+                        out_tok,
+                        cached_tok,
+                        served_model,
+                        response_cache_hit,
+                    ) = future.result()
                     effect_by_group[gid] = effect
                     reasoning_by_group[gid] = reasoning
                     self.customer_simulator._log_cost(
                         self.current_day, 'agent_social_judge',
                         in_tok, out_tok, cached_tokens=cached_tok,
-                        model=served_model
+                        model=served_model,
+                        response_cache_hit=response_cache_hit,
                     )
 
             # Compute views per group from effect scores
@@ -4668,7 +4681,14 @@ class Simulator:
                     # — not `as_completed`, which yields completion order and would
                     # make DB write ordering non-deterministic.
                     for future, gid in reply_futures.items():
-                        reply_text, in_tok, out_tok, cached_tok, served_model = future.result()
+                        (
+                            reply_text,
+                            in_tok,
+                            out_tok,
+                            cached_tok,
+                            served_model,
+                            response_cache_hit,
+                        ) = future.result()
                         eff = effect_by_group[gid]
 
                         # Add as a regular social media post (visible to agent)
@@ -4714,7 +4734,8 @@ class Simulator:
                         self.customer_simulator._log_cost(
                             self.current_day, 'agent_social_reply',
                             in_tok, out_tok, cached_tokens=cached_tok,
-                            model=served_model
+                            model=served_model,
+                            response_cache_hit=response_cache_hit,
                         )
 
             # Store comment post IDs on the agent post
@@ -5616,7 +5637,7 @@ Requirements:
             # 未配置环境 LLM 时才使用模拟器原有的模板模式；已配置但调用失败必须上抛。
             if not content:
                 content = self._generate_competitor_post_template(
-                    competitor_name, severity
+                    competitor_name, severity, i
                 )
 
             # Competitor posts are external market commentary — always neutral
@@ -5706,15 +5727,19 @@ Guidelines:
             self.current_day, 'competitor_event_post',
             response.input_tokens, response.output_tokens,
             cached_tokens=response.cached_tokens,
-            model=response.model
+            model=response.model,
+            response_cache_hit=response.response_cache_hit,
         )
 
         return post_text
 
-    @staticmethod
-    def _generate_competitor_post_template(competitor_name: str, severity: str) -> str:
+    def _generate_competitor_post_template(
+        self,
+        competitor_name: str,
+        severity: str,
+        post_index: int,
+    ) -> str:
         """Fallback template-based competitor post generation."""
-        import random as _random
         templates_by_severity = {
             'minor': [
                 "Interesting update from {competitor}. Nothing game-changing but shows they're still iterating.",
@@ -5746,7 +5771,16 @@ Guidelines:
             ],
         }
         templates = templates_by_severity[severity]
-        template = _random.choice(templates)
+        # 模板模式也按竞争事件身份选择，禁止使用未设种的全局 random。
+        template_rng = event_rng(
+            self.config.seed,
+            "competitor_post_template",
+            self.current_day,
+            competitor_name,
+            severity,
+            post_index,
+        )
+        template = templates[int(template_rng.integers(0, len(templates)))]
         return template.format(competitor=competitor_name)
 
     # =========================================================================

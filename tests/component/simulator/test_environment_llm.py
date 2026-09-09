@@ -1,6 +1,7 @@
 """按职责拆分的 Harness 回归测试。"""
 
 import json
+import random
 
 import sqlite3
 
@@ -10,7 +11,10 @@ import pytest
 
 from saas_bench.simulator.config import BenchmarkConfig
 
-from saas_bench.simulator.customer_llm import CustomerSimulator
+from saas_bench.simulator.customer_llm import (
+    CustomerSimulator,
+    EVENT_WRITING_ANGLE_POOLS,
+)
 
 from saas_bench.runtime.server_entry import (
     _apply_simulator_llm_config,
@@ -23,7 +27,10 @@ from tests.support.harness import (
     RecordingOpenAI,
 )
 
-def test_simulator_settings_survive_environment_and_session_round_trip(monkeypatch):
+def test_simulator_settings_survive_environment_and_session_round_trip(
+    monkeypatch,
+    tmp_path,
+):
     monkeypatch.setenv("LOCAL_LLM_KEY", "test-key")
     overrides = {
         "social_post_llm_api_type": "openai_responses",
@@ -35,6 +42,7 @@ def test_simulator_settings_survive_environment_and_session_round_trip(monkeypat
         "social_post_llm_top_p": 0.72,
         "social_post_llm_max_tokens": 123,
         "social_post_llm_timeout_seconds": 45.0,
+        "social_post_llm_response_cache_path": str(tmp_path / "social-cache"),
         "social_post_llm_pricing": {"official-social": {
             "currency": "USD",
             "uncached_input_cost_per_million": 0.0,
@@ -85,6 +93,110 @@ def test_social_openai_calls_receive_configured_api_parameters():
         "top_p": 0.72,
         "reasoning": {"effort": "none"},
     }]
+
+
+def test_identical_social_request_reuses_shared_response_cache(tmp_path):
+    social = RecordingOpenAI()
+    simulator = CustomerSimulator(
+        conn=sqlite3.connect(":memory:"),
+        config=BenchmarkConfig(
+            social_post_llm_api_type="openai_responses",
+            social_post_llm_model="social-test",
+            social_post_llm_max_tokens=100,
+            social_post_llm_response_cache_path=str(tmp_path / "social-cache"),
+        ),
+        social_client=social,
+    )
+
+    first = simulator.create_social_response("system", "user", task="customer_post")
+    second = simulator.create_social_response("system", "user", task="customer_post")
+
+    assert len(social.responses.calls) == 1
+    assert first.response_cache_hit is False
+    assert second.response_cache_hit is True
+    assert second.text == first.text
+    assert (second.input_tokens, second.cached_tokens, second.output_tokens) == (0, 0, 0)
+
+
+def test_customer_post_prompt_only_depends_on_semantic_event_identity():
+    config = BenchmarkConfig(
+        seed=42,
+        social_post_llm_api_type="openai_responses",
+        social_post_llm_model="social-test",
+        social_post_llm_max_tokens=100,
+    )
+    prefetched = {
+        "persona": {"name": "Test Customer"},
+        "group_chars": {"description": "Test group", "social_media_tone": "direct"},
+        "product_name": "NovaMind",
+        "company_name": "NovaMind AI",
+    }
+    event_context = {"event_type": "overload", "penalty": 0.2}
+    clients = [RecordingOpenAI(), RecordingOpenAI()]
+
+    # 即使进程全局 random 处于不同位置，同一经营事件也必须形成相同请求。
+    random_state = random.getstate()
+    try:
+        for global_seed, client in zip((0, 1), clients):
+            random.seed(global_seed)
+            simulator = CustomerSimulator(
+                conn=sqlite3.connect(":memory:"),
+                config=config,
+                social_client=client,
+            )
+            simulator.generate_social_post(
+                day=7,
+                customer_id=101,
+                satisfaction=0.4,
+                group_id="S1",
+                sentiment="negative",
+                post_type="perceived_quality_penalty",
+                event_context=event_context,
+                _prefetched=prefetched,
+                _skip_log_cost=True,
+            )
+    finally:
+        random.setstate(random_state)
+
+    assert clients[0].responses.calls == clients[1].responses.calls
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["overload", "outage", "issue", "quota", "contract_dissatisfaction"],
+)
+def test_quality_event_post_only_uses_compatible_writing_angle(event_type):
+    social = RecordingOpenAI()
+    simulator = CustomerSimulator(
+        conn=sqlite3.connect(":memory:"),
+        config=BenchmarkConfig(
+            seed=42,
+            social_post_llm_api_type="openai_responses",
+            social_post_llm_model="social-test",
+            social_post_llm_max_tokens=100,
+        ),
+        social_client=social,
+    )
+
+    simulator.generate_social_post(
+        day=7,
+        customer_id=101,
+        satisfaction=0.4,
+        group_id="S1",
+        sentiment="negative",
+        post_type="perceived_quality_penalty",
+        event_context={"event_type": event_type, "penalty": 0.2},
+        _prefetched={"product_name": "NovaMind", "company_name": "NovaMind AI"},
+        _skip_log_cost=True,
+    )
+
+    system_prompt = social.responses.calls[0]["input"][0]["content"]
+    angle_line = next(
+        line for line in system_prompt.splitlines() if line.startswith("Writing Angle: ")
+    )
+    assert angle_line.removeprefix("Writing Angle: ") in EVENT_WRITING_ANGLE_POOLS[
+        event_type
+    ]
 
 def test_simulator_text_model_rejects_empty_success_response():
     client = RecordingOpenAI()
@@ -237,6 +349,7 @@ def test_successful_zero_token_social_call_is_still_logged(make_initialized_sim)
     assert calls == [((7, "macro_social_post", 0, 0), {
         "cached_tokens": 0,
         "model": "local-model",
+        "response_cache_hit": False,
     })]
 
 def test_local_model_cost_is_zero_when_explicitly_configured():

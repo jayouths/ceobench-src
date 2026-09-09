@@ -8,17 +8,19 @@ by the experiment configuration.
 
 import sqlite3
 import os
-import random as _random
+import json
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 
 from .config import BenchmarkConfig, ChurnReason
+from .randomness import event_rng
 from ..experiment.llm_provider import (
     TextLLMResult,
     call_text_model,
     create_llm_client,
     model_token_cost,
 )
+from ..experiment.llm_response_cache import LLMResponseCache
 from .database import (
     get_customer_persona, get_group_characteristics, get_world_context,
     add_api_cost, add_social_media_post, add_notification
@@ -65,6 +67,70 @@ WRITING_ANGLE_POOL = [
     "Focus on the community or ecosystem around the product.",
     "Focus on how it impacts your bottom line or revenue.",
     "Focus on a specific pain point it solves (or doesn't).",
+]
+
+# 具体经营事件只允许使用语义相符的角度，避免“宕机 + 学习曲线”等冲突提示。
+EVENT_WRITING_ANGLE_POOLS = {
+    'overload': [
+        "Focus on speed, latency, or request timeouts.",
+        "Focus on how degraded performance disrupts daily workflow.",
+        "Focus on how slow service affects team or client delivery.",
+    ],
+    'outage': [
+        "Focus on reliability, uptime, or complete loss of access.",
+        "Focus on work or a deliverable interrupted by the outage.",
+        "Focus on the outage's effect on a team, clients, or revenue.",
+    ],
+    'issue': [
+        "Focus on the unresolved support ticket and response quality.",
+        "Focus on how waiting for support blocks daily work.",
+        "Focus on the concrete customer problem that remains unresolved.",
+    ],
+    'quota': [
+        "Focus on usage limits, rate limits, or blocked work.",
+        "Focus on whether the plan offers enough value for its limits.",
+        "Focus on the effect of quota restrictions on delivery or revenue.",
+    ],
+    'contract_dissatisfaction': [
+        "Focus on being locked into terms while service quality declines.",
+        "Focus on whether the contract still provides acceptable value.",
+        "Focus on the contract's effect on the customer's team or business.",
+    ],
+    'competitor_product': [
+        "Focus on a direct comparison with the competitor's offering.",
+        "Focus on the competitor feature or performance difference that matters most.",
+        "Focus on whether switching would improve value or workflow.",
+    ],
+}
+
+POST_TYPE_WRITING_ANGLE_POOLS = {
+    'unmet_promises': [
+        "Focus on the specific promise that was not fulfilled.",
+        "Focus on the resulting loss of trust or business impact.",
+    ],
+    'customer_cancel': [
+        "Focus on the concrete reason the customer decided to cancel.",
+        "Focus on the final incident or accumulated frustration behind the cancellation.",
+    ],
+    'negotiation_churn': [
+        "Focus on how the stalled sales or renewal process drove the customer away.",
+        "Focus on the business impact of an unresolved enterprise negotiation.",
+    ],
+    'renegotiation_churn': [
+        "Focus on how failed renegotiation caused the customer to leave.",
+        "Focus on the terms or response failure that ended the relationship.",
+    ],
+}
+
+SATISFACTION_CHANGE_WRITING_ANGLES = [
+    "Focus on the concrete change the customer noticed in daily use.",
+    "Focus on how the improving or declining experience affects workflow.",
+    "Focus on the practical consequence of the customer's changing satisfaction.",
+]
+
+EVENT_FALLBACK_WRITING_ANGLES = [
+    "Focus on the specific event and its concrete effect on the customer.",
+    "Focus on how the event changes the customer's work or business outcome.",
 ]
 
 # Varied event descriptions — multiple phrasings per event type to avoid convergence
@@ -117,6 +183,49 @@ EVENT_DESCRIPTION_VARIANTS = {
 }
 
 
+def _writing_angle_pool(
+    post_type: str,
+    event_context: Optional[Dict],
+    quality_change: Optional[Dict],
+) -> List[str]:
+    """根据帖子的真实触发原因限定写作角度。"""
+    context = event_context or {}
+    event_type = context.get('event_type')
+
+    if post_type == 'perceived_quality_penalty':
+        return EVENT_WRITING_ANGLE_POOLS.get(
+            event_type,
+            EVENT_FALLBACK_WRITING_ANGLES,
+        )
+    if post_type == 'competitor_product':
+        return EVENT_WRITING_ANGLE_POOLS['competitor_product']
+    if post_type == 'satisfaction_change':
+        reason_aliases = {
+            'unresolved_issue': 'issue',
+            'quota_exceeded': 'quota',
+        }
+        candidates = []
+        for reason in context.get('reasons', []):
+            candidates.extend(
+                EVENT_WRITING_ANGLE_POOLS.get(
+                    reason_aliases.get(reason, reason),
+                    [],
+                )
+            )
+        return list(dict.fromkeys(candidates)) or SATISFACTION_CHANGE_WRITING_ANGLES
+    if post_type in POST_TYPE_WRITING_ANGLE_POOLS:
+        return POST_TYPE_WRITING_ANGLE_POOLS[post_type]
+    if quality_change:
+        reason = quality_change.get('change_reason')
+        return EVENT_WRITING_ANGLE_POOLS.get(
+            reason,
+            EVENT_FALLBACK_WRITING_ANGLES,
+        )
+    if event_context:
+        return EVENT_FALLBACK_WRITING_ANGLES
+    return WRITING_ANGLE_POOL
+
+
 @dataclass
 class CustomerLLMResponse:
     """Response from customer LLM."""
@@ -128,6 +237,7 @@ class CustomerLLMResponse:
     output_tokens: int = 0
     cached_tokens: int = 0
     model: Optional[str] = None
+    response_cache_hit: bool = False
 
 
 class CustomerSimulator:
@@ -142,6 +252,10 @@ class CustomerSimulator:
         self._social_client = social_client
         self.conn = conn
         self.config = config
+        response_cache_path = config.social_post_llm_response_cache_path
+        self._response_cache = (
+            LLMResponseCache(response_cache_path) if response_cache_path else None
+        )
         self.event_logger = None  # Optional event logger
         self.current_day = 0  # Track current day for logging
 
@@ -190,28 +304,52 @@ class CustomerSimulator:
         max_tokens = task_values.get(
             "max_output_tokens", getattr(config, f"{prefix}_max_tokens")
         )
-        response = call_text_model(
-            client=self._get_client(),
-            api_type=getattr(config, f"{prefix}_api_type"),
-            model=getattr(config, f"{prefix}_model"),
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            max_output_tokens=max_tokens,
-            temperature=task_values.get(
-                "temperature", getattr(config, f"{prefix}_temperature")
-            ),
-            top_p=task_values.get("top_p", getattr(config, f"{prefix}_top_p")),
-            reasoning_effort=task_values.get(
-                "reasoning_effort", getattr(config, f"{prefix}_reasoning_effort")
-            ),
-            request_options=request_options,
+        api_type = getattr(config, f"{prefix}_api_type")
+        model = getattr(config, f"{prefix}_model")
+        temperature = task_values.get(
+            "temperature", getattr(config, f"{prefix}_temperature")
         )
-        # Provider 返回成功但正文为空同样不能构成有效环境响应，禁止后续伪造模板结果。
-        if not response.text:
-            raise RuntimeError(
-                f"{prefix} returned an empty response for task {task or 'default'}"
+        top_p = task_values.get("top_p", getattr(config, f"{prefix}_top_p"))
+        reasoning_effort = task_values.get(
+            "reasoning_effort", getattr(config, f"{prefix}_reasoning_effort")
+        )
+
+        def call_provider() -> TextLLMResult:
+            response = call_text_model(
+                client=self._get_client(),
+                api_type=api_type,
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_output_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                reasoning_effort=reasoning_effort,
+                request_options=request_options,
             )
-        return response
+            # 空文本不能成为后续实验共享的权威环境响应。
+            if not response.text:
+                raise RuntimeError(
+                    f"{prefix} returned an empty response for task {task or 'default'}"
+                )
+            return response
+
+        if self._response_cache is None:
+            return call_provider()
+        request_identity = {
+            "api_type": api_type,
+            "base_url": getattr(config, f"{prefix}_base_url"),
+            "model": model,
+            "task": task,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "reasoning_effort": reasoning_effort,
+            "request_options": request_options,
+        }
+        return self._response_cache.get_or_create(request_identity, call_provider)
 
     def set_event_logger(self, event_logger):
         """Set the event logger for detailed LLM cost logging."""
@@ -244,6 +382,7 @@ class CustomerSimulator:
     def _log_cost(
         self, day: int, purpose: str, input_tokens: int, output_tokens: int,
         cached_tokens: int = 0, model: str = None,
+        response_cache_hit: bool = False,
     ):
         """Log API cost to database and event logger."""
         if not model:
@@ -283,6 +422,7 @@ class CustomerSimulator:
                     "requested_model": self.config.social_post_llm_model,
                     "served_model": served_model,
                     "pricing_model": cost.pricing_model,
+                    "response_cache_hit": response_cache_hit,
                 },
             )
 
@@ -397,9 +537,31 @@ Customer Segment ({group_id}):
 - Social Media Tone: {group_chars.get('social_media_tone', '')}
 """
 
-        # V2.2: Select random format directive and writing angle for diversity
-        format_directive = _random.choice(POST_FORMAT_DIRECTIVES)
-        writing_angle = _random.choice(WRITING_ANGLE_POOL)
+        # 同一经营事件必须在对照组中选到同一表达角度，但不同事件仍保持多样性。
+        event_context_key = json.dumps(
+            event_context or {},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        prompt_rng = event_rng(
+            self.config.seed,
+            "customer_social_prompt",
+            day,
+            customer_id,
+            group_id,
+            post_type,
+            sentiment,
+            event_context_key,
+        )
+        format_directive = POST_FORMAT_DIRECTIVES[
+            int(prompt_rng.integers(0, len(POST_FORMAT_DIRECTIVES)))
+        ]
+        writing_angles = _writing_angle_pool(post_type, event_context, quality_change)
+        writing_angle = writing_angles[
+            int(prompt_rng.integers(0, len(writing_angles)))
+        ]
 
         # Build event context based on post type
         event_context_text = ""
@@ -409,7 +571,7 @@ Customer Segment ({group_id}):
             # V2.2: Use varied event descriptions instead of hardcoded strings
             variants = EVENT_DESCRIPTION_VARIANTS.get(event_type)
             if variants:
-                event_desc = _random.choice(variants)
+                event_desc = variants[int(prompt_rng.integers(0, len(variants)))]
             else:
                 event_desc = "I'm having issues with the service"
 
@@ -462,7 +624,11 @@ The customer feels deceived and wants to warn others. The post should be a warni
             comp_desc = event_context.get('competitor_event_description',
                                           'A competitor launched a notable update')
             variants = EVENT_DESCRIPTION_VARIANTS.get('competitor_product', [])
-            angle = _random.choice(variants) if variants else "I'm seeing better options in the market"
+            angle = (
+                variants[int(prompt_rng.integers(0, len(variants)))]
+                if variants
+                else "I'm seeing better options in the market"
+            )
 
             event_context_text = f"""
 IMPORTANT - This post is about a COMPETITOR PRODUCT:
@@ -546,6 +712,7 @@ Output ONLY the post text, nothing else."""
                 sentiment=sentiment,
                 input_tokens=0,
                 output_tokens=0,
+                response_cache_hit=True,
             )
 
         response = self.create_social_response(
@@ -564,6 +731,7 @@ Output ONLY the post text, nothing else."""
             self._log_cost(
                 day, 'customer_social_post', input_tokens, output_tokens,
                 cached_tokens=cached_tokens, model=response.model,
+                response_cache_hit=response.response_cache_hit,
             )
 
         return CustomerLLMResponse(
@@ -573,6 +741,7 @@ Output ONLY the post text, nothing else."""
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_tokens=cached_tokens,
+            response_cache_hit=response.response_cache_hit,
         )
 
 # V2.1: Churn reason message generation
@@ -694,8 +863,8 @@ def judge_agent_social_post(
         cached = _llm_replay.get_cache().get_judge_by_content(post_content, group_id)
         if cached is not None:
             effect, reasoning = cached
-            return effect, reasoning, 0, 0, 0, config.social_post_llm_model
-        return 0.0, "", 0, 0, 0, config.social_post_llm_model
+            return effect, reasoning, 0, 0, 0, config.social_post_llm_model, True
+        return 0.0, "", 0, 0, 0, config.social_post_llm_model, True
 
     # Build recent posts context (up to 10, with original post for replies)
     history_str = ""
@@ -773,7 +942,15 @@ REASON: <one sentence why>"""
             effect = float(fallback.group(1))
     effect = max(-1.0, min(1.0, effect))
 
-    return effect, text, input_tokens, output_tokens, response.cached_tokens, response.model
+    return (
+        effect,
+        text,
+        input_tokens,
+        output_tokens,
+        response.cached_tokens,
+        response.model,
+        response.response_cache_hit,
+    )
 
 
 def generate_customer_reply_to_agent(
@@ -809,7 +986,7 @@ def generate_customer_reply_to_agent(
         cached = _llm_replay.get_cache().get_reply_by_content(
             agent_post_content, group_id
         )
-        return (cached or ""), 0, 0, 0, config.social_post_llm_model
+        return (cached or ""), 0, 0, 0, config.social_post_llm_model, True
 
     sentiment_desc = "strongly positive" if effect_score > 0 else "strongly negative"
 
@@ -839,5 +1016,5 @@ Your reaction is {sentiment_desc} (score: {effect_score:.2f}). Write ONLY the re
 
     return (
         text, response.input_tokens, response.output_tokens,
-        response.cached_tokens, response.model,
+        response.cached_tokens, response.model, response.response_cache_hit,
     )

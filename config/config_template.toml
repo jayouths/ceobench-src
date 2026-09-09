@@ -58,6 +58,7 @@ api_key_required = true                 # 可选，默认 true
 # top_p = 0.9                           # 可选：社交任务的默认核采样阈值
 max_output_tokens = 1000                # 必填：任务未单独覆盖时的输出上限
 timeout_seconds = 600                   # 可选，默认 600
+response_cache_path = "outputs/environment-cache/REPLACE_PAIRED_EXPERIMENT" # 必填：同一对照批次的实验必须共用
 
 [models.social_llm.pricing_model_map]
 "DeepSeek-V4-Flash" = "DeepSeek-V4-Flash"

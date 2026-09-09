@@ -39,6 +39,7 @@ api_key_required = false
 temperature = 0.95
 max_output_tokens = 1000
 timeout_seconds = 600
+response_cache_path = "outputs/environment-cache/test"
 
 [models.social_llm.pricing.DeepSeek-V4-Flash]
 currency = "USD"

@@ -45,6 +45,23 @@ def test_experiment_config_loads_all_experiment_and_model_fields():
     assert config.social_llm.model is RequestModel.DEEPSEEK_V4_FLASH
     assert config.social_llm.base_url == "http://localhost:11434/v1"
     assert config.social_llm.max_output_tokens == 1000
+    assert config.social_llm.response_cache_path == "outputs/environment-cache/test"
+
+
+def test_social_response_cache_must_be_explicitly_configured(tmp_path):
+    text = TEST_CONFIG.read_text().replace(
+        'response_cache_path = "outputs/environment-cache/test"\n',
+        "",
+        1,
+    )
+    path = tmp_path / "missing-social-cache.toml"
+    path.write_text(text)
+
+    with pytest.raises(
+        ValueError,
+        match=r"models\.social_llm must explicitly configure: response_cache_path",
+    ):
+        load_experiment_config(path)
 
 def test_analysis_model_is_required_only_when_module_is_enabled(tmp_path):
     baseline_text = TEST_CONFIG.read_text()
@@ -246,6 +263,7 @@ api_type = "openai_chat_completions"
 model = "DeepSeek-V4-Flash"
 base_url = "http://localhost:11434/v1"
 api_key_required = false
+response_cache_path = "outputs/environment-cache/test-compatible"
 max_output_tokens = 1000
 
 [models.social_llm.pricing.DeepSeek-V4-Flash]
