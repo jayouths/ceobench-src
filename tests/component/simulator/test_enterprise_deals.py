@@ -11,6 +11,9 @@ from saas_bench.simulator.config import BenchmarkConfig
 from saas_bench.simulator.enterprise import (
     batch_schedule_customer_replies,
     create_negotiation_thread,
+    get_negotiation_state,
+    get_negotiation_states_batch,
+    get_quality_for_plan,
     get_qualities_for_all_plans_batch,
 )
 
@@ -172,6 +175,45 @@ def test_enterprise_plan_qualities_include_current_tenure(make_initialized_sim):
     expected_stickiness = config.stickiness_log_scale * math.log(4)
     assert qualities[customer_id]["A"] == pytest.approx(
         config.base_product_quality + expected_stickiness
+    )
+
+
+def test_zero_relationship_remains_worst_in_enterprise_paths(
+    make_initialized_sim,
+):
+    conn, _, config = make_initialized_sim(seed=42)
+    customer_id, thread_id = _create_active_enterprise_thread(conn)
+    conn.execute(
+        "UPDATE customer_state SET relationship = 0.0 WHERE customer_id = ?",
+        (customer_id,),
+    )
+    conn.execute(
+        """
+        UPDATE config_history
+        SET tier_A = 4, tier_B = 4, tier_C = 4,
+            quota_A = 100000, quota_B = 100000, quota_C = 100000
+        WHERE day = 0
+        """
+    )
+
+    single_state = get_negotiation_state(conn, thread_id)
+    batch_state = get_negotiation_states_batch(conn, [thread_id])[thread_id]
+    scalar_quality = get_quality_for_plan(conn, "A", customer_id, config)
+    batch_qualities = get_qualities_for_all_plans_batch(
+        conn,
+        [customer_id],
+        config,
+        current_day=0,
+    )
+
+    expected_quality = (
+        config.base_product_quality - config.relationship_quality_bonus_max
+    )
+    assert single_state.relationship == pytest.approx(0.0)
+    assert batch_state.relationship == pytest.approx(0.0)
+    assert scalar_quality == pytest.approx(expected_quality)
+    assert batch_qualities[customer_id] == pytest.approx(
+        {"A": expected_quality, "B": expected_quality, "C": expected_quality}
     )
 
 

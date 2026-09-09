@@ -297,6 +297,72 @@ def test_quota_quality_factor_boundaries():
     assert compute_quota_quality_factor(-50, 300) == pytest.approx(0.0)
 
 
+def test_zero_relationship_remains_worst_in_all_quality_paths(make_initialized_sim):
+    config = BenchmarkConfig(
+        seed=123,
+        base_product_quality=0.6,
+        satisfaction_ema_alpha=1.0,
+    )
+    conn, sim, _config = make_initialized_sim(config=config, seed=123)
+    customer_id = _create_subscribed_customer(conn, sim)
+    conn.execute(
+        """
+        UPDATE customers SET q_min = 0.0, q_max = 0.0 WHERE customer_id = ?
+        """,
+        (customer_id,),
+    )
+    conn.execute(
+        """
+        UPDATE customer_state
+        SET relationship = 0.0, current_q_min = 0.0, current_q_max = 0.0
+        WHERE customer_id = ?
+        """,
+        (customer_id,),
+    )
+    conn.commit()
+    plan_config = _make_plan_config(1_000)
+    sim._cache_step_day_globals(plan_config)
+    subscription = conn.execute(
+        """
+        SELECT s.customer_id, s.plan, s.start_day, s.daily_usage_rate,
+               c.group_id, c.usage_demand, s.seat_count,
+               c.ads_quality_sensitivity, cs.relationship, cs.open_issue_days
+        FROM subscriptions s
+        JOIN customers c ON c.customer_id = s.customer_id
+        JOIN customer_state cs ON cs.customer_id = s.customer_id
+        WHERE s.customer_id = ?
+        """,
+        (customer_id,),
+    ).fetchone()
+
+    expected_quality = 0.6 - config.relationship_quality_bonus_max
+    queried_quality = sim._compute_comprehensive_quality(
+        customer_id,
+        "A",
+        plan_config,
+        overload=0.0,
+        outage=False,
+        weekly_usage_mult=1.0,
+    )
+    inline_quality = sim._compute_comprehensive_quality_inline(
+        subscription,
+        "A",
+        plan_config,
+        overload=0.0,
+        outage=False,
+        weekly_usage_mult=1.0,
+    )
+    events = sim._update_customer_satisfaction(
+        plan_config,
+        overload=0.0,
+        outage=False,
+    )
+
+    assert queried_quality == pytest.approx(expected_quality)
+    assert inline_quality == pytest.approx(expected_quality)
+    assert events[customer_id]["new_satisfaction"] == pytest.approx(expected_quality)
+
+
 def test_quota_factor_multiplies_scalar_perceived_quality(make_initialized_sim):
     config = BenchmarkConfig(seed=123, base_product_quality=0.6)
     conn, sim, _config = make_initialized_sim(config=config, seed=123)

@@ -1,5 +1,11 @@
 """客户工单生命周期回归测试。"""
 
+from types import SimpleNamespace
+
+import pytest
+
+from saas_bench.simulator.config import BenchmarkConfig
+
 
 def _insert_customer_with_subscription(conn) -> tuple[int, int]:
     customer_id = conn.execute(
@@ -179,3 +185,63 @@ def test_last_subscription_end_closes_all_open_issues(make_initialized_sim):
             "resolution_type": "customer_churned",
         },
     ]
+
+
+def test_unresolved_issue_does_not_restore_zero_relationship(make_initialized_sim):
+    config = BenchmarkConfig(seed=123, issue_resolution_base_rate=0.0)
+    conn, simulator, _ = make_initialized_sim(config=config, seed=123)
+    customer_id, _ = _insert_customer_with_subscription(conn)
+    conn.execute(
+        "UPDATE customer_state SET relationship = 0.0 WHERE customer_id = ?",
+        (customer_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO issues (customer_id, group_id, open_day, days_open, status)
+        VALUES (?, 'S1', 1, 3, 'open')
+        """,
+        (customer_id,),
+    )
+    conn.commit()
+
+    simulator._process_issues(simulator.get_current_config(), outage=False)
+
+    relationship = conn.execute(
+        "SELECT relationship FROM customer_state WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()["relationship"]
+    assert relationship == pytest.approx(0.0)
+
+
+def test_quick_resolution_boost_starts_from_zero_relationship(make_initialized_sim):
+    config = BenchmarkConfig(seed=123, issue_resolution_base_rate=1.0)
+    conn, simulator, _ = make_initialized_sim(config=config, seed=123)
+    customer_id, _ = _insert_customer_with_subscription(conn)
+    conn.execute(
+        """
+        UPDATE customer_state
+        SET relationship = 0.0, open_issue_days = 1
+        WHERE customer_id = ?
+        """,
+        (customer_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO issues (customer_id, group_id, open_day, days_open, status)
+        VALUES (?, 'S1', 1, 1, 'open')
+        """,
+        (customer_id,),
+    )
+    conn.commit()
+    simulator.rng = SimpleNamespace(
+        poisson=lambda _mean: 1,
+        choice=lambda _size, **_kwargs: [0],
+    )
+
+    simulator._process_issues(simulator.get_current_config(), outage=False)
+
+    relationship = conn.execute(
+        "SELECT relationship FROM customer_state WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()["relationship"]
+    assert relationship == pytest.approx(config.quick_resolution_boost_1day)

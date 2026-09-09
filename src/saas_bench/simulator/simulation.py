@@ -1254,7 +1254,12 @@ class Simulator:
         days_subscribed = (self.current_day - subscription['start_day']) if subscription else 0
         daily_usage_rate = subscription['daily_usage_rate'] if subscription else 0.0
 
-        relationship = customer['relationship'] if customer and customer['relationship'] else 0.5
+        # 0.0 表示关系触底；只有缺失状态才能使用中性值。
+        relationship = (
+            customer['relationship']
+            if customer and customer['relationship'] is not None
+            else self.config.relationship_neutral_point
+        )
 
         # Today's quota comparison uses the sampled billing-period demand rate
         # after the weekly usage cycle multiplier.
@@ -2993,7 +2998,8 @@ class Simulator:
             eff_price_np[i] = ep if ep else 0.0
 
             rel = sub['relationship']
-            relationship_np[i] = rel if rel else 0.5
+            # 向量化路径与标量路径保持一致，保留合法的关系零值。
+            relationship_np[i] = rel if rel is not None else _rel_neutral
 
             open_issue_days_np[i] = sub['open_issue_days']
             days_subscribed_np[i] = _current_day - sub['start_day']
@@ -3370,7 +3376,11 @@ class Simulator:
 
                 if issue_days <= self.config.quick_resolution_threshold_days and not outage:
                     relationship_boost = self.config.quick_resolution_boost_1day if issue_days == 1 else self.config.quick_resolution_boost_2day
-                    current_relationship = sub['relationship'] or 0.5
+                    current_relationship = (
+                        sub['relationship']
+                        if sub['relationship'] is not None
+                        else self.config.relationship_neutral_point
+                    )
                     new_relationship = min(1.0, current_relationship + relationship_boost)
                     resolved_with_boost.append((new_relationship, sub['customer_id']))
                 else:
@@ -3414,7 +3424,11 @@ class Simulator:
             unresolved_updates = []  # (new_relationship, customer_id)
             for sub in subscribers_with_issues:
                 if sub['customer_id'] not in resolved_customer_ids:
-                    current_relationship = sub['relationship'] or 0.5
+                    current_relationship = (
+                        sub['relationship']
+                        if sub['relationship'] is not None
+                        else self.config.relationship_neutral_point
+                    )
                     new_relationship = max(0.0, current_relationship - self.config.relationship_decay_per_unresolved_day)
                     unresolved_updates.append((new_relationship, sub['customer_id']))
 

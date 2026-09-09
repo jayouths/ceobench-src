@@ -247,7 +247,10 @@ def get_negotiation_state(conn: sqlite3.Connection, thread_id: int) -> Optional[
         reply_delay_std=row['reply_delay_std'] or 1.0,
         max_negotiation_turns=row['max_negotiation_turns'] or 5,
         seat_count=int(row['seat_count'] or 1),
-        relationship=row['relationship'] or 0.5,
+        # 0.0 是最差关系的合法值，不能按布尔假值回退到中性。
+        relationship=(
+            row['relationship'] if row['relationship'] is not None else 0.5
+        ),
         contract_lockin_penalty=row['contract_lockin_penalty'] if row['contract_lockin_penalty'] is not None else 0.100,
         current_plan=row['current_plan'],
         current_price=row['current_price'],
@@ -361,7 +364,10 @@ def get_negotiation_states_batch(conn: sqlite3.Connection, thread_ids: List[int]
             reply_delay_std=row['reply_delay_std'] or 1.0,
             max_negotiation_turns=row['max_negotiation_turns'] or 5,
             seat_count=int(row['seat_count'] or 1),
-            relationship=row['relationship'] or 0.5,
+            # 批量路径必须与单条路径保持同一零值语义。
+            relationship=(
+                row['relationship'] if row['relationship'] is not None else 0.5
+            ),
             contract_lockin_penalty=row['contract_lockin_penalty'] if row['contract_lockin_penalty'] is not None else 0.100,
             current_plan=row['current_plan'],
             current_price=row['current_price'],
@@ -980,7 +986,11 @@ def get_quality_for_plan(
     """, (customer_id,)).fetchone()
 
     if customer:
-        relationship = customer['relationship'] or 0.5
+        relationship = (
+            customer['relationship']
+            if customer['relationship'] is not None
+            else config.relationship_neutral_point
+        )
         relationship_bonus = config.relationship_quality_bonus_max * (relationship - 0.5) * 2
         # Q_perceived = delivered_quality + bonuses
         q_perceived = delivered_quality + relationship_bonus
@@ -1087,7 +1097,11 @@ def get_qualities_for_all_plans_batch(
                 if cust_group_id in q_group_bonus:
                     dq += q_group_bonus[cust_group_id] * tier_multipliers.get(plan, 1.0)
                 # Relationship bonus
-                rel = cust['relationship'] or 0.5
+                rel = (
+                    cust['relationship']
+                    if cust['relationship'] is not None
+                    else config.relationship_neutral_point
+                )
                 rel_bonus = rel_bonus_max * (rel - 0.5) * 2
 
                 # Stickiness bonus (tenure loyalty)
@@ -1210,7 +1224,11 @@ def get_best_plan_for_customer(
                     reply_delay_std=state['reply_delay_std'] or 1.0,
                     max_negotiation_turns=5,
                     seat_count=int(state['seat_count'] or 1),
-                    relationship=state['relationship'] or 0.5,
+                    relationship=(
+                        state['relationship']
+                        if state['relationship'] is not None
+                        else config.relationship_neutral_point
+                    ),
                     contract_lockin_penalty=state['contract_lockin_penalty'] if state['contract_lockin_penalty'] is not None else 0.100,
                     current_plan=None, current_price=None
                 ),
