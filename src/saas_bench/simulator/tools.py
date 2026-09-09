@@ -3,6 +3,7 @@
 import json
 import math
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Any
 from pathlib import Path
@@ -39,30 +40,6 @@ from .enterprise import (
 )
 from ._sql_chunk import chunked_select, chunked_execute
 from .randomness import event_rng
-
-
-# =====================================================================
-# Helper: render table doc from TABLE_DOCS (for sample_io generation)
-# =====================================================================
-def _render_table_doc(table_name: str, max_cols: int | None = None) -> str:
-    """Render a table's describe_tables output from TABLE_DOCS.
-
-    Generates the same format as describe_tables() so sample_io examples
-    stay in sync with the actual schema automatically.
-
-    Args:
-        table_name: Name of the table in TABLE_DOCS.
-        max_cols: If set, show only the first N columns and append a '...' line.
-    """
-    doc = TABLE_DOCS[table_name]
-    lines = [f"=== {table_name} ===", doc['description'], ""]
-    cols = list(doc['columns'].items())
-    shown = cols[:max_cols] if max_cols and len(cols) > max_cols else cols
-    for col, col_desc in shown:
-        lines.append(f"  {col}: {col_desc}")
-    if max_cols and len(cols) > max_cols:
-        lines.append(f"  ...({len(cols) - max_cols} more columns)")
-    return "\n".join(lines)
 
 
 def _model_tier_info(
@@ -117,9 +94,7 @@ _PUBLIC_CURRENT_MRR_SQL = (
 
 
 # =====================================================================
-# TOOL_DOCS: Canonical documentation for all agent tools.
-# Used by get_tool_documentation() to render tool docs.
-# Previously maintained as a separate tool_docs.json file.
+# TOOL_DOCS: Canonical documentation for tools in the current Agent interface.
 # =====================================================================
 TOOL_DOCS = {
     "set_prices": {
@@ -678,7 +653,7 @@ TOOL_DOCS = {
             "defaultdict": "from collections import defaultdict"
         },
         "database_tables": {
-            "note": "Use describe_tables() to get detailed column descriptions for any table. Schema introspection queries (PRAGMA, sqlite_master) are blocked.",
+            "note": "Read docs/tables/ for detailed column descriptions. Schema introspection queries (PRAGMA, sqlite_master) are blocked.",
             "tables": {
                 "customers": "All customers (small and enterprise). JOIN with subscriptions for plan/status.",
                 "subscriptions": "Subscription records \u2014 plan, price, status, dates. THIS is where plan and status live.",
@@ -787,7 +762,7 @@ TOOL_DOCS = {
             "Use pd.read_sql() for complex analysis with pandas",
             "Always filter active subscriptions with: status='subscribed' AND end_day IS NULL",
             "Join customers and subscriptions to get customer details with subscription info",
-            "Use describe_tables() to get column details for any table"
+            "Read docs/tables/ to get column details for any table"
         ],
         "example_call": {
             "tool": "python_exec",
@@ -823,130 +798,9 @@ TOOL_DOCS = {
                 {"label": "Open enterprise negotiations", "input": {"code": "for cid, ttype, seats, email in rows(\"SELECT et.customer_id, et.thread_type, s.seat_count, c.email FROM enterprise_turns et JOIN customers c ON et.customer_id = c.customer_id JOIN subscriptions s ON et.customer_id = s.customer_id WHERE et.message_id = (SELECT MAX(et2.message_id) FROM enterprise_turns et2 WHERE et2.thread_id = et.thread_id) AND et.closed = 0 AND ((et.thread_type = 'new_lead' AND s.status = 'lead') OR (et.thread_type != 'new_lead' AND s.status = 'subscribed' AND s.end_day IS NULL))\"):\n    print(f'Customer #{cid}: {ttype} ({seats} seats, {email})')"}, "output": "Customer #312: new_lead (200 seats, ops@techcorp.com)\nCustomer #88: churn_prevention (50 seats, cfo@startupinc.com)"}
             ],
             "failure": [
-                {"label": "Schema introspection blocked", "input": {"code": "rows('PRAGMA table_info(customers)')"}, "output": "Execution error: Schema introspection queries (PRAGMA, sqlite_master) are not allowed. Use describe_tables() instead."},
+                {"label": "Schema introspection blocked", "input": {"code": "rows('PRAGMA table_info(customers)')"}, "output": "Execution error: Schema introspection queries (PRAGMA, sqlite_master) are not allowed. Read docs/tables/ instead."},
                 {"label": "Syntax error", "input": {"code": "print('hello"}, "output": "Execution error: unterminated string literal (detected at line 1)"},
                 {"label": "Timeout", "input": {"code": "import time; time.sleep(600)"}, "output": "Execution timed out after 5.0 seconds"}
-            ]
-        }
-    },
-
-    "register_daily_calculation": {
-        "name": "register_daily_calculation",
-        "category": "Automation",
-        "description": "Register a named calculation to run automatically at the start of each day. Output appears in dashboard.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Unique name for the calculation"},
-                "code": {"type": "string", "description": "Python code to execute (same environment as python_exec)"}
-            },
-            "required": ["name", "code"]
-        },
-        "parameters": {
-            "name": {
-                "type": "str",
-                "description": "Unique name for the calculation",
-                "example": "churn_rate"
-            },
-            "code": {
-                "type": "str",
-                "description": "Python code to execute (same environment as python_exec)",
-                "example": "total = row('SELECT COUNT(*) FROM subscriptions WHERE status=\"subscribed\"')[0]\nchurned = row('SELECT COUNT(*) FROM subscriptions WHERE status=\"cancelled\" AND end_day > (SELECT MAX(day)-30 FROM service_day)')[0]\nprint(f'30-day churn: {churned}/{total} = {churned/total*100:.1f}%')"
-            }
-        },
-        "returns": {
-            "success": "Registered daily calculation: 'churn_rate'. It will run at the start of each day.",
-            "failure": None
-        },
-        "output_schema": {
-            "name": "str — registered calculation name",
-            "code_length": "int — length of code in chars",
-            "_access": "result['name'] → name of registered calculation"
-        },
-        "impact": "Calculation runs each day before dashboard is shown. Use for automated KPI tracking.",
-        "example_call": {
-            "tool": "register_daily_calculation",
-            "arguments": {
-                "name": "revenue_trend",
-                "code": "import pandas as pd\ndf = pd.read_sql('SELECT day, SUM(amount) as rev FROM ledger WHERE category=\"subscription_payment\" AND day > (SELECT MAX(day)-7 FROM ledger) GROUP BY day', conn)\nprint(f'7-day revenue: ${df[\"rev\"].sum():,.0f}')",
-            }
-        },
-        "sample_io": {
-            "success": [
-                {"label": "Register churn tracker", "input": {"name": "churn_rate", "code": "total = row('SELECT COUNT(*) FROM subscriptions WHERE status=\"subscribed\"')[0]\nchurned = row('SELECT COUNT(*) FROM subscriptions WHERE status=\"cancelled\" AND end_day > (SELECT MAX(day)-30 FROM service_day)')[0]\nprint(f'30-day churn: {churned}/{total} = {churned/total*100:.1f}%')"}, "output": "Registered daily calculation: 'churn_rate'. It will run at the start of each day."},
-                {"label": "Register MRR tracker", "input": {"name": "mrr_tracker", "code": f'mrr = row("{_PUBLIC_CURRENT_MRR_SQL}")[0]\nprint(f\'MRR: ${{mrr:,.0f}}\')'}, "output": "Registered daily calculation: 'mrr_tracker'. It will run at the start of each day."}
-            ],
-            "failure": [
-                {"label": "Empty name", "input": {"name": "", "code": "print('test')"}, "output": "Calculation name cannot be empty"}
-            ]
-        }
-    },
-
-    "remove_daily_calculation": {
-        "name": "remove_daily_calculation",
-        "category": "Automation",
-        "description": "Remove a registered daily calculation.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Name of the calculation to remove"}
-            },
-            "required": ["name"]
-        },
-        "parameters": {
-            "name": {
-                "type": "str",
-                "description": "Name of the calculation to remove",
-                "example": "churn_rate"
-            }
-        },
-        "returns": {
-            "success": "Removed daily calculation: 'churn_rate'",
-            "failure": "Calculation 'X' not found. Registered calculations: [...]"
-        },
-        "output_schema": {
-            "name": "str — removed calculation name",
-            "remaining": "List[str] — remaining calculation names",
-            "_access": "result['remaining'] → list of still-registered calculations"
-        },
-        "impact": "Calculation will no longer run or appear in dashboard.",
-        "example_call": {
-            "tool": "remove_daily_calculation",
-            "arguments": {"name": "churn_rate"},
-        },
-        "sample_io": {
-            "success": [
-                {"label": "Remove existing calc", "input": {"name": "churn_rate"}, "output": "Removed daily calculation: 'churn_rate'"}
-            ],
-            "failure": [
-                {"label": "Name not found", "input": {"name": "nonexistent"}, "output": "Calculation 'nonexistent' not found. Registered calculations: ['revenue_trend', 'subscriber_count']"}
-            ]
-        }
-    },
-
-    "list_daily_calculations": {
-        "name": "list_daily_calculations",
-        "category": "Automation",
-        "description": "List all registered daily calculations.",
-        "inputSchema": {"type": "object", "properties": {}},
-        "parameters": {},
-        "returns": {
-            "success": "Registered daily calculations:\n  \u2022 churn_rate: total = row('SELECT COUNT(*)...\n  \u2022 revenue_trend: import pandas as pd...",
-            "empty": "No daily calculations registered."
-        },
-        "output_schema": {
-            "calculations": "List[str] — names of registered calculations",
-            "_access": "for name in result['calculations']: print(name)"
-        },
-        "impact": "Read-only. Shows what calculations will run each day.",
-        "example_call": {
-            "tool": "list_daily_calculations",
-            "arguments": {},
-        },
-        "sample_io": {
-            "success": [
-                {"label": "With registered calcs", "input": {}, "output": "Registered daily calculations:\n  • churn_rate: total = row('SELECT COUNT(*)...\n  • revenue_trend: import pandas as pd..."},
-                {"label": "No calcs registered", "input": {}, "output": "No daily calculations registered."}
             ]
         }
     },
@@ -1516,286 +1370,6 @@ TOOL_DOCS = {
             "tool": "list_research_projects",
             "arguments": {},
         },
-    },
-
-    "list_all_tables": {
-        "name": "list_all_tables",
-        "category": "Help & Documentation",
-        "description": "List all available database tables with their descriptions. Quick overview of what data is available — use describe_tables() for detailed column schemas.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {}
-        },
-        "parameters": {},
-        "returns": {
-            "success": "=== Available Database Tables (18) ===\n\n  customers — All customers (small and enterprise)\n  subscriptions — Subscription records\n  daily_usage — Daily usage data per subscription\n  ledger — Financial ledger — all income and expenses\n  ...",
-        },
-        "output_schema": {
-            "tables": "Dict[str, str] — {table_name: description}",
-            "count": "int — number of tables",
-            "_access": "for name, desc in result['tables'].items(): print(name, desc)"
-        },
-        "impact": "Read-only. No cost. Use to discover what tables exist before diving into column details with describe_tables().",
-        "example_call": {
-            "tool": "list_all_tables",
-            "arguments": {},
-        },
-        "sample_io": {
-            "success": [
-                {"label": "List all tables", "input": {}, "output": "=== Available Database Tables (13) ===\n\n  customers — All customers (small and enterprise)\n  subscriptions — Subscription records\n  daily_usage — Daily usage data per subscription\n  ledger — Financial ledger — all income and expenses\n  service_day — Daily aggregate metrics and system state\n  config_history — History of all configuration changes\n  social_media_posts — Customer social media posts\n  enterprise_turns — Enterprise negotiation message threads\n  notifications — Inbox notifications (enterprise leads, events)\n  research_projects — R&D research project status and results\n  macroeconomic_conditions — Macroeconomic conditions (ISM PMI business cycle index)\n  ad_channel_leads — Per-channel advertising lead generation stats\n  group_info_levels — Information levels for customer group research\n  issues — Customer support issues\n\nUse describe_tables(table_names=[...]) for detailed column schemas."}
-            ]
-        }
-    },
-
-    "describe_tables": {
-        "name": "describe_tables",
-        "category": "Help & Documentation",
-        "description": "Get descriptions of visible columns for specified database tables. Returns column names, types, and descriptions. Useful for understanding schemas before writing SQL queries via python_exec().",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "table_names": {
-                    "oneOf": [
-                        {"type": "array", "items": {"type": "string"}},
-                        {"type": "null"}
-                    ],
-                    "description": "Table names to describe, or omit/null for all"
-                }
-            }
-        },
-        "parameters": {
-            "table_names": {
-                "type": "List[str] | None",
-                "description": "List of table names to describe, or omit for all visible tables.",
-                "examples": [["customers", "subscriptions"], None]
-            }
-        },
-        "returns": {
-            "success": _render_table_doc("customers", max_cols=3) + "\n  ...",
-            "failure": "No matching tables found. Available: [list of tables]"
-        },
-        "available_tables": list(TABLE_DOCS.keys()),
-        "output_schema": {
-            "tables": "Dict[str, Dict] — {table_name: {description: str, columns: Dict[str, str]}}",
-            "_access": "result['tables']['customers']['columns'] → dict of column_name: description"
-        },
-        "impact": "Read-only. No cost. Use to understand table schemas before querying via python_exec().",
-        "example_call": {
-            "tool": "describe_tables",
-            "arguments": {"table_names": ["customers", "subscriptions"]},
-        },
-        "sample_io": {
-            "success": [
-                # Generated from TABLE_DOCS so examples stay in sync with actual schema
-                {"label": "Two specific tables", "input": {"table_names": ["customers", "subscriptions"]},
-                 "output": _render_table_doc("customers", max_cols=3) + "\n\n" + _render_table_doc("subscriptions", max_cols=3)},
-                {"label": "Single table", "input": {"table_names": ["ledger"]},
-                 "output": _render_table_doc("ledger")},
-                {"label": "All tables (no args)", "input": {},
-                 "output": "=== customers ===\n...\n\n=== subscriptions ===\n...\n\n=== daily_usage ===\n...\n\n"
-                           f"({len(TABLE_DOCS)} tables total)"}
-            ],
-            "failure": [
-                {"label": "Unknown table", "input": {"table_names": ["nonexistent"]},
-                 "output": f"No matching tables found. Available: {', '.join(list(TABLE_DOCS.keys())[:6])}, ..."}
-            ]
-        }
-    },
-
-    "get_tool_documentation": {
-        "name": "get_tool_documentation",
-        "category": "Help & Documentation",
-        "description": "Get detailed documentation for environment tools including parameters, examples, and expected outputs.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "tool_names": {
-                    "oneOf": [
-                        {"type": "string"},
-                        {"type": "array", "items": {"type": "string"}}
-                    ],
-                    "description": "Tool name(s) to get docs for, or 'all'"
-                }
-            }
-        },
-        "parameters": {
-            "tool_names": {
-                "type": "str | List[str] | None",
-                "description": "Tool name(s) to get docs for. Can be: a single tool name (string), a list of tool names, 'all' for all tools, or omitted/None for all tools.",
-                "examples": ["set_prices", ["set_prices", "next_week"], "all", None]
-            }
-        },
-        "returns": {
-            "single_tool": "Documentation for 1 tool(s):\n\n{JSON with full tool documentation}",
-            "multiple_tools": "Documentation for N tool(s):\n\n{JSON with requested tool docs}",
-            "all_tools": "Documentation for all tools:\n\n{JSON with all tool docs}",
-            "not_found": "No matching tools found. Requested: [X]\nAvailable tools: [list of valid tools]"
-        },
-        "output_schema": {
-            "_note": "Returns the full TOOL_DOCS dict for requested tools",
-            "_access": "result['set_prices']['description'] → tool description"
-        },
-        "impact": "Read-only. Use to understand how tools work before using them.",
-        "example_call": {
-            "tool": "get_tool_documentation",
-            "arguments": {"tool_names": ["set_prices", "set_model_tiers"]},
-        },
-        "sample_io": {
-            "success": [
-                {"label": "Single tool", "input": {"tool_names": "set_prices"}, "output": "Documentation for 1 tool(s):\n\n{\"set_prices\": {\"name\": \"set_prices\", ...}}"},
-                {"label": "Multiple tools", "input": {"tool_names": ["set_prices", "set_model_tiers"]}, "output": "Documentation for 2 tool(s):\n\n{\"set_prices\": {...}, \"set_model_tiers\": {...}}"},
-                {"label": "All tools", "input": {"tool_names": "all"}, "output": "Documentation for all 37 tools:\n\n{...}"}
-            ],
-            "failure": [
-                {"label": "Unknown tool", "input": {"tool_names": ["nonexistent"]}, "output": "No matching tools found. Requested: ['nonexistent']\nAvailable tools: set_prices, set_model_tiers, ..."}
-            ]
-        }
-    },
-
-    "register_script": {
-        "name": "register_script",
-        "category": "Automation",
-        "description": "Save a named Python script for later execution via run_script. Scripts persist across days. Use to avoid re-typing complex analysis code.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Unique name for the script (e.g. 'churn_analysis')"},
-                "code": {"type": "string", "description": "Python code (same environment as python_exec)"}
-            },
-            "required": ["name", "code"]
-        },
-        "parameters": {
-            "name": {"type": "str", "description": "Unique script name", "example": "cohort_analysis"},
-            "code": {"type": "str", "description": "Python code (same environment as python_exec)"}
-        },
-        "returns": {
-            "success": "Script 'cohort_analysis' registered (245 chars). Run with run_script(name='cohort_analysis').",
-            "failure": "Script name cannot be empty"
-        },
-        "output_schema": {
-            "name": "str — registered script name",
-            "code_length": "int — length of code in chars",
-            "_access": "result['name'] → name of registered script"
-        },
-        "impact": "No side effects. Just saves code for later reuse. Overwrites if name already exists.",
-        "example_call": {
-            "tool": "register_script",
-            "arguments": {"name": "revenue_breakdown", "code": "df = pd.read_sql(\"SELECT s.plan, COUNT(*) AS n, SUM(" + _PUBLIC_MRR_VALUE_SQL + ") AS mrr FROM subscriptions s JOIN customers c ON s.customer_id = c.customer_id WHERE s.status = 'subscribed' AND s.end_day IS NULL GROUP BY s.plan\", conn)\nprint(df.to_string())"}
-        },
-        "sample_io": {
-            "success": [
-                {"label": "Register analysis script", "input": {"name": "revenue_breakdown", "code": "df = pd.read_sql(\"SELECT s.plan, COUNT(*) AS n, SUM(" + _PUBLIC_MRR_VALUE_SQL + ") AS mrr FROM subscriptions s JOIN customers c ON s.customer_id = c.customer_id WHERE s.status = 'subscribed' AND s.end_day IS NULL GROUP BY s.plan\", conn)\nprint(df.to_string())"}, "output": "Script 'revenue_breakdown' registered. Run with run_script(name='revenue_breakdown')."},
-                {"label": "Overwrite existing", "input": {"name": "revenue_breakdown", "code": "print('updated')"}, "output": "Script 'revenue_breakdown' registered (16 chars, overwritten). Run with run_script(name='revenue_breakdown')."}
-            ],
-            "failure": [
-                {"label": "Empty name", "input": {"name": "", "code": "print('hi')"}, "output": "Script name cannot be empty"}
-            ]
-        }
-    },
-
-    "run_script": {
-        "name": "run_script",
-        "category": "Automation",
-        "description": "Execute a previously registered script by name. Runs in the same environment as python_exec.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Name of the registered script to run"}
-            },
-            "required": ["name"]
-        },
-        "parameters": {
-            "name": {"type": "str", "description": "Name of registered script", "example": "revenue_breakdown"}
-        },
-        "returns": {
-            "success": "(script output)",
-            "failure": "Script 'X' not found. Registered: ['a', 'b']"
-        },
-        "output_schema": {
-            "_note": "Returns the same output as python_exec — stdout of executed code",
-            "_access": "result is the printed output from the script"
-        },
-        "impact": "Executes code in same environment as python_exec (read-only DB access, pandas/numpy available).",
-        "example_call": {
-            "tool": "run_script",
-            "arguments": {"name": "revenue_breakdown"}
-        },
-        "sample_io": {
-            "success": [
-                {"label": "Run registered script", "input": {"name": "revenue_breakdown"}, "output": "  plan  n     rev\n0    A  42  1260.0\n1    B  28  2212.0\n2    C  15  2985.0"}
-            ],
-            "failure": [
-                {"label": "Script not found", "input": {"name": "missing_script"}, "output": "Script 'missing_script' not found. Registered scripts: []"}
-            ]
-        }
-    },
-
-    "list_scripts": {
-        "name": "list_scripts",
-        "category": "Automation",
-        "description": "List all registered scripts with code previews.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {}
-        },
-        "parameters": {},
-        "returns": {
-            "success": "Registered scripts:\n  • script_name: first 100 chars of code...",
-            "failure": None
-        },
-        "output_schema": {
-            "scripts": "List[str] — names of registered scripts",
-            "_access": "for name in result['scripts']: print(name)"
-        },
-        "impact": "Read-only. No cost.",
-        "example_call": {
-            "tool": "list_scripts",
-            "arguments": {}
-        },
-        "sample_io": {
-            "success": [
-                {"label": "List scripts", "input": {}, "output": "Registered scripts:\n  • revenue_breakdown: df = pd.read_sql(\"SELECT s.plan, COUNT(*) AS n, SUM(CASE WHEN..."},
-                {"label": "No scripts", "input": {}, "output": "No scripts registered."}
-            ]
-        }
-    },
-
-    "delete_script": {
-        "name": "delete_script",
-        "category": "Automation",
-        "description": "Delete a previously registered script by name.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Name of the script to delete"}
-            },
-            "required": ["name"]
-        },
-        "parameters": {
-            "name": {"type": "str", "description": "Name of script to delete", "example": "revenue_breakdown"}
-        },
-        "returns": {
-            "success": "Script 'revenue_breakdown' deleted.",
-            "failure": "Script 'X' not found. Registered scripts: ['a', 'b']"
-        },
-        "output_schema": {
-            "name": "str — deleted script name",
-            "remaining": "List[str] — remaining script names",
-            "_access": "result['remaining'] → list of still-registered scripts"
-        },
-        "impact": "Removes saved script. No other side effects.",
-        "example_call": {
-            "tool": "delete_script",
-            "arguments": {"name": "revenue_breakdown"}
-        },
-        "sample_io": {
-            "success": [
-                {"label": "Delete script", "input": {"name": "revenue_breakdown"}, "output": "Script 'revenue_breakdown' deleted."}
-            ],
-            "failure": [
-                {"label": "Script not found", "input": {"name": "missing"}, "output": "Script 'missing' not found. Registered scripts: ['revenue_breakdown', 'churn_analysis']"}
-            ]
-        }
     },
 
     "set_ads_strength": {
@@ -3587,9 +3161,9 @@ def _get_helpful_error(original_error, query):
                 hints = []
                 for tname, cols in matched_tables.items():
                     hints.append(f"{{tname}}: {{', '.join(cols)}}")
-                return f"Column '{{bad_col}}' does not exist. Valid columns for tables in your query:\\n  " + "\\n  ".join(hints) + "\\nUse describe_tables() to check schemas."
+                return f"Column '{{bad_col}}' does not exist. Valid columns for tables in your query:\\n  " + "\\n  ".join(hints) + "\\nRead docs/tables/ to check schemas."
             else:
-                return f"Column '{{bad_col}}' does not exist. Use describe_tables() to check valid column names."
+                return f"Column '{{bad_col}}' does not exist. Read docs/tables/ to check valid column names."
 
     # Return original error with query context
     return f"SQL Error: {{original_error}}\\nQuery: {{query[:200]}}..."
@@ -3820,221 +3394,6 @@ os.chdir('{self.workspace_path}')
         finally:
             import os
             os.unlink(temp_path)
-
-    def register_daily_job(self, script_path: str) -> ToolResult:
-        """Register a script to run daily.
-
-        The script content is snapshotted at registration time. Subsequent
-        edits to the source file will NOT affect the registered version.
-        Re-register to update.
-
-        Args:
-            script_path: Path to the script (relative to workspace)
-        """
-        full_path = self.workspace_path / script_path
-
-        if not full_path.exists():
-            return ToolResult(False, f"Script not found: {script_path}")
-
-        content = full_path.read_text()
-
-        # Store name -> content snapshot in JSON file
-        jobs_file = self.workspace_path / '.daily_jobs.json'
-        jobs = {}
-        if jobs_file.exists():
-            raw = json.loads(jobs_file.read_text())
-            # Backwards compat: old format was a list of paths
-            if isinstance(raw, list):
-                jobs = {}
-                for p in raw:
-                    fp = self.workspace_path / p
-                    if fp.exists():
-                        jobs[p] = fp.read_text()
-            else:
-                jobs = raw
-
-        jobs[script_path] = content
-        jobs_file.write_text(json.dumps(jobs))
-
-        return ToolResult(True, f"Registered daily job: {script_path}",
-                          data={'script_path': script_path, 'total_jobs': len(jobs)})
-
-    # === DAILY CALCULATIONS ===
-    # Calculations are named code snippets that run at the start of each day
-    # Their output is included in the daily dashboard
-
-    def get_daily_calculations(self) -> Dict[str, str]:
-        """Get all registered daily calculations."""
-        return getattr(self, '_daily_calculations', {})
-
-    def set_daily_calculations(self, calculations: Dict[str, str]):
-        """Set daily calculations (called by benchmark for persistence)."""
-        self._daily_calculations = calculations
-
-    def register_daily_calculation(self, name: str, code: str) -> ToolResult:
-        """Register a named calculation to run at the start of each day.
-
-        The calculation's output (via print statements) will be shown in the daily dashboard.
-        Use this to track custom metrics or perform daily analysis automatically.
-
-        Args:
-            name: Unique name for the calculation (e.g., "revenue_trend", "churn_rate")
-            code: Python code to execute. Has access to: conn (DB), rows(query), row(query),
-                  numpy (np), pandas (pd), and standard math/statistics libraries.
-        """
-        calculations = self.get_daily_calculations()
-        calculations[name] = code
-        self._daily_calculations = calculations
-
-        return ToolResult(
-            True,
-            f"Registered daily calculation: '{name}'. It will run at the start of each day.",
-            data={'name': name, 'code_length': len(code)}
-        )
-
-    def remove_daily_calculation(self, name: str) -> ToolResult:
-        """Remove a registered daily calculation.
-
-        Args:
-            name: Name of the calculation to remove
-        """
-        calculations = self.get_daily_calculations()
-
-        if name not in calculations:
-            return ToolResult(
-                False,
-                f"Calculation '{name}' not found. Registered calculations: {list(calculations.keys())}"
-            )
-
-        del calculations[name]
-        self._daily_calculations = calculations
-
-        return ToolResult(True, f"Removed daily calculation: '{name}'",
-                          data={'name': name, 'remaining': list(calculations.keys())})
-
-    def list_daily_calculations(self) -> ToolResult:
-        """List all registered daily calculations."""
-        calculations = self.get_daily_calculations()
-
-        if not calculations:
-            return ToolResult(True, "No daily calculations registered.", data={'calculations': []})
-
-        lines = ["Registered daily calculations:"]
-        for name, code in calculations.items():
-            # Show first 100 chars of code
-            preview = code[:100].replace('\n', ' ')
-            if len(code) > 100:
-                preview += "..."
-            lines.append(f"  • {name}: {preview}")
-
-        return ToolResult(True, '\n'.join(lines), data={'calculations': list(calculations.keys())})
-
-    def run_daily_calculations(self) -> Dict[str, str]:
-        """Run all registered daily calculations and return their outputs.
-
-        Returns:
-            Dict mapping calculation name to its output (or error message)
-        """
-        calculations = self.get_daily_calculations()
-        results = {}
-
-        for name, code in calculations.items():
-            result = self.python_exec(code)
-            if result.success:
-                results[name] = result.message
-            else:
-                results[name] = f"ERROR: {result.message}"
-
-        return results
-
-    # === NAMED SCRIPTS ===
-    # Scripts are named code snippets the agent can register and run on demand.
-    # They persist across days (via checkpoint) and execute in the python_exec environment.
-
-    def get_scripts(self) -> Dict[str, str]:
-        """Get all registered scripts."""
-        return getattr(self, '_scripts', {})
-
-    def set_scripts(self, scripts: Dict[str, str]):
-        """Set scripts (called by benchmark for persistence)."""
-        self._scripts = scripts
-
-    def register_script(self, name: str, code: str) -> ToolResult:
-        """Register a named script for later execution.
-
-        Args:
-            name: Unique name for the script
-            code: Python code to execute (same environment as python_exec)
-        """
-        if not name or not name.strip():
-            return ToolResult(False, "Script name cannot be empty")
-
-        name = name.strip()
-        scripts = self.get_scripts()
-        overwritten = name in scripts
-        scripts[name] = code
-        self._scripts = scripts
-
-        suffix = ", overwritten" if overwritten else ""
-        return ToolResult(
-            True,
-            f"Script '{name}' registered ({len(code)} chars{suffix}). Run with run_script(name='{name}').",
-            data={'name': name, 'code_length': len(code)}
-        )
-
-    def run_script(self, name: str) -> ToolResult:
-        """Execute a previously registered script.
-
-        Args:
-            name: Name of the script to run
-        """
-        scripts = self.get_scripts()
-
-        if not name or name.strip() not in scripts:
-            registered = list(scripts.keys())
-            return ToolResult(
-                False,
-                f"Script '{name}' not found. Registered scripts: {registered}"
-            )
-
-        return self.python_exec(scripts[name.strip()])
-
-    def list_scripts(self) -> ToolResult:
-        """List all registered scripts."""
-        scripts = self.get_scripts()
-
-        if not scripts:
-            return ToolResult(True, "No scripts registered.", data={'scripts': []})
-
-        lines = ["Registered scripts:"]
-        for name, code in scripts.items():
-            preview = code[:100].replace('\n', ' ')
-            if len(code) > 100:
-                preview += "..."
-            lines.append(f"  • {name}: {preview}")
-
-        return ToolResult(True, '\n'.join(lines), data={'scripts': list(scripts.keys())})
-
-    def delete_script(self, name: str) -> ToolResult:
-        """Delete a registered script.
-
-        Args:
-            name: Name of the script to delete
-        """
-        scripts = self.get_scripts()
-
-        if not name or name.strip() not in scripts:
-            registered = list(scripts.keys())
-            return ToolResult(
-                False,
-                f"Script '{name}' not found. Registered scripts: {registered}"
-            )
-
-        del scripts[name.strip()]
-        self._scripts = scripts
-
-        return ToolResult(True, f"Script '{name.strip()}' deleted.",
-                          data={'name': name.strip(), 'remaining': list(scripts.keys())})
 
     # === MEMORY MANAGEMENT ===
     # Memory is a list of lines that persists across turns within a run
@@ -5180,133 +4539,6 @@ os.chdir('{self.workspace_path}')
 
         return ToolResult(True, output, {'tiers': tiers_data})
 
-    def list_all_tables(self) -> ToolResult:
-        """List all available database tables with their descriptions.
-
-        Quick overview of what data is available. Use describe_tables()
-        for detailed column schemas.
-        """
-        count = len(TABLE_DOCS)
-        output = f"=== Available Database Tables ({count}) ===\n\n"
-        tables_data = {}
-        for name, doc in TABLE_DOCS.items():
-            output += f"  {name} — {doc['description']}\n"
-            tables_data[name] = doc['description']
-        output += "\nUse describe_tables(table_names=[...]) for detailed column schemas."
-        return ToolResult(True, output, {'tables': tables_data, 'count': count})
-
-    def describe_tables(self, table_names: Optional[List[str]] = None,
-                        include_internal: bool = False) -> ToolResult:
-        """Get descriptions of columns for specified database tables.
-
-        Returns column names, types, and descriptions.
-        By default only shows agent-visible columns.
-        Pass include_internal=True to also show internal/hidden columns.
-
-        Args:
-            table_names: List of table names, or None/"all" for all visible tables.
-                         Can also be a single table name as a string.
-            include_internal: If True, also show internal_columns (developer-only).
-        """
-        # Handle input
-        if table_names is None or table_names == "all" or (isinstance(table_names, list) and "all" in table_names):
-            requested = list(TABLE_DOCS.keys())
-        elif isinstance(table_names, str):
-            requested = [table_names]
-        else:
-            requested = list(table_names)
-
-        output = ""
-        not_found = []
-        for name in requested:
-            if name in TABLE_DOCS:
-                desc = TABLE_DOCS[name]
-                output += f"=== {name} ===\n"
-                output += f"{desc['description']}\n\n"
-                for col, col_desc in desc['columns'].items():
-                    output += f"  {col}: {col_desc}\n"
-                if include_internal and desc.get('internal_columns'):
-                    output += "\n  --- Internal (hidden from agent) ---\n"
-                    for col, col_desc in desc['internal_columns'].items():
-                        output += f"  {col}: {col_desc}\n"
-                output += "\n"
-            else:
-                not_found.append(name)
-
-        if not output:
-            return ToolResult(False,
-                f"No matching tables found. Available: {list(TABLE_DOCS.keys())}")
-
-        if not_found:
-            output += f"Not found: {not_found}\n"
-            output += f"Available tables: {list(TABLE_DOCS.keys())}\n"
-
-        def _filter_table(doc):
-            if include_internal or 'internal_columns' not in doc:
-                return doc
-            return {k: v for k, v in doc.items() if k != 'internal_columns'}
-
-        return ToolResult(True, output, {
-            'tables': {n: _filter_table(TABLE_DOCS[n]) for n in requested if n in TABLE_DOCS}
-        })
-
-    def get_tool_documentation(self, tool_names: Optional[List[str]] = None,
-                               include_internal: bool = False) -> ToolResult:
-        """Get detailed documentation for environment tools.
-
-        Args:
-            tool_names: List of tool names to get docs for, or None/"all" for all tools.
-                        Can also be a single tool name as a string.
-            include_internal: If True, include internal_notes (developer-only).
-
-        Returns:
-            JSON documentation including parameters, examples, and expected outputs.
-        """
-        def _filter_doc(doc):
-            """Remove internal_notes and strategy_tips unless include_internal. sample_io is always visible."""
-            hidden_keys = {'internal_notes', 'strategy_tips'}
-            if include_internal:
-                return doc
-            return {k: v for k, v in doc.items() if k not in hidden_keys}
-
-        # Handle different input types
-        if tool_names is None or tool_names == "all" or (isinstance(tool_names, list) and "all" in tool_names):
-            # Return all tools
-            filtered = {name: _filter_doc(doc) for name, doc in TOOL_DOCS.items()}
-            return ToolResult(
-                True,
-                f"Documentation for all {len(TOOL_DOCS)} tools:\n\n" + json.dumps(filtered, indent=2),
-                filtered
-            )
-
-        # Convert single string to list
-        if isinstance(tool_names, str):
-            tool_names = [tool_names]
-
-        # Filter to requested tools
-        result_docs = {}
-        not_found = []
-
-        for name in tool_names:
-            if name in TOOL_DOCS:
-                result_docs[name] = _filter_doc(TOOL_DOCS[name])
-            else:
-                not_found.append(name)
-
-        if not result_docs:
-            available = list(TOOL_DOCS.keys())
-            return ToolResult(
-                False,
-                f"No matching tools found. Requested: {tool_names}\nAvailable tools: {available}"
-            )
-
-        message = f"Documentation for {len(result_docs)} tool(s):\n\n"
-        message += json.dumps(result_docs, indent=2)
-
-        if not_found:
-            message += f"\n\nNot found: {not_found}"
-
-        return ToolResult(True, message, result_docs)
 
 
 def _format_sample_io(sample_io: Dict[str, Any]) -> str:
@@ -5383,8 +4615,8 @@ def get_mcp_tool_definitions() -> List[Dict[str, Any]]:
     return mcp_tools
 
 
-def get_tool_summary_table() -> str:
-    """Generate a Markdown table summarizing all tools from TOOL_DOCS.
+def get_tool_summary_table(tool_names: Iterable[str] | None = None) -> str:
+    """Generate a Markdown table for all or a selected set of current tools.
 
     Returns a string like:
         | Tool | Description |
@@ -5394,8 +4626,11 @@ def get_tool_summary_table() -> str:
 
     Used to dynamically fill the {tool_list} placeholder in simulator_instructions.md.
     """
+    selected = set(tool_names) if tool_names is not None else None
     lines = ["| Tool | Description |", "|------|-------------|"]
     for tool_name, doc in TOOL_DOCS.items():
+        if selected is not None and tool_name not in selected:
+            continue
         desc = doc.get("description", "")
         lines.append(f"| `{tool_name}` | {desc} |")
     return "\n".join(lines)

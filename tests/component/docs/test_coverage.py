@@ -2,6 +2,7 @@
 
 Run: uv run python -m pytest tests/test_docs_coverage.py -v
 """
+import importlib
 import json
 import tempfile
 from inspect import Parameter, signature
@@ -24,12 +25,27 @@ from saas_bench.simulator.config import (
 )
 from saas_bench.simulator.tools import TOOL_DOCS, get_tool_descriptions
 from saas_bench.simulator.database import TABLE_DOCS, init_database
+from saas_bench.runtime._public_cli import _build_parser, get_cli_docs
+from saas_bench.runtime.api_server import _TOOL_DISPATCH
 from saas_bench.runtime.docs_generator import (
     _EXCLUDED_TOOLS,
     _TOOL_TO_MODULE,
     generate_public_docs,
 )
-from saas_bench.runtime._public_cli import _build_parser, get_cli_docs
+
+
+_REMOVED_LEGACY_TOOLS = {
+    "register_daily_calculation",
+    "remove_daily_calculation",
+    "list_daily_calculations",
+    "list_all_tables",
+    "describe_tables",
+    "get_tool_documentation",
+    "register_script",
+    "run_script",
+    "list_scripts",
+    "delete_script",
+}
 
 
 def test_cli_docs_follow_public_parser():
@@ -302,6 +318,31 @@ def test_no_stale_excluded_tools():
         assert tool_name in TOOL_DOCS, (
             f"Tool '{tool_name}' in _EXCLUDED_TOOLS but not in TOOL_DOCS. Remove it or add the tool."
         )
+
+
+def test_public_python_tools_match_dispatch_and_sdk():
+    """公开工具必须同时具备文档映射、服务端分发和 SDK 调用入口。"""
+    documented_tools = set(_TOOL_TO_MODULE)
+    assert documented_tools == set(_TOOL_DISPATCH)
+
+    for tool_name, module_name in _TOOL_TO_MODULE.items():
+        module = importlib.import_module(f"saas_bench.novamind_api.{module_name}")
+        assert callable(getattr(module, tool_name, None)), (
+            f"Documented tool '{tool_name}' has no callable SDK entry in "
+            f"novamind_api.{module_name}"
+        )
+
+
+def test_public_tools_reference_excludes_non_sdk_and_removed_tools(tmp_path):
+    """Python 工具总表不得再次列出 CLI 命令或已删除的旧接口。"""
+    output_dir = tmp_path / "docs"
+    generate_public_docs(output_dir)
+    reference = (output_dir / "tools-reference.md").read_text()
+
+    for tool_name in _TOOL_TO_MODULE:
+        assert f"`{tool_name}`" in reference
+    for tool_name in _EXCLUDED_TOOLS | _REMOVED_LEGACY_TOOLS:
+        assert f"`{tool_name}`" not in reference
 
 
 def test_table_docs_match_real_tables():

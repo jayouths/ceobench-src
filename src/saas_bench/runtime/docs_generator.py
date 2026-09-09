@@ -16,16 +16,6 @@ from ..simulator.config import (
 # Tools excluded from the novamind_api (not exposed to bash_agent)
 _EXCLUDED_TOOLS = {
     'python_exec',
-    'register_daily_calculation',
-    'remove_daily_calculation',
-    'list_daily_calculations',
-    'register_script',
-    'run_script',
-    'list_scripts',
-    'delete_script',
-    'list_all_tables',
-    'describe_tables',
-    'get_tool_documentation',
     'next_week',  # CLI command (novamind-operation next-week), not a Python API tool
 }
 
@@ -136,7 +126,7 @@ def render_tools_reference(output_path: Path):
         "",
         "## Tool Summary",
         "",
-        get_tool_summary_table(),
+        get_tool_summary_table(_TOOL_TO_MODULE),
         "",
         "---",
         "",

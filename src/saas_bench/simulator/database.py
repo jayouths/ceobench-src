@@ -14,10 +14,10 @@ if TYPE_CHECKING:
 
 # =====================================================================
 # TABLE_DOCS: Canonical documentation for all database tables.
-# Used by describe_tables() to render table/column descriptions.
+# Used to render the Agent-visible static table documentation.
 # Each table has:
 #   'description' — table purpose
-#   'columns'     — agent-visible columns (rendered by describe_tables)
+#   'columns'     — agent-visible columns (rendered into docs/tables/)
 #   'internal_columns' (optional) — hidden from agent, visible to developer
 # =====================================================================
 # =====================================================================

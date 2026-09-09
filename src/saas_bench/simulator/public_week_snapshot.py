@@ -107,7 +107,6 @@ class PublicWeekSnapshot:
     configuration: OperatingConfiguration
     delivered_quality: DeliveredQuality
     social_posts: list[SocialPostSummary] = field(default_factory=list)
-    weekly_calculations: dict[str, str] = field(default_factory=dict)
     inbox_items: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -317,7 +316,6 @@ def build_public_week_snapshot(
     conn: sqlite3.Connection,
     day: int,
     day_result: DayResult | None = None,
-    calc_outputs: Mapping[str, str] | None = None,
     inbox_items: Sequence[str] | None = None,
 ) -> PublicWeekSnapshot:
     """只组装公开经营事实，不负责文本展示或 Analysis 推理。"""
@@ -348,9 +346,6 @@ def build_public_week_snapshot(
         configuration=config,
         delivered_quality=_build_delivered_quality(conn, config),
         social_posts=_build_social_posts(conn, day),
-        weekly_calculations={
-            name: output[:500] for name, output in (calc_outputs or {}).items()
-        },
         inbox_items=list(inbox_items or []),
     )
 
@@ -421,11 +416,6 @@ def render_weekly_dashboard(snapshot: PublicWeekSnapshot) -> str:
                 f"{post.comment_count} comments{comment_ids} — "
                 f'"{post.content_preview}{suffix}"'
             )
-
-    if snapshot.weekly_calculations:
-        lines.extend(["", "--- Weekly Calculations ---"])
-        for name, output in snapshot.weekly_calculations.items():
-            lines.extend([f"[{name}]", output])
 
     lines.extend(["", "--- Inbox ---"])
     if snapshot.inbox_items:

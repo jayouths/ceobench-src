@@ -16,8 +16,8 @@ del _os
 
 __version__ = "0.1.0"
 
-# Core environment
-from .simulator.environment import SaaSBenchEnv, Action, StepResult
+# Agent action contract
+from .simulator.environment import Action
 from .simulator.public_week_snapshot import (
     build_public_week_snapshot,
     render_weekly_dashboard,
@@ -30,9 +30,7 @@ from .agents import BaseAgent
 from .simulator.config import BenchmarkConfig
 
 __all__ = [
-    'SaaSBenchEnv',
     'Action',
-    'StepResult',
     'BaseAgent',
     'BenchmarkConfig',
     'build_public_week_snapshot',

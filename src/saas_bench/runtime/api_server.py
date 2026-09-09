@@ -331,7 +331,7 @@ def _get_helpful_query_error(error: Exception, sql: str) -> str:
                     f"Valid columns for tables in your query:\n"
                     + "\n".join(hints)
                 )
-            return f"no such column: {bad_col}. Use describe_tables() or read docs/tables/ to check column names."
+            return f"no such column: {bad_col}. Read docs/tables/ to check column names."
 
     if 'no such table' in err_str:
         match = re.search(r'no such table: (\w+)', str(error))
@@ -1221,7 +1221,12 @@ class NovaMindAPIServer:
 
         # Dashboard 与 Analysis 复用同一份公开快照，避免同一指标出现两套口径。
         public_week_snapshot = (
-            build_public_week_snapshot(self.conn, new_day, week_result, None, inbox)
+            build_public_week_snapshot(
+                self.conn,
+                new_day,
+                week_result,
+                inbox_items=inbox,
+            )
             if self.conn else None
         )
         if public_week_snapshot is not None:

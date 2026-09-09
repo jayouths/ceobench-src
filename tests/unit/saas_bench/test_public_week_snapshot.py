@@ -88,7 +88,6 @@ def test_weekly_activity_has_one_structured_source(make_initialized_sim):
         conn,
         day=7,
         day_result=result,
-        calc_outputs={"forecast": "x" * 600},
         inbox_items=["3 new enterprise leads"],
     )
     dashboard = render_weekly_dashboard(snapshot)
@@ -97,7 +96,6 @@ def test_weekly_activity_has_one_structured_source(make_initialized_sim):
     assert snapshot.weekly_activity.cancellations.enterprise_accounts == 1
     assert snapshot.weekly_activity.cancellations.enterprise_seats == 12
     assert snapshot.weekly_activity.new_enterprise_subscribed_seats == 20
-    assert snapshot.weekly_calculations == {"forecast": "x" * 500}
     assert snapshot.inbox_items == ["3 new enterprise leads"]
     assert "Usage: 1,080 units" in dashboard
     assert "New Individual Leads: 296 | New Enterprise Leads: 3" in dashboard
@@ -106,7 +104,6 @@ def test_weekly_activity_has_one_structured_source(make_initialized_sim):
     assert "Plan Changes: Individual Up=1, Down=3 | Enterprise Up=2, Down=4" in dashboard
     assert "Overload (peak): 12.5%" in dashboard
     assert "Outage: YES (15 min total)" in dashboard
-    assert "[forecast]\n" + "x" * 500 in dashboard
     assert "  • 3 new enterprise leads" in dashboard
 
 
