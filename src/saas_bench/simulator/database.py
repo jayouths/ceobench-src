@@ -93,7 +93,6 @@ TABLE_DOCS = {
         'internal_columns': {
             'daily_usage_rate': 'REAL — Sampled usage rate for billing period (internal)',
             'billing_period_usage': 'REAL — Cumulative usage this billing period (internal)',
-            'effective_c_max': 'REAL — Customer\'s drifted c_max snapshot at billing time (hidden from agent)',
             'churn_reason': 'TEXT — Structured churn reason enum (hidden from agent)',
             'first_billing_done': 'INTEGER — Whether first billing period completed (internal)',
         }
@@ -410,7 +409,6 @@ def init_database(db_path: Path) -> sqlite3.Connection:
             listed_price REAL NOT NULL,  -- List price (or negotiated price for enterprise), before promotions
             promotion REAL NOT NULL DEFAULT 0.0,  -- Total promotion $ currently applied (updated at billing)
             effective_price REAL NOT NULL,  -- listed_price - promotion, floored at 0 (the price customer actually pays)
-            effective_c_max REAL,  -- Customer's drifted c_max at billing time (snapshot for satisfaction calc)
             start_day INTEGER NOT NULL,
             end_day INTEGER,  -- NULL if active
             status TEXT NOT NULL CHECK(status IN ('lead', 'subscribed', 'cancelled', 'lost')),
@@ -1070,7 +1068,6 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         ('promotion', 'REAL NOT NULL DEFAULT 0.0'),
         ('effective_price', 'REAL NOT NULL DEFAULT 0.0'),
         ('first_billing_done', 'INTEGER NOT NULL DEFAULT 0'),
-        ('effective_c_max', 'REAL'),
     ]:
         try:
             conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} {col_type}")

@@ -291,7 +291,7 @@ class Simulator:
     def _cache_step_day_globals(self, config: dict):
         """Cache global values that don't change within a single step_day. (L3)"""
         # Cache drift accumulators for consistent reads within step_day.
-        # Used by _generate_customer_from_group() and customer param reads.
+        # 客户表只保存个体基准值，市场漂移在各决策路径读取时统一应用。
         global_q_bias = get_global_drift(self.conn)
         all_gp = get_all_group_parameters(self.conn)
         self._drift_cache = {
@@ -1057,27 +1057,16 @@ class Simulator:
         )
 
         # c_max: hard budget constraint (maximum price customer will pay)
-        # Sample from static group distribution, then apply accumulated group drift
+        # Sample from the static group distribution. Market drift is applied at read time.
         c_max = max(15.0,
             grng.normal(group.c_max_mean, group.c_max_std * 1.2)
         )
 
-        # q_min: quality floor — sample from static, then apply global + group drift
+        # q_min: quality floor sampled from the static group distribution
         q_min = max(1e-4, grng.normal(group.q_min_mean, group.q_min_std))
 
         # q_range: independently sampled (unaffected by drift — drift shifts q_min and q_max equally)
         q_range = max(1e-4, grng.normal(group.q_range_mean, group.q_range_std))
-
-        # Apply accumulated drift offsets to new customer parameters.
-        # _drift_cache is set at start of each step_day via _cache_drift_state().
-        # This ensures new customers reflect current market conditions (global + group drift).
-        drift = getattr(self, '_drift_cache', None)
-        if drift:
-            group_drift = drift['groups'].get(group_id, {})
-            q_bias_offset = drift['global_q_bias'] + group_drift.get('drift_q_bias_total', 0.0)
-            c_max_offset = group_drift.get('drift_c_max_total', 0.0)
-            q_min += q_bias_offset
-            c_max = max(15.0, c_max + c_max_offset)
 
         q_max = q_min + q_range
 
@@ -1598,15 +1587,13 @@ class Simulator:
         if self._customer_has_churned(customer_id):
             return  # Silently skip - churned customers cannot subscribe again
 
-        # Get customer's usage_scale, seat_count, group_id, and c_max for usage rate sampling
+        # Get the fields needed to initialize subscription usage and pricing.
         customer = self.conn.execute("""
-            SELECT usage_scale, seat_count, group_id, c_max FROM customers WHERE customer_id = ?
+            SELECT usage_scale, seat_count, group_id FROM customers WHERE customer_id = ?
         """, (customer_id,)).fetchone()
         usage_scale = customer['usage_scale'] if customer else 50.0
         seat_count = int(customer['seat_count'] or 1)
         group_id = customer['group_id'] if customer else 'S1'
-        initial_c_max = customer['c_max'] if customer else 100.0
-
         # Sample daily usage rate for this billing period
         daily_usage_rate = sample_daily_usage_rate(self.rng, usage_scale, seat_count)
 
@@ -1621,13 +1608,13 @@ class Simulator:
         self.conn.execute("""
             INSERT INTO subscriptions (
                 customer_id, plan, listed_price, promotion, effective_price,
-                effective_c_max, seat_count,
+                seat_count,
                 start_day, status, billing_day_mod30,
                 daily_usage_rate, billing_period_usage, first_billing_done
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'subscribed', ?, ?, 0, 0)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'subscribed', ?, ?, 0, 0)
         """, (
             customer_id, plan, price, first_period_promo, eff_price,
-            initial_c_max, seat_count,
+            seat_count,
             self.current_day,
             self.current_day % 30, daily_usage_rate,
         ))
@@ -1959,17 +1946,16 @@ class Simulator:
                     downgrades += 1
                     direction = 'downgrade'
 
-                # Update subscription — recompute promotion + effective_price for new plan
-                # Also snapshot effective_c_max at billing time (drifted c_max for satisfaction)
+                # Update subscription — recompute promotion + effective_price for new plan.
+                # 客户支付能力不做账单快照，后续决策继续读取当前市场漂移。
                 group_id = sub['group_id']
                 new_promo = self._get_effective_promotion(customer_id, group_id, best_plan)
                 new_eff_price = max(0.0, new_price - new_promo)
                 self.conn.execute("""
                     UPDATE subscriptions SET plan = ?, listed_price = ?,
-                           promotion = ?, effective_price = ?,
-                           effective_c_max = ?
+                           promotion = ?, effective_price = ?
                     WHERE subscription_id = ?
-                """, (best_plan, new_price, new_promo, new_eff_price, c_max, sub['subscription_id']))
+                """, (best_plan, new_price, new_promo, new_eff_price, sub['subscription_id']))
 
                 # Log plan change
                 if self.event_logger:
@@ -2213,6 +2199,11 @@ class Simulator:
                 q_max = params.get('q_max', 0.75)
                 q_min = params.get('q_min', 0.25)
 
+                # 计划选择和最终转化必须使用同一份当期市场偏好。
+                q_min, q_max, c_max = self._apply_drift_offsets(
+                    group_id, q_min, q_max, c_max
+                )
+
                 lead_promo = self._get_lead_promotion(group_id, channel=lead_channel)
                 effective_price = max(0.0, price - lead_promo)
                 # Persist the exact first-period lead pricing used for this
@@ -2434,7 +2425,6 @@ class Simulator:
                     gid = params.get('group_id', 'S1')
                     usage_scale = params.get('usage_scale', 50.0)
                     seat_count = int(params.get('seat_count', 1) or 1)
-                    initial_c_max = params.get('c_max', 100.0)
                     daily_usage_rate = sample_daily_usage_rate(self.rng, usage_scale, seat_count)
                     lead_promo = params.get('_lead_promo_used')
                     if lead_promo is None:
@@ -2447,7 +2437,7 @@ class Simulator:
 
                     sub_rows.append((
                         cid, best_plan, price, first_period_promo, eff_price,
-                        initial_c_max, seat_count,
+                        seat_count,
                         _day, _day % 30, daily_usage_rate
                     ))
                     new_individual_leads += 1
@@ -2459,10 +2449,10 @@ class Simulator:
                 self.conn.executemany("""
                     INSERT INTO subscriptions (
                         customer_id, plan, listed_price, promotion, effective_price,
-                        effective_c_max, seat_count,
+                        seat_count,
                         start_day, status, billing_day_mod30,
                         daily_usage_rate, billing_period_usage, first_billing_done
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'subscribed', ?, ?, 0, 0)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'subscribed', ?, ?, 0, 0)
                 """, sub_rows)
 
             # --- Batch INSERT lost lead records ---
@@ -2530,6 +2520,11 @@ class Simulator:
         q_max = params.get('q_max', 0.75)
         q_min = params.get('q_min', 0.25)
         group_id = params.get('group_id', 'S1')
+
+        # 新客户行为也必须反映当前市场，但漂移只用于本次决策，不写回客户基准值。
+        q_min, q_max, c_max = self._apply_drift_offsets(
+            group_id, q_min, q_max, c_max
+        )
 
         best_plan = 'A'
         best_satisfaction = float('-inf')
@@ -2800,7 +2795,7 @@ class Simulator:
         # L5: Single unified fetch for ALL active subscribers with all needed columns.
         # This result is also returned for reuse by _process_issues (L5 shared fetch).
         subscribers = self.conn.execute("""
-            SELECT s.customer_id, s.plan, s.listed_price, s.effective_price, s.effective_c_max,
+            SELECT s.customer_id, s.plan, s.listed_price, s.effective_price,
                    s.start_day, s.daily_usage_rate,
                    cs.satisfaction, cs.open_issue_days,
                    cs.current_steepness_left, cs.current_steepness_right, cs.current_c_max,
@@ -2974,12 +2969,8 @@ class Simulator:
             csr = sub['current_steepness_right']
             steep_r_np[i] = csr if csr else sub['steepness_right']
 
-            ec = sub['effective_c_max']
-            if ec:
-                c_max_np[i] = ec
-            else:
-                cc = sub['current_c_max']
-                c_max_np[i] = cc if cc else sub['c_max']
+            cc = sub['current_c_max']
+            c_max_np[i] = cc if cc else sub['c_max']
 
             qmx = sub['q_max']
             q_max_np[i] = qmx if qmx is not None else 0.75
@@ -6368,15 +6359,13 @@ Guidelines:
         # Compute contract_end_day
         contract_end_day = self.current_day + contract_months * 30
 
-        # Get group_id and drifted c_max for promotion computation and effective_c_max snapshot
+        # Get group_id for promotion computation. Customer preferences remain in customer state.
         cust_row = self.conn.execute("""
-            SELECT c.group_id, c.c_max, cs.current_c_max
+            SELECT c.group_id
             FROM customers c
-            JOIN customer_state cs ON c.customer_id = cs.customer_id
             WHERE c.customer_id = ?
         """, (customer_id,)).fetchone()
         deal_group_id = cust_row['group_id'] if cust_row else 'E1'
-        deal_c_max = (cust_row['current_c_max'] or cust_row['c_max']) if cust_row else 100.0
         deal_plan = agreed_plan or 'C'  # Enterprise typically on plan C
         deal_promo = self._get_effective_promotion(customer_id, deal_group_id, deal_plan)
         if state.thread_type == 'new_lead':
@@ -6398,7 +6387,6 @@ Guidelines:
                 'listed_price': agreed_price,
                 'promotion': deal_promo,
                 'effective_price': deal_eff_price,
-                'effective_c_max': deal_c_max,
                 'seat_count': seat_count,
                 'start_day': self.current_day,
                 # 企业线索尚未使用服务，首个账单周期必须从实际成交日开始。
@@ -6433,7 +6421,6 @@ Guidelines:
                 'listed_price': agreed_price,
                 'promotion': deal_promo,
                 'effective_price': deal_eff_price,
-                'effective_c_max': deal_c_max,
                 'seat_count': seat_count,
                 'contract_months': contract_months,
                 'contract_end_day': new_contract_end,
@@ -6974,21 +6961,18 @@ Guidelines:
                    s.promotion, s.effective_price,
                    s.plan, s.pending_plan, s.pending_price, s.start_day,
                    c.customer_type, c.usage_scale, s.seat_count, c.group_id,
-                   c.c_max,
-                   cs.current_c_max,
                    s.first_billing_done
             FROM subscriptions s
             JOIN customers c ON s.customer_id = c.customer_id
-            JOIN customer_state cs ON c.customer_id = cs.customer_id
             WHERE s.status = 'subscribed' AND s.end_day IS NULL
               AND s.billing_day_mod30 = ?
         """, (billing_day,)).fetchall()
 
         # L4: Collect batch operations
-        pending_updates = []    # (plan, listed_price, promo, eff_price, eff_c_max, subscription_id) for pending plan changes
+        pending_updates = []    # (plan, listed_price, promo, eff_price, subscription_id) for pending plan changes
         ledger_inserts = []     # (day, category, amount, note)
         reset_updates = []      # (new_daily_usage_rate, subscription_id)
-        promo_updates = []      # (promotion, effective_price, effective_c_max, first_billing_done, subscription_id)
+        promo_updates = []      # (promotion, effective_price, first_billing_done, seat_count, subscription_id)
         price_updates = []      # (listed_price, subscription_id) for individual price changes
 
         # Payment suspension: enterprise customers with active churn_prevention
@@ -7031,14 +7015,6 @@ Guidelines:
                 if billing_price < sub['listed_price']:
                     price_updates.append((billing_price, sub['subscription_id']))
 
-            # Snapshot drifted c_max at billing time for satisfaction calculations
-            billing_c_max = sub['current_c_max'] or sub['c_max']
-            # Apply group + global drift offset to c_max
-            drift = getattr(self, '_drift_cache', None)
-            if drift:
-                gd = drift['groups'].get(group_id, {})
-                billing_c_max = max(15.0, billing_c_max + gd.get('drift_c_max_total', 0.0))
-
             # Compute promotion for this billing period
             existing_promo = self._get_effective_promotion(customer_id, group_id, current_plan)
             # Lead promotion only applies if first billing hasn't been done yet
@@ -7071,24 +7047,24 @@ Guidelines:
             new_daily_usage_rate = sample_daily_usage_rate(self.rng, usage_scale, seat_count)
             reset_updates.append((new_daily_usage_rate, sub['subscription_id']))
 
-            # Store promotion + effective_price + effective_c_max on subscription for satisfaction to read directly
+            # Store billing-period promotion and effective price on the subscription.
+            # 市场偏好不做快照，每次客户决策时只读取一次当前漂移。
             # After first billing, only existing user promotion applies (no more lead promo)
             next_promo = self._get_effective_promotion(customer_id, group_id, current_plan)
             next_eff_price = max(0.0, billing_price - next_promo)
-            promo_updates.append((next_promo, next_eff_price, billing_c_max, 1, seat_count, sub['subscription_id']))
+            promo_updates.append((next_promo, next_eff_price, 1, seat_count, sub['subscription_id']))
 
             # Handle pending plan change — also needs promo+effective_price recomputed
             if sub['pending_plan']:
                 pending_promo = self._get_effective_promotion(customer_id, group_id, sub['pending_plan'])
                 pending_eff = max(0.0, sub['pending_price'] - pending_promo)
-                pending_updates.append((sub['pending_plan'], sub['pending_price'], pending_promo, pending_eff, billing_c_max, sub['subscription_id']))
+                pending_updates.append((sub['pending_plan'], sub['pending_price'], pending_promo, pending_eff, sub['subscription_id']))
 
         # L4: Execute batch writes
         if pending_updates:
             self.conn.executemany("""
                 UPDATE subscriptions
                 SET plan = ?, listed_price = ?, promotion = ?, effective_price = ?,
-                    effective_c_max = ?,
                     pending_plan = NULL, pending_price = NULL
                 WHERE subscription_id = ?
             """, pending_updates)
@@ -7116,7 +7092,7 @@ Guidelines:
         if promo_updates:
             self.conn.executemany("""
                 UPDATE subscriptions
-                SET promotion = ?, effective_price = ?, effective_c_max = ?, first_billing_done = ?,
+                SET promotion = ?, effective_price = ?, first_billing_done = ?,
                     seat_count = ?
                 WHERE subscription_id = ?
             """, promo_updates)

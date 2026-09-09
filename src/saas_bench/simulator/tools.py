@@ -3352,7 +3352,6 @@ _HIDDEN_COLUMNS = {{
     # V4: Internal ads sensitivity parameters (customers table)
     'ads_quality_sensitivity', 'ads_return_sensitivity',
     # V4: Subscription internals
-    'effective_c_max',        # Willingness-to-pay at subscription time
     'churn_reason',           # Internal churn categorization
     # V4: Social media internals (agent sees content but not engagement mechanics)
     'likes', 'shares', 'virality_score',

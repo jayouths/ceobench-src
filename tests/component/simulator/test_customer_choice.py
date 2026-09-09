@@ -1,10 +1,168 @@
 """Regression tests for CEOBench customer choice and acceptance rules."""
 
+import copy
 import math
 
 import pytest
 
 from saas_bench.simulator.config import BenchmarkConfig, compute_quota_quality_factor
+
+
+def _set_market_preference_drift(conn, *, quality_offset, budget_offset):
+    conn.execute(
+        "UPDATE global_drift_state SET global_q_bias_total = ? WHERE id = 1",
+        (quality_offset,),
+    )
+    conn.execute(
+        """
+        UPDATE group_parameters
+        SET drift_c_max_total = ?
+        WHERE group_id = 'S1'
+        """,
+        (budget_offset,),
+    )
+    conn.commit()
+
+
+def test_new_customer_stores_static_preferences_and_reads_market_drift_once(
+    make_initialized_sim,
+):
+    conn, sim, _config = make_initialized_sim(seed=123)
+    plan_config = sim.get_current_config()
+    sim._cache_step_day_globals(plan_config)
+
+    group_rng = sim._group_rngs["S1"]
+    rng_state = copy.deepcopy(group_rng.bit_generator.state)
+    baseline = sim._generate_customer_from_group("S1")
+
+    group_rng.bit_generator.state = rng_state
+    _set_market_preference_drift(
+        conn,
+        quality_offset=0.1,
+        budget_offset=10.0,
+    )
+    sim._cache_step_day_globals(plan_config)
+    after_drift = sim._generate_customer_from_group("S1")
+
+    # 市场漂移不写入新客户的个体基准，只在决策时应用。
+    for key in ("c_max", "q_min", "q_max", "willingness_to_pay"):
+        assert after_drift[key] == pytest.approx(baseline[key])
+
+    effective_q_min, effective_q_max, effective_c_max = sim._apply_drift_offsets(
+        "S1",
+        after_drift["q_min"],
+        after_drift["q_max"],
+        after_drift["c_max"],
+    )
+    assert effective_q_min == pytest.approx(after_drift["q_min"] + 0.1)
+    assert effective_q_max == pytest.approx(after_drift["q_max"] + 0.1)
+    assert effective_c_max == pytest.approx(after_drift["c_max"] + 10.0)
+
+
+def test_billing_does_not_snapshot_market_preference_drift(make_initialized_sim):
+    conn, sim, config = make_initialized_sim(seed=123)
+    params = {
+        **sim._generate_customer_from_group("S1"),
+        "c_max": 100.0,
+        "q_min": 0.2,
+        "q_max": 0.8,
+    }
+    customer_id = sim._create_customer(params)
+    sim._create_subscription(customer_id, "A", 10.0)
+
+    _set_market_preference_drift(
+        conn,
+        quality_offset=0.1,
+        budget_offset=10.0,
+    )
+    plan_config = sim.get_current_config()
+    plan_config["quota_A"] = 1_000
+    sim._cache_step_day_globals(plan_config)
+    sim._process_billing(plan_config)
+    conn.execute(
+        "UPDATE subscriptions SET daily_usage_rate = 1.0 WHERE customer_id = ?",
+        (customer_id,),
+    )
+
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(subscriptions)").fetchall()
+    }
+    assert "effective_c_max" not in columns
+    effective_price = conn.execute(
+        "SELECT effective_price FROM subscriptions WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()["effective_price"]
+
+    events = sim._update_customer_satisfaction(
+        plan_config,
+        overload=0.0,
+        outage=False,
+    )
+    q_shared = sim._cached_q_shared_per_plan["A"]
+    q_required = sim._compute_required_quality(
+        cost=effective_price,
+        steepness_left=params["steepness_left"],
+        steepness_right=params["steepness_right"],
+        c_max=110.0,
+        q_max=0.9,
+        q_min=0.3,
+    )
+    expected_satisfaction = (
+        (1.0 - config.satisfaction_ema_alpha) * 0.5
+        + config.satisfaction_ema_alpha * (q_shared - q_required)
+    )
+    assert events[customer_id]["new_satisfaction"] == pytest.approx(
+        expected_satisfaction
+    )
+
+
+def test_new_customer_plan_choice_applies_current_market_drift(
+    make_initialized_sim,
+    monkeypatch,
+):
+    conn, sim, _config = make_initialized_sim(seed=123)
+    _set_market_preference_drift(
+        conn,
+        quality_offset=0.1,
+        budget_offset=10.0,
+    )
+    plan_config = sim.get_current_config()
+    sim._cache_step_day_globals(plan_config)
+
+    received_preferences = []
+
+    def record_satisfaction(
+        steepness_left,
+        steepness_right,
+        c_max,
+        quality,
+        cost,
+        q_max,
+        q_min,
+    ):
+        received_preferences.append((q_min, q_max, c_max))
+        return 1.0
+
+    monkeypatch.setattr(sim, "_compute_satisfaction", record_satisfaction)
+    sim._choose_plan_for_customer_curve(
+        {
+            "group_id": "S1",
+            "steepness_left": 1.0,
+            "steepness_right": 2.0,
+            "c_max": 100.0,
+            "q_min": 0.2,
+            "q_max": 0.8,
+            "usage_demand": 1.0,
+        },
+        plan_config,
+    )
+
+    assert received_preferences
+    for q_min, q_max, c_max in received_preferences:
+        assert q_min == pytest.approx(0.3)
+        assert q_max == pytest.approx(0.9)
+        assert c_max == pytest.approx(110.0)
 
 
 def test_quality_price_curve_and_acceptance_rule(make_initialized_sim):
@@ -492,9 +650,9 @@ def test_first_billing_uses_stored_channel_lead_promotion(make_initialized_sim):
         """
         INSERT INTO subscriptions (
             customer_id, plan, listed_price, promotion, effective_price,
-            effective_c_max, seat_count, start_day, status, billing_day_mod30,
+            seat_count, start_day, status, billing_day_mod30,
             daily_usage_rate, billing_period_usage, first_billing_done
-        ) VALUES (?, 'A', 100.0, 90.0, 10.0, 100.0, 1, ?, 'subscribed', ?, 10.0, 0, 0)
+        ) VALUES (?, 'A', 100.0, 90.0, 10.0, 1, ?, 'subscribed', ?, 10.0, 0, 0)
         """,
         (customer_id, sim.current_day, sim.current_day % 30),
     )
