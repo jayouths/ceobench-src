@@ -44,9 +44,8 @@ def get_thread_inbox_items(conn: sqlite3.Connection, day: int, week_start_day: i
     # Count new enterprise threads created this week
     new_threads = conn.execute("""
         SELECT COUNT(*) as cnt,
-               COALESCE(SUM(s.seat_count), 0) as total_seats
+               COALESCE(SUM(et.seat_count), 0) as total_seats
         FROM enterprise_turns et
-        JOIN customers c ON et.customer_id = c.customer_id
         WHERE et.turn_number = 0 AND et.day >= ? AND et.day <= ?
     """, (week_start_day, day)).fetchone()
 

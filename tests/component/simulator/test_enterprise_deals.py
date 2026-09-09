@@ -16,6 +16,7 @@ from saas_bench.simulator.enterprise import (
     get_quality_for_plan,
     get_qualities_for_all_plans_batch,
 )
+from saas_bench.simulator.environment import get_thread_inbox_items
 
 
 def _insert_enterprise_customer(conn) -> int:
@@ -99,6 +100,22 @@ def _create_rejectable_enterprise_thread(
     )
     conn.commit()
     return customer_id, thread_id
+
+
+def test_enterprise_inbox_uses_new_lead_seat_snapshot(make_initialized_sim):
+    """新线索应只计一次，并保留创建谈判时的席位规模。"""
+
+    conn, _, _ = make_initialized_sim(seed=42)
+    customer_id = _insert_enterprise_customer(conn)
+    create_negotiation_thread(conn, customer_id, "new_lead", current_day=3)
+    conn.execute(
+        "UPDATE customers SET seat_count = 75 WHERE customer_id = ?",
+        (customer_id,),
+    )
+
+    assert get_thread_inbox_items(conn, day=7, week_start_day=1) == [
+        "📨 1 new enterprise leads this week (20 total seats)"
+    ]
 
 
 def test_new_enterprise_lead_uses_expected_demand_for_plan_qualities(

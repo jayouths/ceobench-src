@@ -259,13 +259,8 @@ def test_dashboard_api_rejects_missing_or_stale_snapshot_after_day_zero(
 
 def test_week_advance_commits_public_snapshot_before_checkpoint_callback(
     make_initialized_sim,
-    monkeypatch,
 ):
     conn, _, _ = make_initialized_sim()
-    monkeypatch.setattr(
-        "saas_bench.simulator.environment.get_thread_inbox_items",
-        lambda *args, **kwargs: [],
-    )
     tools = SimpleNamespace(current_day=0)
     tools.set_current_day = lambda day: setattr(tools, "current_day", day)
     callback_observations = []
