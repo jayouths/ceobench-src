@@ -207,8 +207,8 @@ class SaaSBenchEnv:
             self.simulator.current_day,
             self.workspace_path,
             self.db_path.resolve(),
-            self.rng,
             config=self.config,
+            seed=actual_seed,
         )
 
         # Reset state

@@ -1,5 +1,6 @@
 """企业报价工具契约回归测试。"""
 
+import copy
 import json
 import math
 
@@ -8,6 +9,7 @@ import pytest
 import saas_bench.simulator.enterprise as enterprise_module
 from saas_bench.simulator.config import BenchmarkConfig
 from saas_bench.simulator.enterprise import (
+    batch_schedule_customer_replies,
     create_negotiation_thread,
     get_qualities_for_all_plans_batch,
 )
@@ -239,6 +241,74 @@ def test_enterprise_deal_normalizes_the_fixed_monthly_contract(
     ]
 
 
+def test_enterprise_reply_schedule_is_independent_of_batch_order(
+    make_initialized_sim,
+):
+    """每个谈判事件的回复日只取决于事件身份，不取决于批量顺序。"""
+    conn, _, _ = make_initialized_sim(seed=42)
+    _, first_thread_id = _create_active_enterprise_thread(conn)
+    _, second_thread_id = _create_active_enterprise_thread(conn)
+
+    batch_schedule_customer_replies(
+        conn,
+        [first_thread_id, second_thread_id],
+        current_day=7,
+        seed=42,
+    )
+    first_order = {
+        row["thread_id"]: row["next_reply_day"]
+        for row in conn.execute(
+            """
+            SELECT thread_id, next_reply_day
+            FROM enterprise_turns
+            WHERE thread_id IN (?, ?)
+            """,
+            (first_thread_id, second_thread_id),
+        )
+    }
+
+    conn.execute(
+        "UPDATE enterprise_turns SET next_reply_day = NULL WHERE thread_id IN (?, ?)",
+        (first_thread_id, second_thread_id),
+    )
+    batch_schedule_customer_replies(
+        conn,
+        [second_thread_id, first_thread_id],
+        current_day=7,
+        seed=42,
+    )
+    reversed_order = {
+        row["thread_id"]: row["next_reply_day"]
+        for row in conn.execute(
+            """
+            SELECT thread_id, next_reply_day
+            FROM enterprise_turns
+            WHERE thread_id IN (?, ?)
+            """,
+            (first_thread_id, second_thread_id),
+        )
+    }
+
+    assert reversed_order == first_order
+
+
+def test_sending_enterprise_deal_does_not_advance_simulator_rng(
+    make_initialized_sim,
+    make_agent_tools,
+):
+    """Agent 发送报价不得改变模拟器后续外生事件的随机序列。"""
+    conn, simulator, config = make_initialized_sim(seed=42)
+    customer_id, _ = _create_active_enterprise_thread(conn)
+    rng_state_before = copy.deepcopy(simulator.rng.bit_generator.state)
+
+    result = make_agent_tools(conn, config, day=7, seed=42).send_enterprise_deal(
+        [[customer_id, [["B", 50.0]]]],
+    )
+
+    assert result.success
+    assert simulator.rng.bit_generator.state == rng_state_before
+
+
 @pytest.mark.parametrize(
     "offering",
     [
@@ -420,6 +490,26 @@ def test_reject_enterprise_deal_applies_documented_terminal_effects(
         ).fetchone()[0] == 1
     else:
         assert current_reputation == pytest.approx(initial_reputation)
+
+
+def test_rejecting_enterprise_deal_does_not_advance_simulator_rng(
+    make_initialized_sim,
+    make_agent_tools,
+):
+    """Agent 主动拒绝造成的随机声誉损伤不得消耗主随机流。"""
+    conn, simulator, config = make_initialized_sim(seed=42)
+    customer_id, _ = _create_rejectable_enterprise_thread(
+        conn,
+        "churn_prevention",
+    )
+    rng_state_before = copy.deepcopy(simulator.rng.bit_generator.state)
+
+    result = make_agent_tools(conn, config, day=7, seed=42).reject_enterprise_deal(
+        [{"customer_id": customer_id}],
+    )
+
+    assert result.success
+    assert simulator.rng.bit_generator.state == rng_state_before
 
 
 def test_existing_enterprise_evaluates_offer_at_promoted_price(

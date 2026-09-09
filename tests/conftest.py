@@ -28,7 +28,6 @@ def make_agent_tools(tmp_path):
             conn,
             current_day=day,
             workspace_path=tmp_path / "workspace",
-            rng=default_rng(seed),
             config=config,
             seed=seed,
         )

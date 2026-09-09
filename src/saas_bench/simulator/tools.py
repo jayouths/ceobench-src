@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Any
 from pathlib import Path
-from numpy.random import Generator, default_rng
+from numpy.random import default_rng
 
 from .config import MODEL_TIERS, CAPACITY_TIERS, CUSTOMER_GROUPS, INITIAL_CUSTOMER_GROUPS, AD_CHANNELS, BenchmarkConfig, RESEARCH_TIERS, RESEARCH_TIERS_BY_ID, ResearchTier, REPUTATION_INFLUENCE_MATRIX, REPUTATION_INFLUENCE_RATE, NETWORK_INFLUENCE_MATRIX, DEFAULT_INDIVIDUAL_OPS_SCALE, DEFAULT_ENTERPRISE_OPS_SCALE, ENTERPRISE_RESPONSE_TIMEOUT_DAYS, MIN_RESEARCH_DURATION_DAYS, MIN_RESEARCH_QUALITY_BOOST, compute_development_quality_improvement, get_development_quality_formula, get_info_level_noise, get_info_level_noise_label
 from .database import (
@@ -33,11 +33,12 @@ from .database import (
     add_agent_social_post, get_agent_posts_today, get_recent_agent_posts_for_judge,
 )
 from .enterprise import (
-    schedule_customer_reply, batch_schedule_customer_replies,
+    batch_schedule_customer_replies,
     update_relationship,
     create_negotiation_thread, add_customer_message, generate_enterprise_email,
 )
 from ._sql_chunk import chunked_select, chunked_execute
+from .randomness import event_rng
 
 
 # =====================================================================
@@ -1967,13 +1968,12 @@ class ToolResult:
 class AgentTools:
     """Tools available to the agent."""
 
-    def __init__(self, conn: sqlite3.Connection, current_day: int, workspace_path: Path, db_path: Path = None, rng: Optional[Generator] = None, config: Optional[BenchmarkConfig] = None, seed: int = 42, api_port: int = 0):
+    def __init__(self, conn: sqlite3.Connection, current_day: int, workspace_path: Path, db_path: Path = None, *, config: Optional[BenchmarkConfig] = None, seed: int, api_port: int = 0):
         self.conn = conn
         self.current_day = current_day
         self.workspace_path = workspace_path
         self.db_path = db_path  # Deprecated: kept for backward compat with harness runners
         self.api_port = api_port  # HTTP API port for sandbox DB access
-        self.rng = rng if rng is not None else default_rng()  # RNG for scheduling customer replies
         self.seed = seed  # Global seed for path-independent RNG derivation
         self.config = config or BenchmarkConfig()  # V2: needed for VC negotiation
         self.workspace_path.mkdir(parents=True, exist_ok=True)
@@ -3117,7 +3117,12 @@ class AgentTools:
                 results.append({'customer_id': customer_id, 'success': True})
 
         # --- Phase 4: Batch schedule customer replies + single commit ---
-        batch_schedule_customer_replies(self.conn, threads_to_schedule, self.current_day, self.rng)
+        batch_schedule_customer_replies(
+            self.conn,
+            threads_to_schedule,
+            self.current_day,
+            self.seed,
+        )
         self.conn.commit()
 
         # Return format — always include per-item results in data
@@ -4314,7 +4319,7 @@ os.chdir('{self.workspace_path}')
 
         # --- Phase 3: Process rejections using pre-fetched data ---
         new_lead_lost_cids = []  # customer_ids to mark subscriptions as lost
-        existing_customer_rejections = []  # (customer_id, thread_type)
+        existing_customer_rejections = []  # (customer_id, thread_type, thread_id, turn_number)
 
         for customer_id in parsed_cids:
             at = active_threads.get(customer_id)
@@ -4340,7 +4345,7 @@ os.chdir('{self.workspace_path}')
                 new_lead_lost_cids.append(customer_id)
             else:
                 existing_customer_rejections.append(
-                    (customer_id, at['thread_type'])
+                    (customer_id, at['thread_type'], tid, new_turn_number)
                 )
 
             if at['thread_type'] == 'new_lead':
@@ -4365,7 +4370,7 @@ os.chdir('{self.workspace_path}')
                 WHERE customer_id = ? AND status = 'lead'
             """, (self.current_day, cid))
 
-        for cid, thread_type in existing_customer_rejections:
+        for cid, thread_type, thread_id, turn_number in existing_customer_rejections:
             # 主动拒绝存量谈判代表谈判失败，不能只关闭线程却保留订阅。
             cancelled = self.conn.execute("""
                 UPDATE subscriptions
@@ -4394,9 +4399,16 @@ os.chdir('{self.workspace_path}')
                     # 查询发生在取消之后，加回当前客户才是事件发生时的客群规模。
                     population = max(subscriber_count + 1, 2)
                     event_scale = math.log2(population) / population
+                    # Agent 主动拒绝是可识别事件；声誉损伤不得推进主随机流。
+                    rng = event_rng(
+                        self.seed,
+                        "enterprise_rejection_reputation",
+                        thread_id,
+                        turn_number,
+                    )
                     damage = (
                         self.config.reputation_quality_cancel_damage
-                        * (0.5 + self.rng.random())
+                        * (0.5 + rng.random())
                         * event_scale
                     )
                     current_reputation = get_group_reputation(self.conn, group_id)

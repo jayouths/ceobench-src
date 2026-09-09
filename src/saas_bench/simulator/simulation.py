@@ -61,7 +61,7 @@ from .personas import (
     initialize_all_personas, should_customer_post, generate_social_post,
 )
 from .enterprise import (
-    get_threads_needing_reply, get_negotiation_state, schedule_customer_reply,
+    get_threads_needing_reply, get_negotiation_state,
     create_negotiation_thread, add_customer_message, close_thread,
     update_relationship, get_best_plan_for_customer, compute_customer_offer_price,
     get_quality_for_plan, generate_enterprise_email, get_threads_awaiting_agent_response,

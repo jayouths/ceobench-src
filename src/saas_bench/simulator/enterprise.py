@@ -24,6 +24,7 @@ from .config import (
     ENTERPRISE_RESPONSE_TIMEOUT_DAYS, compute_quota_quality_factor,
 )
 from ._sql_chunk import chunked_select, chunked_execute
+from .randomness import event_rng
 
 
 # First names and last names for generating realistic email addresses
@@ -722,7 +723,7 @@ def schedule_customer_reply(
     conn: sqlite3.Connection,
     thread_id: int,
     current_day: int,
-    rng: Generator
+    seed: int,
 ):
     """Schedule when the customer will reply to the agent's message.
 
@@ -732,6 +733,8 @@ def schedule_customer_reply(
     if not state:
         return
 
+    # 同一线程的每个谈判轮次都是独立事件，不消耗模拟器主随机流。
+    rng = event_rng(seed, "enterprise_reply_delay", thread_id, state.negotiation_turn)
     delay = compute_reply_delay(state, rng)
     next_reply_day = current_day + delay
 
@@ -744,7 +747,7 @@ def batch_schedule_customer_replies(
     conn: sqlite3.Connection,
     thread_ids: List[int],
     current_day: int,
-    rng: Generator
+    seed: int,
 ):
     """Schedule customer replies for multiple threads in batch (fewer SQL queries).
 
@@ -779,6 +782,8 @@ def batch_schedule_customer_replies(
             continue
         delay_mean = row['reply_delay_mean'] or 2.0
         delay_std = row['reply_delay_std'] or 1.0
+        # 回复延迟只由事件身份决定，批量的顺序和大小不会串扰结果。
+        rng = event_rng(seed, "enterprise_reply_delay", tid, row['turn_number'])
         delay = max(1, int(round(rng.normal(delay_mean, delay_std))))
         next_reply_day = current_day + delay
         update_enterprise_turn_next_reply(conn, tid, next_reply_day)

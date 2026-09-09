@@ -54,6 +54,7 @@ _ENGINE_MODULES = [
     "simulator/llm_replay",
     "simulator/personas",
     "simulator/public_week_snapshot",
+    "simulator/randomness",
     "simulator/shocks",
     "simulator/simulation",
     "simulator/subscription_activity",

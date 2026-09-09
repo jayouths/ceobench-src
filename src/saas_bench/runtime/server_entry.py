@@ -382,7 +382,7 @@ def cmd_start_server(args, base: Path):
             )
 
     workspace = _session_workspace(base, session_id)
-    tools = AgentTools(conn, current_day, workspace, rng=rng, config=config, seed=seed)
+    tools = AgentTools(conn, current_day, workspace, config=config, seed=seed)
 
     # Event logger
     logs_dir = sdir / "logs"
