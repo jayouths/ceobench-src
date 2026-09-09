@@ -1,11 +1,14 @@
 """Analysis 确定性经营信号测试。"""
 
 import pytest
+from pydantic import ValidationError
 
 from saas_bench.agents.bash_agent.analysis.signal_catalog import SIGNAL_CATALOG
 from saas_bench.agents.bash_agent.analysis.signal_models import (
     AnalysisSignals,
     DataStatus,
+    NumericObservation,
+    UnavailableReason,
 )
 from saas_bench.agents.bash_agent.analysis.signals import (
     SignalCollector,
@@ -50,10 +53,33 @@ def test_day_zero_signals_use_null_instead_of_false_zero(make_initialized_sim):
     leads = signals.market.effective_leads.individual
     assert leads.current.value is None
     assert leads.current.status is DataStatus.INSUFFICIENT_DATA
+    assert leads.current.reason is UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW
     assert signals.finance.current_cash.value == pytest.approx(1_000_000)
     assert signals.finance.runway.cash_runway_days.status is DataStatus.INSUFFICIENT_DATA
     assert signals.customer.issues.open_issues.value == 0
     assert signals.customer.issues.average_open_age_days.status is DataStatus.NOT_APPLICABLE
+    assert signals.customer.issues.average_open_age_days.reason is (
+        UnavailableReason.NO_OPEN_ISSUES
+    )
+
+
+def test_unavailable_observations_require_a_matching_reason():
+    with pytest.raises(ValidationError, match="require a reason"):
+        NumericObservation(value=None, status=DataStatus.INSUFFICIENT_DATA)
+
+    with pytest.raises(ValidationError, match="invalid reason"):
+        NumericObservation(
+            value=None,
+            status=DataStatus.NOT_APPLICABLE,
+            reason=UnavailableReason.MISSING_PUBLIC_DATA,
+        )
+
+    with pytest.raises(ValidationError, match="cannot include a reason"):
+        NumericObservation(
+            value=1,
+            status=DataStatus.AVAILABLE,
+            reason=UnavailableReason.NO_CUSTOMER_BASE,
+        )
 
 
 def test_issue_resolution_signals_exclude_churn_closures(make_initialized_sim):

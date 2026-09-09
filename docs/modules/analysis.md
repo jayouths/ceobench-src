@@ -154,7 +154,7 @@ Dashboard 文本      Analysis 统计信号
 
 ```json
 {
-  "schema_version": "2.0",
+  "schema_version": "3.0",
   "signal_catalog_version": "2.0",
   "day": 7,
   "week": 1,
@@ -167,7 +167,7 @@ Dashboard 文本      Analysis 统计信号
 }
 ```
 
-每个可比较数值分别保存 `current`、`previous`、绝对变化、相对变化、方向和比较状态。只有比较成立时才保存 `direction = up / down / flat`；数据不足或不适用时省略方向。`current` 与 `previous` 各自携带 `available / insufficient_data / not_applicable` 状态，避免把“数据不足”和“零值”混淆。最近 7 天为 day 1 至 day 7 这类完整模拟日窗口，前 7 天为其前一个完整窗口；现金和配置等周边界状态按上文的相邻公开快照规则处理。
+每个可比较数值分别保存 `current`、`previous`、绝对变化、相对变化、方向和比较状态。只有比较成立时才保存 `direction = up / down / flat`；数据不足或不适用时省略方向。`current` 与 `previous` 各自携带 `available / insufficient_data / not_applicable` 状态，避免把“数据不足”“当前业务条件下无需计算”和零值混淆。两类不可用状态还必须携带结构化 `reason`：前者说明窗口不完整、缺少前期快照或缺少公开数据，后者说明无客户基数、无线索或无经常性净消耗等具体业务条件。证据卡片将状态和原因转换为完整中文事实，不向角色模型暴露模糊的“当前值不适用”。最近 7 天为 day 1 至 day 7 这类完整模拟日窗口，前 7 天为其前一个完整窗口；现金和配置等周边界状态按上文的相邻公开快照规则处理。
 
 配置指标采用与其他比较指标一致的结构，不保留整体 `changes`：`model_tier.A/B/C` 和 `usage_quota.A/B/C` 分别记录各套餐变化，`capacity_tier`、`daily_operations_spend`、`daily_development_spend` 各自记录变化。A/B/C 是套餐维度，不是有序方向。
 

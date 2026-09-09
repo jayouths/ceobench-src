@@ -21,6 +21,37 @@ class DataStatus(StrEnum):
     NOT_APPLICABLE = "not_applicable"
 
 
+class UnavailableReason(StrEnum):
+    INCOMPLETE_OBSERVATION_WINDOW = "incomplete_observation_window"
+    MISSING_PREVIOUS_SNAPSHOT = "missing_previous_snapshot"
+    MISSING_PUBLIC_DATA = "missing_public_data"
+    NO_EFFECTIVE_LEADS = "no_effective_leads"
+    NO_RAW_LEADS = "no_raw_leads"
+    NO_OPERATING_REVENUE = "no_operating_revenue"
+    NO_RECURRING_NET_BURN = "no_recurring_net_burn"
+    NO_CUSTOMER_BASE = "no_customer_base"
+    NO_OPEN_ISSUES = "no_open_issues"
+    NO_RESOLVED_ISSUES = "no_resolved_issues"
+    NO_OPEN_ENTERPRISE_NEGOTIATIONS = "no_open_enterprise_negotiations"
+
+
+_INSUFFICIENT_DATA_REASONS = {
+    UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW,
+    UnavailableReason.MISSING_PREVIOUS_SNAPSHOT,
+    UnavailableReason.MISSING_PUBLIC_DATA,
+}
+_NOT_APPLICABLE_REASONS = {
+    UnavailableReason.NO_EFFECTIVE_LEADS,
+    UnavailableReason.NO_RAW_LEADS,
+    UnavailableReason.NO_OPERATING_REVENUE,
+    UnavailableReason.NO_RECURRING_NET_BURN,
+    UnavailableReason.NO_CUSTOMER_BASE,
+    UnavailableReason.NO_OPEN_ISSUES,
+    UnavailableReason.NO_RESOLVED_ISSUES,
+    UnavailableReason.NO_OPEN_ENTERPRISE_NEGOTIATIONS,
+}
+
+
 class ChangeDirection(StrEnum):
     UP = "up"
     DOWN = "down"
@@ -33,6 +64,10 @@ Number = Annotated[int | float, Field(union_mode="left_to_right")]
 class NumericObservation(SignalModel):
     value: Number | None
     status: DataStatus
+    reason: UnavailableReason | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_value(self) -> Self:
@@ -41,8 +76,24 @@ class NumericObservation(SignalModel):
                 raise ValueError("available observations require a numeric value")
             if not math.isfinite(float(self.value)):
                 raise ValueError("observation values must be finite")
-        elif self.value is not None:
+            if self.reason is not None:
+                raise ValueError("available observations cannot include a reason")
+            return self
+
+        if self.value is not None:
             raise ValueError("unavailable observations must use value=null")
+        if self.reason is None:
+            raise ValueError("unavailable observations require a reason")
+        if (
+            self.status is DataStatus.INSUFFICIENT_DATA
+            and self.reason not in _INSUFFICIENT_DATA_REASONS
+        ):
+            raise ValueError("insufficient_data observation has an invalid reason")
+        if (
+            self.status is DataStatus.NOT_APPLICABLE
+            and self.reason not in _NOT_APPLICABLE_REASONS
+        ):
+            raise ValueError("not_applicable observation has an invalid reason")
         return self
 
 
@@ -352,7 +403,7 @@ class CustomerSignals(SignalModel):
 
 
 class AnalysisSignals(SignalModel):
-    schema_version: Literal["2.0"] = "2.0"
+    schema_version: Literal["3.0"] = "3.0"
     signal_catalog_version: Literal["2.0"] = "2.0"
     day: int = Field(ge=0)
     week: int = Field(ge=0)

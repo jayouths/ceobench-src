@@ -1,13 +1,17 @@
 """确定性证据卡片生成测试。"""
 
+import pytest
+
 from saas_bench.agents.bash_agent.analysis.evidence_cards import (
     _format_metric_value,
     _format_observation,
+    _format_observation_fact,
     build_evidence_cards,
     state_core_evidence_ids,
 )
 from saas_bench.agents.bash_agent.analysis.models import Role
 from saas_bench.agents.bash_agent.analysis.signals import SignalCollector
+from saas_bench.agents.bash_agent.analysis.signal_models import UnavailableReason
 from saas_bench.simulator.public_week_snapshot import build_public_week_snapshot
 
 
@@ -106,5 +110,50 @@ def test_metric_values_include_unambiguous_units():
 def test_churn_rate_without_customer_base_has_specific_status_text():
     assert _format_observation(
         "customer.churn.weekly_rates.enterprise_accounts",
-        {"value": None, "status": "not_applicable"},
+        {
+            "value": None,
+            "status": "not_applicable",
+            "reason": "no_customer_base",
+        },
     ) == "无客户基数"
+    assert _format_observation_fact(
+        "customer.churn.weekly_rates.enterprise_accounts",
+        {
+            "value": None,
+            "status": "not_applicable",
+            "reason": "no_customer_base",
+        },
+        "本期",
+    ) == "本期无客户基数，该指标不计算"
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW, "观察窗口尚未完整"),
+        (UnavailableReason.MISSING_PREVIOUS_SNAPSHOT, "缺少上一期状态快照"),
+        (UnavailableReason.MISSING_PUBLIC_DATA, "缺少公开经营数据"),
+        (UnavailableReason.NO_EFFECTIVE_LEADS, "无有效线索"),
+        (UnavailableReason.NO_RAW_LEADS, "无原始线索"),
+        (UnavailableReason.NO_OPERATING_REVENUE, "无经营收入"),
+        (UnavailableReason.NO_RECURRING_NET_BURN, "未形成持续经常性净消耗"),
+        (UnavailableReason.NO_CUSTOMER_BASE, "无客户基数"),
+        (UnavailableReason.NO_OPEN_ISSUES, "无未解决工单"),
+        (UnavailableReason.NO_RESOLVED_ISSUES, "无已解决工单"),
+        (UnavailableReason.NO_OPEN_ENTERPRISE_NEGOTIATIONS, "无进行中的企业谈判"),
+    ],
+)
+def test_each_unavailable_reason_has_specific_chinese_text(reason, expected):
+    status = (
+        "insufficient_data"
+        if reason in {
+            UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW,
+            UnavailableReason.MISSING_PREVIOUS_SNAPSHOT,
+            UnavailableReason.MISSING_PUBLIC_DATA,
+        }
+        else "not_applicable"
+    )
+    assert _format_observation(
+        "example.metric",
+        {"value": None, "status": status, "reason": reason.value},
+    ) == expected

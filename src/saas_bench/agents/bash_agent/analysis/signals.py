@@ -53,6 +53,7 @@ from .signal_models import (
     SocialFeedback,
     SocialPost,
     UsageSignals,
+    UnavailableReason,
 )
 
 
@@ -102,8 +103,23 @@ def build_analysis_windows(day: int) -> AnalysisWindows:
 def _observation(
     value: int | float | None,
     status: DataStatus = DataStatus.AVAILABLE,
+    reason: UnavailableReason | None = None,
 ) -> NumericObservation:
-    return NumericObservation(value=value if status is DataStatus.AVAILABLE else None, status=status)
+    return NumericObservation(
+        value=value if status is DataStatus.AVAILABLE else None,
+        status=status,
+        reason=reason,
+    )
+
+
+def _incomplete_window_reason(status: DataStatus) -> UnavailableReason | None:
+    """完整窗口的指标无需原因；窗口不完整时统一记录明确原因。"""
+
+    return (
+        UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW
+        if status is DataStatus.INSUFFICIENT_DATA
+        else None
+    )
 
 
 def _comparison_from_observations(
@@ -153,10 +169,19 @@ def _comparison(
     previous: int | float | None,
     current_status: DataStatus,
     previous_status: DataStatus,
+    *,
+    current_reason: UnavailableReason | None = None,
+    previous_reason: UnavailableReason | None = None,
 ) -> MetricComparison:
+    # 普通比较都按完整统计窗口生成；若窗口尚未形成，统一补充这一确定性原因。
+    # 缺少快照、缺少公开数据和业务上不适用等情况由调用方显式覆盖。
+    if current_status is DataStatus.INSUFFICIENT_DATA and current_reason is None:
+        current_reason = UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW
+    if previous_status is DataStatus.INSUFFICIENT_DATA and previous_reason is None:
+        previous_reason = UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW
     return _comparison_from_observations(
-        _observation(current, current_status),
-        _observation(previous, previous_status),
+        _observation(current, current_status, current_reason),
+        _observation(previous, previous_status, previous_reason),
     )
 
 
@@ -166,6 +191,17 @@ def _window_status(window: ObservationWindow, row_count: int | None = None) -> D
     if row_count is not None and row_count != window.required_days:
         return DataStatus.INSUFFICIENT_DATA
     return DataStatus.AVAILABLE
+
+
+def _window_status_reason(
+    window: ObservationWindow,
+    row_count: int | None = None,
+) -> UnavailableReason | None:
+    if window.status is not DataStatus.AVAILABLE:
+        return UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW
+    if row_count is not None and row_count != window.required_days:
+        return UnavailableReason.MISSING_PUBLIC_DATA
+    return None
 
 
 def _in_window(day: int, window: ObservationWindow) -> bool:
@@ -309,6 +345,22 @@ class SignalCollector:
             previous_artifact.public_week_snapshot.weekly_activity
             if previous_artifact else None
         )
+        current_activity_status = (
+            current_status if activity else DataStatus.INSUFFICIENT_DATA
+        )
+        previous_activity_status = (
+            previous_status if previous_activity else DataStatus.INSUFFICIENT_DATA
+        )
+
+        def activity_reason(
+            period_status: DataStatus,
+            period_activity: Any,
+        ) -> UnavailableReason | None:
+            if period_status is DataStatus.INSUFFICIENT_DATA:
+                return UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW
+            if period_activity is None:
+                return UnavailableReason.MISSING_PUBLIC_DATA
+            return None
 
         def activity_count(name: str, previous: bool = False) -> int | None:
             source = previous_activity if previous else activity
@@ -317,14 +369,18 @@ class SignalCollector:
         individual = _comparison(
             activity_count("new_individual_leads"),
             activity_count("new_individual_leads", True),
-            current_status if activity else DataStatus.INSUFFICIENT_DATA,
-            previous_status if previous_activity else DataStatus.INSUFFICIENT_DATA,
+            current_activity_status,
+            previous_activity_status,
+            current_reason=activity_reason(current_status, activity),
+            previous_reason=activity_reason(previous_status, previous_activity),
         )
         enterprise = _comparison(
             activity_count("new_enterprise_leads"),
             activity_count("new_enterprise_leads", True),
-            current_status if activity else DataStatus.INSUFFICIENT_DATA,
-            previous_status if previous_activity else DataStatus.INSUFFICIENT_DATA,
+            current_activity_status,
+            previous_activity_status,
+            current_reason=activity_reason(current_status, activity),
+            previous_reason=activity_reason(previous_status, previous_activity),
         )
         current_total = (
             activity.new_individual_leads + activity.new_enterprise_leads
@@ -337,8 +393,10 @@ class SignalCollector:
         total = _comparison(
             current_total,
             previous_total,
-            current_status if activity else DataStatus.INSUFFICIENT_DATA,
-            previous_status if previous_activity else DataStatus.INSUFFICIENT_DATA,
+            current_activity_status,
+            previous_activity_status,
+            current_reason=activity_reason(current_status, activity),
+            previous_reason=activity_reason(previous_status, previous_activity),
         )
 
         grouped: dict[tuple[str, str], dict[str, int]] = defaultdict(
@@ -402,14 +460,30 @@ class SignalCollector:
                     else "network" if source == "network"
                     else "paid"
                 ),
-                individual=_comparison(ci, pi, current_status, previous_status),
-                enterprise_accounts=_comparison(ce, pe, current_status, previous_status),
-                total_accounts=_comparison(ci + ce, pi + pe, current_status, previous_status),
+                individual=_comparison(
+                    ci, pi, current_status, previous_status
+                ),
+                enterprise_accounts=_comparison(
+                    ce, pe, current_status, previous_status
+                ),
+                total_accounts=_comparison(
+                    ci + ce, pi + pe, current_status, previous_status
+                ),
                 share=_comparison(
                     (ci + ce) / current_denominator if current_denominator else None,
                     (pi + pe) / previous_denominator if previous_denominator else None,
                     current_share_status,
                     previous_share_status,
+                    current_reason=(
+                        UnavailableReason.NO_EFFECTIVE_LEADS
+                        if current_share_status is DataStatus.NOT_APPLICABLE
+                        else _incomplete_window_reason(current_share_status)
+                    ),
+                    previous_reason=(
+                        UnavailableReason.NO_EFFECTIVE_LEADS
+                        if previous_share_status is DataStatus.NOT_APPLICABLE
+                        else _incomplete_window_reason(previous_share_status)
+                    ),
                 ),
             ))
 
@@ -450,21 +524,49 @@ class SignalCollector:
             previous_raw_cpl_status = cpl_status(previous_status, pr)
             current_effective_cpl_status = cpl_status(current_status, ce)
             previous_effective_cpl_status = cpl_status(previous_status, pe)
+            def cpl_reason(
+                status: DataStatus,
+                no_leads_reason: UnavailableReason,
+            ) -> UnavailableReason | None:
+                if status is DataStatus.NOT_APPLICABLE:
+                    return no_leads_reason
+                return _incomplete_window_reason(status)
+
             return PaidEfficiency(
-                spend=_comparison(cs, ps, current_status, previous_status),
-                raw_leads=_comparison(cr, pr, current_status, previous_status),
-                effective_leads=_comparison(ce, pe, current_status, previous_status),
+                spend=_comparison(
+                    cs, ps, current_status, previous_status
+                ),
+                raw_leads=_comparison(
+                    cr, pr, current_status, previous_status
+                ),
+                effective_leads=_comparison(
+                    ce, pe, current_status, previous_status
+                ),
                 raw_cpl=_comparison(
                     cs / cr if cr else None,
                     ps / pr if pr else None,
                     current_raw_cpl_status,
                     previous_raw_cpl_status,
+                    current_reason=cpl_reason(
+                        current_raw_cpl_status, UnavailableReason.NO_RAW_LEADS
+                    ),
+                    previous_reason=cpl_reason(
+                        previous_raw_cpl_status, UnavailableReason.NO_RAW_LEADS
+                    ),
                 ),
                 effective_cpl=_comparison(
                     cs / ce if ce else None,
                     ps / pe if pe else None,
                     current_effective_cpl_status,
                     previous_effective_cpl_status,
+                    current_reason=cpl_reason(
+                        current_effective_cpl_status,
+                        UnavailableReason.NO_EFFECTIVE_LEADS,
+                    ),
+                    previous_reason=cpl_reason(
+                        previous_effective_cpl_status,
+                        UnavailableReason.NO_EFFECTIVE_LEADS,
+                    ),
                 ),
             )
 
@@ -535,13 +637,22 @@ class SignalCollector:
             if previous_artifact is not None
             else DataStatus.INSUFFICIENT_DATA
         )
+        current_reason = (
+            UnavailableReason.MISSING_PREVIOUS_SNAPSHOT
+            if previous_artifact is None
+            else _incomplete_window_reason(current_status)
+        )
         current = defaultdict(float)
         for row in ledger_rows:
             current[str(row["category"])] += float(row["amount"] or 0)
 
         def previous_observation(path: str) -> NumericObservation:
             if previous_artifact is None:
-                return _observation(None, DataStatus.INSUFFICIENT_DATA)
+                return _observation(
+                    None,
+                    DataStatus.INSUFFICIENT_DATA,
+                    UnavailableReason.MISSING_PREVIOUS_SNAPSHOT,
+                )
             target: Any = previous_artifact.finance
             for part in path.split("."):
                 target = getattr(target, part)
@@ -549,7 +660,7 @@ class SignalCollector:
 
         def current_comparison(key: str, previous_path: str) -> MetricComparison:
             return _comparison_from_observations(
-                _observation(current[key], current_status),
+                _observation(current[key], current_status, current_reason),
                 previous_observation(previous_path),
             )
 
@@ -566,7 +677,9 @@ class SignalCollector:
 
         def cost_pair(categories: set[str], previous_path: str) -> MetricComparison:
             return _comparison_from_observations(
-                _observation(cost(current, categories), current_status),
+                _observation(
+                    cost(current, categories), current_status, current_reason
+                ),
                 previous_observation(previous_path),
             )
 
@@ -623,7 +736,7 @@ class SignalCollector:
                     "ad_revenue", "operating_revenue.advertising"
                 ),
                 total=_comparison_from_observations(
-                    _observation(current_revenue, current_status),
+                    _observation(current_revenue, current_status, current_reason),
                     previous_observation("operating_revenue.total"),
                 ),
             ),
@@ -633,6 +746,7 @@ class SignalCollector:
                     - float(previous_artifact.finance.current_cash.value)
                     if previous_artifact else None,
                     current_status,
+                    current_reason,
                 ),
                 previous_observation("net_cash_flow"),
             ),
@@ -649,14 +763,35 @@ class SignalCollector:
                     (current_revenue - current_service_cost) / current_revenue
                     if current_revenue else None,
                     current_margin_status,
+                    (
+                        UnavailableReason.NO_OPERATING_REVENUE
+                        if current_margin_status is DataStatus.NOT_APPLICABLE
+                        else current_reason
+                    ),
                 ),
                 previous_observation("service_delivery_margin"),
             ),
             runway=RunwaySignals(
                 coverage_days=coverage_days,
-                average_daily_recurring_net_cash_flow=_observation(recurring_net, runway_status),
-                average_daily_recurring_burn=_observation(burn, burn_status),
-                cash_runway_days=_observation(runway, runway_value_status),
+                average_daily_recurring_net_cash_flow=_observation(
+                    recurring_net,
+                    runway_status,
+                    _incomplete_window_reason(runway_status),
+                ),
+                average_daily_recurring_burn=_observation(
+                    burn,
+                    burn_status,
+                    _incomplete_window_reason(burn_status),
+                ),
+                cash_runway_days=_observation(
+                    runway,
+                    runway_value_status,
+                    (
+                        UnavailableReason.NO_RECURRING_NET_BURN
+                        if runway_value_status is DataStatus.NOT_APPLICABLE
+                        else _incomplete_window_reason(runway_value_status)
+                    ),
+                ),
             ),
         )
 
@@ -672,6 +807,12 @@ class SignalCollector:
         previous_rows = self._period_rows(service_rows, windows.previous_7d)
         cs = _window_status(windows.current_7d, len(current_rows))
         ps = _window_status(windows.previous_7d, len(previous_rows))
+        current_service_reason = _window_status_reason(
+            windows.current_7d, len(current_rows)
+        )
+        previous_service_reason = _window_status_reason(
+            windows.previous_7d, len(previous_rows)
+        )
 
         def aggregate(rows: Sequence[Mapping[str, Any]]) -> dict[str, float]:
             if not rows:
@@ -701,7 +842,14 @@ class SignalCollector:
         previous = aggregate(previous_rows)
 
         def pair(key: str) -> MetricComparison:
-            return _comparison(current.get(key), previous.get(key), cs, ps)
+            return _comparison(
+                current.get(key),
+                previous.get(key),
+                cs,
+                ps,
+                current_reason=current_service_reason,
+                previous_reason=previous_service_reason,
+            )
 
         previous_artifact = history.get(snapshot.day - 7)
         previous_configuration = (
@@ -725,6 +873,11 @@ class SignalCollector:
                     DataStatus.AVAILABLE
                     if previous_configuration is not None
                     else DataStatus.INSUFFICIENT_DATA
+                ),
+                previous_reason=(
+                    None
+                    if previous_configuration is not None
+                    else UnavailableReason.MISSING_PREVIOUS_SNAPSHOT
                 ),
             )
 
@@ -764,12 +917,21 @@ class SignalCollector:
         current_completions = len(current_completed_ids - previous_completed_ids)
         previous_completions_observation = (
             previous_artifact.product.research_pipeline.completions.current
-            if previous_artifact else _observation(None, DataStatus.INSUFFICIENT_DATA)
+            if previous_artifact else _observation(
+                None,
+                DataStatus.INSUFFICIENT_DATA,
+                UnavailableReason.MISSING_PREVIOUS_SNAPSHOT,
+            )
         )
         completions = _comparison_from_observations(
             _observation(
                 current_completions,
                 windows.current_7d.status if previous_artifact else DataStatus.INSUFFICIENT_DATA,
+                (
+                    _incomplete_window_reason(windows.current_7d.status)
+                    if previous_artifact
+                    else UnavailableReason.MISSING_PREVIOUS_SNAPSHOT
+                ),
             ),
             previous_completions_observation,
         )
@@ -860,11 +1022,31 @@ class SignalCollector:
             previous_section = (
                 getattr(previous_activity, section) if previous_activity else None
             )
+            current_status = cs if activity else DataStatus.INSUFFICIENT_DATA
+            previous_status = ps if previous_activity else DataStatus.INSUFFICIENT_DATA
             return _comparison(
                 getattr(current_section, field) if current_section else None,
                 getattr(previous_section, field) if previous_section else None,
-                cs if activity else DataStatus.INSUFFICIENT_DATA,
-                ps if previous_activity else DataStatus.INSUFFICIENT_DATA,
+                current_status,
+                previous_status,
+                current_reason=(
+                    _incomplete_window_reason(cs)
+                    if activity is not None
+                    else (
+                        UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW
+                        if cs is DataStatus.INSUFFICIENT_DATA
+                        else UnavailableReason.MISSING_PUBLIC_DATA
+                    )
+                ),
+                previous_reason=(
+                    _incomplete_window_reason(ps)
+                    if previous_activity is not None
+                    else (
+                        UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW
+                        if ps is DataStatus.INSUFFICIENT_DATA
+                        else UnavailableReason.MISSING_PUBLIC_DATA
+                    )
+                ),
             )
 
         def churn_rate(
@@ -879,10 +1061,18 @@ class SignalCollector:
                 or cancelled is None
                 or opening is None
             ):
-                return _observation(None, DataStatus.INSUFFICIENT_DATA)
+                return _observation(
+                    None,
+                    DataStatus.INSUFFICIENT_DATA,
+                    UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW,
+                )
             denominator = float(opening) + started
             if denominator <= 0:
-                return _observation(None, DataStatus.NOT_APPLICABLE)
+                return _observation(
+                    None,
+                    DataStatus.NOT_APPLICABLE,
+                    UnavailableReason.NO_CUSTOMER_BASE,
+                )
             return _observation(cancelled / denominator)
 
         weekly_rates = ChurnRateSignals(
@@ -961,8 +1151,16 @@ class SignalCollector:
             value = issue.get(key)
             if value is None:
                 if key in {"avg_open_age", "max_open_age"} and int(issue.get("open_count") or 0) == 0:
-                    return _observation(None, DataStatus.NOT_APPLICABLE)
-                return _observation(None, DataStatus.INSUFFICIENT_DATA)
+                    return _observation(
+                        None,
+                        DataStatus.NOT_APPLICABLE,
+                        UnavailableReason.NO_OPEN_ISSUES,
+                    )
+                return _observation(
+                    None,
+                    DataStatus.INSUFFICIENT_DATA,
+                    UnavailableReason.MISSING_PUBLIC_DATA,
+                )
             return _observation(float(value) if "avg" in key else int(value))
 
         def issue_pair(current_key: str, previous_key: str, ratio: bool = False) -> MetricComparison:
@@ -970,15 +1168,37 @@ class SignalCollector:
             previous_value = issue.get(previous_key)
             current_metric_status = cs
             previous_metric_status = ps
-            if ratio and current_value is None and cs is DataStatus.AVAILABLE:
-                current_metric_status = DataStatus.NOT_APPLICABLE
-            if ratio and previous_value is None and ps is DataStatus.AVAILABLE:
-                previous_metric_status = DataStatus.NOT_APPLICABLE
+
+            def issue_reason(
+                value: Any,
+                window_status: DataStatus,
+            ) -> tuple[DataStatus, UnavailableReason | None]:
+                if window_status is DataStatus.INSUFFICIENT_DATA:
+                    return (
+                        DataStatus.INSUFFICIENT_DATA,
+                        UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW,
+                    )
+                if value is not None:
+                    return DataStatus.AVAILABLE, None
+                if ratio:
+                    return (
+                        DataStatus.NOT_APPLICABLE,
+                        UnavailableReason.NO_RESOLVED_ISSUES,
+                    )
+                return (
+                    DataStatus.INSUFFICIENT_DATA,
+                    UnavailableReason.MISSING_PUBLIC_DATA,
+                )
+
+            current_metric_status, current_reason = issue_reason(current_value, cs)
+            previous_metric_status, previous_reason = issue_reason(previous_value, ps)
             return _comparison(
                 float(current_value) if current_value is not None else None,
                 float(previous_value) if previous_value is not None else None,
                 current_metric_status,
                 previous_metric_status,
+                current_reason=current_reason,
+                previous_reason=previous_reason,
             )
 
         outcome_counts = defaultdict(lambda: {"current": 0, "previous": 0})
@@ -1001,10 +1221,20 @@ class SignalCollector:
                 individual_net_change=_comparison(
                     current_individual, previous_individual,
                     DataStatus.AVAILABLE, point_previous_status,
+                    previous_reason=(
+                        None
+                        if prior
+                        else UnavailableReason.MISSING_PREVIOUS_SNAPSHOT
+                    ),
                 ),
                 enterprise_seat_net_change=_comparison(
                     current_seats, previous_seats,
                     DataStatus.AVAILABLE, point_previous_status,
+                    previous_reason=(
+                        None
+                        if prior
+                        else UnavailableReason.MISSING_PREVIOUS_SNAPSHOT
+                    ),
                 ),
                 by_plan=[
                     PlanCustomerBase(
@@ -1067,11 +1297,21 @@ class SignalCollector:
                     float(negotiation_summary["avg_waiting_days"])
                     if negotiation_summary.get("avg_waiting_days") is not None else None,
                     DataStatus.AVAILABLE if open_threads else DataStatus.NOT_APPLICABLE,
+                    (
+                        None
+                        if open_threads
+                        else UnavailableReason.NO_OPEN_ENTERPRISE_NEGOTIATIONS
+                    ),
                 ),
                 maximum_waiting_days=_observation(
                     int(negotiation_summary["max_waiting_days"])
                     if negotiation_summary.get("max_waiting_days") is not None else None,
                     DataStatus.AVAILABLE if open_threads else DataStatus.NOT_APPLICABLE,
+                    (
+                        None
+                        if open_threads
+                        else UnavailableReason.NO_OPEN_ENTERPRISE_NEGOTIATIONS
+                    ),
                 ),
                 accepted=_comparison(
                     outcome_counts["accepted"]["current"],

@@ -8,7 +8,7 @@ from typing import Any
 
 from .models import Direction, EvidenceCard, Role
 from .signal_catalog import SIGNAL_CATALOG, SignalDefinition
-from .signal_models import AnalysisSignals, DataStatus
+from .signal_models import AnalysisSignals, DataStatus, UnavailableReason
 
 
 _ROLE_PREFIXES = {
@@ -165,7 +165,11 @@ def _walk_signal(
 
 
 def _is_numeric_observation(value: Any) -> bool:
-    return isinstance(value, dict) and set(value) == {"value", "status"}
+    return (
+        isinstance(value, dict)
+        and {"value", "status"}.issubset(value)
+        and set(value).issubset({"value", "status", "reason"})
+    )
 
 
 def _is_metric_comparison(value: Any) -> bool:
@@ -212,9 +216,9 @@ def _format_fact(
 ) -> str:
     context_text = _format_context(context)
     if _is_metric_comparison(value):
-        current = _format_observation(metric, value["current"])
-        previous = _format_observation(metric, value["previous"])
         if value["comparison_status"] == DataStatus.AVAILABLE.value:
+            current = _format_observation(metric, value["current"])
+            previous = _format_observation(metric, value["previous"])
             change = _format_metric_value(
                 metric,
                 value.get("absolute_change"),
@@ -236,12 +240,11 @@ def _format_fact(
                 f"相对变化 {relative_text}，方向为{direction}"
             )
         else:
-            detail = (
-                f"当前值 {current}，前期值 {previous}；比较数据不足，"
-                "不能判断变化方向"
-            )
+            current = _format_observation_fact(metric, value["current"], "本期")
+            previous = _format_observation_fact(metric, value["previous"], "前期")
+            detail = f"{current}；{previous}；不能判断变化方向"
     elif _is_numeric_observation(value):
-        detail = f"当前值 {_format_observation(metric, value)}"
+        detail = _format_observation_fact(metric, value, "当前")
     else:
         detail = f"当前值 {_format_metric_value(metric, value)}"
 
@@ -258,20 +261,42 @@ def _format_context(context: dict[str, Any]) -> str:
     )
 
 
-def _format_observation(metric: str, observation: dict[str, Any]) -> str:
+def _format_observation(_metric: str, observation: dict[str, Any]) -> str:
     status = observation["status"]
     if status == DataStatus.AVAILABLE.value:
         return _format_metric_value(metric, observation["value"])
-    if (
-        status == DataStatus.NOT_APPLICABLE.value
-        and ".churn." in metric
-        and "_rates." in metric
-    ):
-        return "无客户基数"
-    return {
-        DataStatus.INSUFFICIENT_DATA.value: "数据不足",
-        DataStatus.NOT_APPLICABLE.value: "不适用",
-    }[status]
+    return _UNAVAILABLE_REASON_TEXT[UnavailableReason(observation["reason"])]
+
+
+def _format_observation_fact(
+    metric: str,
+    observation: dict[str, Any],
+    period: str,
+) -> str:
+    if observation["status"] == DataStatus.AVAILABLE.value:
+        return f"{period}值 {_format_metric_value(metric, observation['value'])}"
+    reason = _format_observation(metric, observation)
+    action = (
+        "暂不能计算该指标"
+        if observation["status"] == DataStatus.INSUFFICIENT_DATA.value
+        else "该指标不计算"
+    )
+    return f"{period}{reason}，{action}"
+
+
+_UNAVAILABLE_REASON_TEXT = {
+    UnavailableReason.INCOMPLETE_OBSERVATION_WINDOW: "观察窗口尚未完整",
+    UnavailableReason.MISSING_PREVIOUS_SNAPSHOT: "缺少上一期状态快照",
+    UnavailableReason.MISSING_PUBLIC_DATA: "缺少公开经营数据",
+    UnavailableReason.NO_EFFECTIVE_LEADS: "无有效线索",
+    UnavailableReason.NO_RAW_LEADS: "无原始线索",
+    UnavailableReason.NO_OPERATING_REVENUE: "无经营收入",
+    UnavailableReason.NO_RECURRING_NET_BURN: "未形成持续经常性净消耗",
+    UnavailableReason.NO_CUSTOMER_BASE: "无客户基数",
+    UnavailableReason.NO_OPEN_ISSUES: "无未解决工单",
+    UnavailableReason.NO_RESOLVED_ISSUES: "无已解决工单",
+    UnavailableReason.NO_OPEN_ENTERPRISE_NEGOTIATIONS: "无进行中的企业谈判",
+}
 
 
 def _format_metric_value(metric: str, value: Any, *, is_change: bool = False) -> str:
