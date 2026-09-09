@@ -475,7 +475,6 @@ TOOL_DOCS = {
             "tool": "set_capacity_tier",
             "arguments": {"tier": 2}
         },
-        "internal_notes": "Overload = max(0, total_usage / capacity_units - 1). Overload > 0 → p95_ms increases, error_rate increases. Outage_prob_from_overload = 0.1 * overload^2. Outage causes: quality_penalty = -0.05, satisfaction_penalty = -0.1 for all customers, 3-5 new issues generated, possible negative social posts.",
         "sample_io": {
             "success": [
                 {"label": "Set tier 2", "input": {"tier": 2}, "output": "Capacity tier set to 2: 800,000 units/day ($530/day) — 4x H100 reserved cluster"},

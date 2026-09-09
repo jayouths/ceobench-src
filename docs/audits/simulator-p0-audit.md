@@ -83,7 +83,7 @@
 | P0-42 | 宏观社交帖子泄露尚未发布的实时 PMI | Agent 信息边界、预算、定价和获客决策 | 已复核，已修复（定性舆情与正式发布边界测试通过） |
 | P0-43 | 断点恢复后丢失上一周 Dashboard 活动与 Inbox | 恢复一致性、Agent 与 Analysis 输入 | 已复核，已修复（完整周快照持久化测试通过） |
 | P0-44 | 公开工具总表列出 10 个实际上无法调用的工具 | Agent 工具调用、周内分析与决策效率 | 已复核，已修复（废弃接口删除与公开工具一致性测试通过） |
-| P0-45 | 容量工具向 Agent 描述了过时的故障规则 | 容量、运营投入、工单、流失和现金 | 待复核 |
+| P0-45 | 容量工具源码残留过时的内部故障说明 | 无实验影响 | 已排除，非 P0（内部字段未公开，过时内容已删除） |
 | P0-46 | 批量企业报价允许同一客户同时进入多条活动线程 | 企业回复、成交、流失、关系和收入 | 待复核 |
 | P0-47 | 客户影响权重没有进入每日声誉计算 | 声誉、获客、企业席位、服务事件和客群影响力 | 待复核 |
 | P0-48 | 工单生成概率沿用了错误的满意度取值语义 | 工单、运营投入、客户关系、满意度和流失 | 待复核 |
@@ -1381,11 +1381,11 @@ Agent 工作区中的 `docs/tools-reference.md` 明确声称自己是“Complete
 
 Agent 一旦依据“完整工具总表”调用这些能力，就会得到不存在的方法或 `Unknown tool`，浪费模型调用、工具轮次和上下文。对于每日计算，影响不只是命名问题：Agent 会误以为能够把跨周监控逻辑注册进 Dashboard，实际却无法建立该状态，后续周又会因上下文清空而丢失预期分析结果。不同模型对矛盾文档的容错能力不同，也会把接口缺陷误计为模型能力差异。
 
-## 47. P0-45：容量工具向 Agent 描述了过时的故障规则
+## 47. P0-45：容量工具源码残留过时的内部故障说明
 
-### 现状
+### 原始疑点
 
-Agent 通过 `set_capacity_tier` 说明评估容量、运营投入和故障风险。该说明的 `internal_notes` 仍宣称：
+`TOOL_DOCS['set_capacity_tier'].internal_notes` 残留了早期故障公式：
 
 ```text
 outage_prob_from_overload = 0.1 × overload²
@@ -1394,7 +1394,7 @@ outage_prob_from_overload = 0.1 × overload²
 故障固定新增 3–5 个工单
 ```
 
-当前真实规则已是另一套：
+当前模拟器实际规则已经改为：
 
 ```text
 base_with_ops = max(0.001, 0.03 × exp(-operations_spend / 500))
@@ -1403,21 +1403,18 @@ outage_probability = base_with_ops × (1 + 4 × overload)
 新工单按每个有效订阅客户独立抽样，并不是全局固定 3–5 个
 ```
 
-### 证据
+### 复核结论
 
-- `simulation.py::_compute_service_metrics` 使用 `base_outage_prob`、`ops_outage_reduction_scale`、`ops_outage_min_prob` 和 `outage_overload_factor` 计算实际故障概率，不存在 `0.1 × overload²` 公式。
-- `BenchmarkConfig` 的当前默认值分别为 `0.03`、`500`、`0.001` 和 `4.0`。
-- `_update_customer_satisfaction` 使用 `service_outage_weight=0.20` 修改感知质量，并通过 `satisfaction_ema_alpha=0.1` 更新满意度；不是工具说明中两个独立的固定扣分。
-- `_process_issues` 使用客户满意度、故障状态和席位数计算每个客户的工单概率，并将其限制到 `0–0.4`；故障时使用 `issue_outage_factor=0.25`。
-- `TOOL_DOCS['set_capacity_tier'].internal_notes` 仍包含整套旧公式；该内容会生成到 Agent 工作区的 `docs/tools-reference.md`，不是只有开发者能看到的注释。
+- `render_api_docs` 和 `render_tools_reference` 均不会输出 `internal_notes`。
+- `get_tool_descriptions` 与 `get_mcp_tool_definitions` 也只使用公开描述、示例和输入 Schema，不读取 `internal_notes`。
+- 公开 `docs/api/infrastructure.json`、`docs/tools-reference.md` 和 `simulator-instructions.md` 均未出现旧公式；Agent 看到的是当前正确的定性说明，以及“零运营投入约 3%、每日 500 美元运营投入约 1.1%”的故障概率说明。
+- 当前 SDK、CLI 和 API 服务不存在其他读取 `internal_notes` 的入口。
 
-### 影响
+因此，这只是未进入任何实验输入或计算链路的源码残留，不会影响 Agent 决策、模拟世界状态或既有实验结果，不构成 P0。
 
-Agent 无法根据公开规则正确比较“升级容量”与“增加运营投入”的回报，也会错估一次故障对大规模客户存量下工单量的放大效应。这些决策直接改变容量成本、运营成本、工单、流失和最终现金。
+### 已采用处理
 
-### 候选修复方向
-
-不再在工具说明中手写另一套公式。将容量、运营、故障、服务扣分和工单生成口径从同一权威配置生成，并用固定使用量与随机种校验无过载、过载、有/无运营投入下的故障率和工单生成与 Agent 可见口径一致。
+直接删除这条过时的 `internal_notes`，不修改真实故障规则，也不向 Agent 新增精确内部公式。
 
 ## 48. P0-46：批量企业报价可为同一客户创建多条活动线程
 
