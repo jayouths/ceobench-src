@@ -995,7 +995,9 @@ def get_qualities_for_all_plans(
 def get_qualities_for_all_plans_batch(
     conn: sqlite3.Connection,
     customer_ids: List[int],
-    config: BenchmarkConfig
+    config: BenchmarkConfig,
+    *,
+    current_day: int,
 ) -> Dict[int, Dict[str, float]]:
     """Batch-fetch perceived quality for all plans for multiple customers.
 
@@ -1037,9 +1039,7 @@ def get_qualities_for_all_plans_batch(
         gid = row['key'][len('q_group_bonus_'):]
         q_group_bonus[gid] = float(row['value'])
 
-    # Get current day for stickiness calculation
-    day_row = conn.execute("SELECT value FROM global_state WHERE key = 'current_day'").fetchone()
-    current_day = int(float(day_row['value'])) if day_row else 0
+    # 日期由模拟器显式传入，避免从未维护的数据库键误读为 Day 0。
     weekly_usage_mult = WEEKLY_MULTIPLIERS[current_day % 7]
 
     # Batch-fetch customer data (relationship, open_issue_days, subscription start_day, etc.)

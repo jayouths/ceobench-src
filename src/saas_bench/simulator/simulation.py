@@ -6069,7 +6069,12 @@ Guidelines:
 
         # Batch-fetch qualities for all customers (1 query instead of 3*N)
         customer_ids = [s.customer_id for s in states_map.values()]
-        qualities_map = get_qualities_for_all_plans_batch(self.conn, customer_ids, self.config)
+        qualities_map = get_qualities_for_all_plans_batch(
+            self.conn,
+            customer_ids,
+            self.config,
+            current_day=self.current_day,
+        )
 
         # Batch-fetch last agent turns for all threads (1 query per chunk).
         # Chunked so we don't trip SQLITE_MAX_VARIABLE_NUMBER when many threads

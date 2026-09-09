@@ -1,6 +1,7 @@
 """企业报价工具契约回归测试。"""
 
 import json
+import math
 
 import pytest
 
@@ -111,7 +112,9 @@ def test_new_enterprise_lead_uses_expected_demand_for_plan_qualities(
         """
     )
 
-    qualities = get_qualities_for_all_plans_batch(conn, [customer_id], config)
+    qualities = get_qualities_for_all_plans_batch(
+        conn, [customer_id], config, current_day=0
+    )
 
     # 预计需求为 10 单位/席位 × 20 席位 = 200，三档配额因子为 0、0.5、1。
     assert qualities[customer_id] == pytest.approx(
@@ -138,11 +141,67 @@ def test_existing_enterprise_customer_uses_sampled_usage_for_plan_qualities(
         """
     )
 
-    qualities = get_qualities_for_all_plans_batch(conn, [customer_id], config)
+    qualities = get_qualities_for_all_plans_batch(
+        conn, [customer_id], config, current_day=0
+    )
 
     # Day 0 的每周倍率为 1；真实需求 50 应得到 0、0.5、1 三档配额因子。
     assert qualities[customer_id] == pytest.approx(
         {"A": 0.0, "B": 0.1, "C": 0.2}
+    )
+
+
+def test_enterprise_plan_qualities_include_current_tenure(make_initialized_sim):
+    """企业报价评估应按当前日期计入客户黏性加成。"""
+    conn, _, config = make_initialized_sim(seed=42)
+    customer_id, _ = _create_active_enterprise_thread(conn)
+    conn.execute(
+        """
+        UPDATE config_history
+        SET tier_A = 4, quota_A = 100000
+        WHERE day = 0
+        """
+    )
+
+    qualities = get_qualities_for_all_plans_batch(
+        conn, [customer_id], config, current_day=90
+    )
+
+    expected_stickiness = config.stickiness_log_scale * math.log(4)
+    assert qualities[customer_id]["A"] == pytest.approx(
+        config.base_product_quality + expected_stickiness
+    )
+
+
+def test_enterprise_plan_qualities_use_current_weekday_multiplier(
+    make_initialized_sim,
+):
+    """企业报价评估应使用当天的每周用量倍率。"""
+    conn, _, config = make_initialized_sim(seed=42)
+    customer_id, _ = _create_active_enterprise_thread(conn)
+    conn.execute(
+        """
+        UPDATE subscriptions
+        SET start_day = 2, daily_usage_rate = 100
+        WHERE customer_id = ?
+        """,
+        (customer_id,),
+    )
+    conn.execute(
+        """
+        UPDATE config_history
+        SET tier_A = 4, quota_A = 100
+        WHERE day = 0
+        """
+    )
+
+    qualities = get_qualities_for_all_plans_batch(
+        conn, [customer_id], config, current_day=2
+    )
+
+    # Day 2 的用量倍率为 1.15，100 配额只能覆盖 100/115 的需求。
+    assert qualities[customer_id]["A"] == pytest.approx(
+        config.base_product_quality * (100 / 115)
     )
 
 
@@ -378,7 +437,7 @@ def test_existing_enterprise_evaluates_offer_at_promoted_price(
     monkeypatch.setattr(
         enterprise_module,
         "get_qualities_for_all_plans_batch",
-        lambda _conn, customer_ids, _config: {
+        lambda _conn, customer_ids, _config, *, current_day: {
             customer_id: {"A": 0.5, "B": 0.5, "C": 0.5}
             for customer_id in customer_ids
         },
@@ -444,7 +503,7 @@ def test_enterprise_lead_uses_snapshotted_promotion_for_first_period(
     monkeypatch.setattr(
         enterprise_module,
         "get_qualities_for_all_plans_batch",
-        lambda _conn, customer_ids, _config: {
+        lambda _conn, customer_ids, _config, *, current_day: {
             customer_id: {"A": 0.5, "B": 0.5, "C": 0.5}
             for customer_id in customer_ids
         },
