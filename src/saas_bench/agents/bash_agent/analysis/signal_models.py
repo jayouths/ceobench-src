@@ -283,12 +283,29 @@ class NewPaidSubscriptions(SignalModel):
     enterprise_seats: MetricComparison
 
 
+class CancellationSignals(SignalModel):
+    individual_accounts: MetricComparison
+    enterprise_accounts: MetricComparison
+    enterprise_seats: MetricComparison
+
+
+class PlanChangeSignals(SignalModel):
+    individual_accounts: MetricComparison
+    enterprise_accounts: MetricComparison
+
+
+class ChurnRateSignals(SignalModel):
+    individual_accounts: NumericObservation
+    enterprise_accounts: NumericObservation
+    enterprise_seats: NumericObservation
+
+
 class ChurnSignals(SignalModel):
-    cancellations: MetricComparison
-    upgrades: MetricComparison
-    downgrades: MetricComparison
-    weekly_account_churn_rate: NumericObservation
-    trailing_28d_account_churn_rate: NumericObservation
+    cancellations: CancellationSignals
+    upgrades: PlanChangeSignals
+    downgrades: PlanChangeSignals
+    weekly_rates: ChurnRateSignals
+    trailing_28d_rates: ChurnRateSignals
 
 
 class IssueSignals(SignalModel):

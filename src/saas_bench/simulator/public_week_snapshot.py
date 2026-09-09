@@ -16,8 +16,22 @@ from .simulation import DayResult
 class CurrentBusinessState:
     cash: float
     individual_subscribers: int
+    enterprise_subscribed_accounts: int
     enterprise_subscribed_seats: int
     open_issues: int
+
+
+@dataclass(frozen=True)
+class CancellationActivity:
+    individual_accounts: int
+    enterprise_accounts: int
+    enterprise_seats: int
+
+
+@dataclass(frozen=True)
+class PlanChangeActivity:
+    individual_accounts: int
+    enterprise_accounts: int
 
 
 @dataclass(frozen=True)
@@ -26,10 +40,11 @@ class WeeklyActivity:
     new_individual_leads: int
     new_enterprise_leads: int
     new_individual_subscribers: int
+    new_enterprise_subscribed_accounts: int
     new_enterprise_subscribed_seats: int
-    cancellations: int
-    upgrades: int
-    downgrades: int
+    cancellations: CancellationActivity
+    upgrades: PlanChangeActivity
+    downgrades: PlanChangeActivity
     peak_overload: float
     outage: bool
     downtime_minutes: int
@@ -100,10 +115,11 @@ class PublicWeekSnapshot:
 def _get_subscriber_counts(
     conn: sqlite3.Connection,
     day_result: DayResult | None,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     if day_result is not None:
         return (
             day_result.total_individual_subscribers,
+            day_result.total_enterprise_subscribers,
             day_result.total_enterprise_subscription_seats,
         )
 
@@ -114,13 +130,14 @@ def _get_subscriber_counts(
         WHERE s.status = 'subscribed' AND s.end_day IS NULL
           AND c.customer_type = 'small'
     """).fetchone()[0]
-    enterprise_seats = conn.execute("""
-        SELECT COALESCE(SUM(s.seat_count), 0) FROM subscriptions s
+    enterprise = conn.execute("""
+        SELECT COUNT(*) AS accounts, COALESCE(SUM(s.seat_count), 0) AS seats
+        FROM subscriptions s
         JOIN customers c ON s.customer_id = c.customer_id
         WHERE s.status = 'subscribed' AND s.end_day IS NULL
           AND c.customer_type = 'large'
-    """).fetchone()[0]
-    return individual_subscribers, enterprise_seats
+    """).fetchone()
+    return individual_subscribers, int(enterprise["accounts"]), int(enterprise["seats"])
 
 
 def _build_weekly_activity(day_result: DayResult | None) -> WeeklyActivity | None:
@@ -131,10 +148,21 @@ def _build_weekly_activity(day_result: DayResult | None) -> WeeklyActivity | Non
         new_individual_leads=day_result.new_individual_leads,
         new_enterprise_leads=day_result.new_enterprise_leads,
         new_individual_subscribers=day_result.new_individual_subscribers,
+        new_enterprise_subscribed_accounts=day_result.new_enterprise_subscriber_accounts,
         new_enterprise_subscribed_seats=day_result.new_enterprise_subscribers_seats,
-        cancellations=day_result.cancellations,
-        upgrades=day_result.upgrades,
-        downgrades=day_result.downgrades,
+        cancellations=CancellationActivity(
+            individual_accounts=day_result.individual_cancellations,
+            enterprise_accounts=day_result.enterprise_cancellations,
+            enterprise_seats=day_result.enterprise_cancelled_seats,
+        ),
+        upgrades=PlanChangeActivity(
+            individual_accounts=day_result.individual_upgrades,
+            enterprise_accounts=day_result.enterprise_upgrades,
+        ),
+        downgrades=PlanChangeActivity(
+            individual_accounts=day_result.individual_downgrades,
+            enterprise_accounts=day_result.enterprise_downgrades,
+        ),
         peak_overload=day_result.overload,
         outage=day_result.outage,
         downtime_minutes=day_result.downtime_minutes,
@@ -245,7 +273,7 @@ def build_public_week_snapshot(
     """只组装公开经营事实，不负责文本展示或 Analysis 推理。"""
 
     config = _build_configuration(get_config(conn, day) or {})
-    individual_subscribers, enterprise_seats = _get_subscriber_counts(
+    individual_subscribers, enterprise_accounts, enterprise_seats = _get_subscriber_counts(
         conn, day_result
     )
     open_issues = conn.execute("""
@@ -262,6 +290,7 @@ def build_public_week_snapshot(
         current_state=CurrentBusinessState(
             cash=get_cash(conn),
             individual_subscribers=individual_subscribers,
+            enterprise_subscribed_accounts=enterprise_accounts,
             enterprise_subscribed_seats=enterprise_seats,
             open_issues=open_issues,
         ),
@@ -285,6 +314,7 @@ def render_weekly_dashboard(snapshot: PublicWeekSnapshot) -> str:
         "",
         f"Cash: ${state.cash:,.0f}",
         f"Individual Subscribers: {state.individual_subscribers}",
+        f"Enterprise Subscribed Accounts: {state.enterprise_subscribed_accounts}",
         f"Enterprise Subscribed Seats: {state.enterprise_subscribed_seats}",
         f"Open Issues: {state.open_issues}",
     ]
@@ -296,9 +326,9 @@ def render_weekly_dashboard(snapshot: PublicWeekSnapshot) -> str:
             "--- This Week's Metrics ---",
             f"Usage: {activity.usage_units:,} units",
             f"New Individual Leads: {activity.new_individual_leads} | New Enterprise Leads: {activity.new_enterprise_leads}",
-            f"New Individual Subscribers: {activity.new_individual_subscribers} | New Enterprise Subscribed Seats: {activity.new_enterprise_subscribed_seats}",
-            f"Cancellations: {activity.cancellations}",
-            f"Upgrades: {activity.upgrades} | Downgrades: {activity.downgrades}",
+            f"New Individual Subscribers: {activity.new_individual_subscribers} | New Enterprise Subscribers: {activity.new_enterprise_subscribed_accounts} accounts / {activity.new_enterprise_subscribed_seats} seats",
+            f"Cancellations: Individual={activity.cancellations.individual_accounts} | Enterprise={activity.cancellations.enterprise_accounts} accounts / {activity.cancellations.enterprise_seats} seats",
+            f"Plan Changes: Individual Up={activity.upgrades.individual_accounts}, Down={activity.downgrades.individual_accounts} | Enterprise Up={activity.upgrades.enterprise_accounts}, Down={activity.downgrades.enterprise_accounts}",
             f"Overload (peak): {activity.peak_overload:.1%}" if activity.peak_overload > 0 else "Overload: None",
             f"Outage: {'YES (' + str(activity.downtime_minutes) + ' min total)' if activity.outage else 'No'}",
             f"P95 Latency (peak): {activity.peak_p95_ms:.0f}ms | Error Rate (peak): {activity.peak_error_rate:.2%}",

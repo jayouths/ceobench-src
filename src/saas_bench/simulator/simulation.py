@@ -81,6 +81,11 @@ from .database import (
     get_all_group_parameters, get_global_drift, update_global_drift,
 )
 from ._sql_chunk import chunked_select, chunked_execute
+from .subscription_activity import (
+    consume_weekly_subscription_activity,
+    latest_subscription_activity_event_id,
+    subscription_activity_after,
+)
 from ..experiment.llm_provider import MissingModelPricingError
 from ..evaluation.fact_recorder import (
     PlanQualityFact,
@@ -132,9 +137,13 @@ class DayResult:
     error_rate: float
     new_subscribers: int  # DEPRECATED: includes enterprise leads incorrectly. Use new_individual_subscribers instead.
     new_leads: int  # Total leads generated (all customers who arrived, including lost)
-    cancellations: int
-    upgrades: int
-    downgrades: int
+    individual_cancellations: int
+    enterprise_cancellations: int
+    enterprise_cancelled_seats: int
+    individual_upgrades: int
+    enterprise_upgrades: int
+    individual_downgrades: int
+    enterprise_downgrades: int
     payments_received: float
     total_costs: float
     cash: float
@@ -145,8 +154,10 @@ class DayResult:
     new_individual_leads: int = 0  # Individual customers who arrived today (subscribed + lost)
     new_enterprise_leads: int = 0  # Enterprise customers who arrived as leads today
     new_individual_subscribers: int = 0  # Individual customers who actually subscribed today
+    new_enterprise_subscriber_accounts: int = 0  # Enterprise deals converted today
     new_enterprise_subscribers_seats: int = 0  # Total seats from enterprise deals that converted to subscribed today
     total_individual_subscribers: int = 0  # Current total individual subscribers
+    total_enterprise_subscribers: int = 0  # Current total enterprise subscriber accounts
     total_enterprise_subscription_seats: int = 0  # Current total enterprise seats subscribed
 
 
@@ -7244,9 +7255,13 @@ Guidelines:
                     error_rate=day_result.error_rate,
                     new_subscribers=day_result.new_subscribers,
                     new_leads=day_result.new_leads,
-                    cancellations=day_result.cancellations,
-                    upgrades=day_result.upgrades,
-                    downgrades=day_result.downgrades,
+                    individual_cancellations=day_result.individual_cancellations,
+                    enterprise_cancellations=day_result.enterprise_cancellations,
+                    enterprise_cancelled_seats=day_result.enterprise_cancelled_seats,
+                    individual_upgrades=day_result.individual_upgrades,
+                    enterprise_upgrades=day_result.enterprise_upgrades,
+                    individual_downgrades=day_result.individual_downgrades,
+                    enterprise_downgrades=day_result.enterprise_downgrades,
                     payments_received=day_result.payments_received,
                     total_costs=day_result.total_costs,
                     cash=day_result.cash,
@@ -7254,8 +7269,10 @@ Guidelines:
                     new_individual_leads=day_result.new_individual_leads,
                     new_enterprise_leads=day_result.new_enterprise_leads,
                     new_individual_subscribers=day_result.new_individual_subscribers,
+                    new_enterprise_subscriber_accounts=day_result.new_enterprise_subscriber_accounts,
                     new_enterprise_subscribers_seats=day_result.new_enterprise_subscribers_seats,
                     total_individual_subscribers=day_result.total_individual_subscribers,
+                    total_enterprise_subscribers=day_result.total_enterprise_subscribers,
                     total_enterprise_subscription_seats=day_result.total_enterprise_subscription_seats,
                 )
             else:
@@ -7263,14 +7280,19 @@ Guidelines:
                 accumulated.total_usage += day_result.total_usage
                 accumulated.new_subscribers += day_result.new_subscribers
                 accumulated.new_leads += day_result.new_leads
-                accumulated.cancellations += day_result.cancellations
-                accumulated.upgrades += day_result.upgrades
-                accumulated.downgrades += day_result.downgrades
+                accumulated.individual_cancellations += day_result.individual_cancellations
+                accumulated.enterprise_cancellations += day_result.enterprise_cancellations
+                accumulated.enterprise_cancelled_seats += day_result.enterprise_cancelled_seats
+                accumulated.individual_upgrades += day_result.individual_upgrades
+                accumulated.enterprise_upgrades += day_result.enterprise_upgrades
+                accumulated.individual_downgrades += day_result.individual_downgrades
+                accumulated.enterprise_downgrades += day_result.enterprise_downgrades
                 accumulated.payments_received += day_result.payments_received
                 accumulated.total_costs += day_result.total_costs
                 accumulated.new_individual_leads += day_result.new_individual_leads
                 accumulated.new_enterprise_leads += day_result.new_enterprise_leads
                 accumulated.new_individual_subscribers += day_result.new_individual_subscribers
+                accumulated.new_enterprise_subscriber_accounts += day_result.new_enterprise_subscriber_accounts
                 accumulated.new_enterprise_subscribers_seats += day_result.new_enterprise_subscribers_seats
 
                 # Snapshot fields — take from last day
@@ -7278,6 +7300,7 @@ Guidelines:
                 accumulated.cash = day_result.cash
                 accumulated.mrr = day_result.mrr
                 accumulated.total_individual_subscribers = day_result.total_individual_subscribers
+                accumulated.total_enterprise_subscribers = day_result.total_enterprise_subscribers
                 accumulated.total_enterprise_subscription_seats = day_result.total_enterprise_subscription_seats
 
                 # Service metrics — take worst case across the week
@@ -7291,6 +7314,18 @@ Guidelines:
         # Reset suppression flag
         self._suppress_customer_posts = False
 
+        # 周报以持久化事件游标为边界，因此上周报表后的 Agent
+        # 动作与本周模拟器状态变化都不会遗漏或重复。
+        weekly_subscription_activity = consume_weekly_subscription_activity(self.conn)
+        accumulated.individual_cancellations = weekly_subscription_activity.individual_cancellations
+        accumulated.enterprise_cancellations = weekly_subscription_activity.enterprise_cancellations
+        accumulated.enterprise_cancelled_seats = weekly_subscription_activity.enterprise_cancelled_seats
+        accumulated.individual_upgrades = weekly_subscription_activity.individual_upgrades
+        accumulated.enterprise_upgrades = weekly_subscription_activity.enterprise_upgrades
+        accumulated.individual_downgrades = weekly_subscription_activity.individual_downgrades
+        accumulated.enterprise_downgrades = weekly_subscription_activity.enterprise_downgrades
+        self.conn.commit()
+
         _week_total = _time.monotonic() - _week_start
         if _week_total > 30.0:
             import sys
@@ -7303,6 +7338,7 @@ Guidelines:
         import time as _time
         _step_start = _time.monotonic()
         _timings = {}
+        activity_start_event_id = latest_subscription_activity_event_id(self.conn)
 
         # Lazy initialization for _group_rngs (handles resume from checkpoint)
         if not hasattr(self, '_group_rngs'):
@@ -7469,20 +7505,22 @@ Guidelines:
               AND c.customer_type = 'small'
         """).fetchone()[0]
 
-        total_enterprise_seats = self.conn.execute("""
-            SELECT COALESCE(SUM(s.seat_count), 0) FROM subscriptions s
+        total_enterprise = self.conn.execute("""
+            SELECT COUNT(*) AS accounts, COALESCE(SUM(s.seat_count), 0) AS seats
+            FROM subscriptions s
             JOIN customers c ON s.customer_id = c.customer_id
             WHERE s.status = 'subscribed' AND s.end_day IS NULL
               AND c.customer_type = 'large'
-        """).fetchone()[0]
+        """).fetchone()
 
         # Count enterprise deals that converted to subscribed today
-        new_enterprise_seats_today = self.conn.execute("""
-            SELECT COALESCE(SUM(s.seat_count), 0) FROM subscriptions s
+        new_enterprise_today = self.conn.execute("""
+            SELECT COUNT(*) AS accounts, COALESCE(SUM(s.seat_count), 0) AS seats
+            FROM subscriptions s
             JOIN customers c ON s.customer_id = c.customer_id
             WHERE s.status = 'subscribed' AND s.start_day = ?
               AND c.customer_type = 'large'
-        """, (self.current_day,)).fetchone()[0]
+        """, (self.current_day,)).fetchone()
 
         # 经营事实由 evaluation 层统一落表；模拟器只提供准确的日末触发时点。
         record_evaluation_day(
@@ -7503,6 +7541,11 @@ Guidelines:
 
         # Save RNG states for deterministic resume
         self.save_rng_states()
+
+        daily_subscription_activity = subscription_activity_after(
+            self.conn,
+            activity_start_event_id,
+        )
 
         self.conn.commit()
 
@@ -7527,12 +7570,18 @@ Guidelines:
             new_individual_leads=gen_result['new_individual_leads'],
             new_enterprise_leads=gen_result['new_enterprise_leads'],
             new_individual_subscribers=gen_result['new_individual_subscribers'],
-            new_enterprise_subscribers_seats=new_enterprise_seats_today,
+            new_enterprise_subscriber_accounts=int(new_enterprise_today['accounts']),
+            new_enterprise_subscribers_seats=int(new_enterprise_today['seats']),
             total_individual_subscribers=total_individual_subs,
-            total_enterprise_subscription_seats=total_enterprise_seats,
-            cancellations=cancellations,
-            upgrades=upgrades,
-            downgrades=downgrades,
+            total_enterprise_subscribers=int(total_enterprise['accounts']),
+            total_enterprise_subscription_seats=int(total_enterprise['seats']),
+            individual_cancellations=daily_subscription_activity.individual_cancellations,
+            enterprise_cancellations=daily_subscription_activity.enterprise_cancellations,
+            enterprise_cancelled_seats=daily_subscription_activity.enterprise_cancelled_seats,
+            individual_upgrades=daily_subscription_activity.individual_upgrades,
+            enterprise_upgrades=daily_subscription_activity.enterprise_upgrades,
+            individual_downgrades=daily_subscription_activity.individual_downgrades,
+            enterprise_downgrades=daily_subscription_activity.enterprise_downgrades,
             payments_received=payments,
             total_costs=costs,
             cash=cash,

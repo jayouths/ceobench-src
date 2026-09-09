@@ -1020,6 +1020,68 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS idx_predictions_submit_day ON predictions(submit_day);
         CREATE INDEX IF NOT EXISTS idx_predictions_metric ON predictions(metric, horizon_days);
+
+        -- Dashboard 需要汇总所有订阅入口产生的取消和套餐变更。
+        -- 事件明细属于模拟器内部状态，普通 Agent 只能看到周度汇总。
+        CREATE TABLE IF NOT EXISTS _subscription_activity_event (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            day INTEGER NOT NULL,
+            subscription_id INTEGER NOT NULL,
+            customer_type TEXT NOT NULL CHECK(customer_type IN ('small', 'large')),
+            event_type TEXT NOT NULL CHECK(event_type IN ('cancelled', 'upgraded', 'downgraded')),
+            seats INTEGER NOT NULL CHECK(seats >= 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_subscription_activity_event_day
+            ON _subscription_activity_event(day);
+
+        -- 游标记录上一份周报已消费到的事件，使周边界后执行的
+        -- Agent 动作能进入下一周，且断点恢复后不会重复统计。
+        CREATE TABLE IF NOT EXISTS _subscription_activity_cursor (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            last_event_id INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO _subscription_activity_cursor (id, last_event_id)
+        VALUES (1, 0);
+
+        CREATE TRIGGER IF NOT EXISTS _subscription_activity_cancelled
+        AFTER UPDATE OF status ON subscriptions
+        WHEN OLD.status = 'subscribed' AND NEW.status <> 'subscribed'
+        BEGIN
+            INSERT INTO _subscription_activity_event (
+                day, subscription_id, customer_type, event_type, seats
+            )
+            SELECT
+                COALESCE((SELECT MAX(day) FROM service_day), NEW.end_day, NEW.start_day),
+                NEW.subscription_id,
+                c.customer_type,
+                'cancelled',
+                CASE WHEN c.customer_type = 'large' THEN OLD.seat_count ELSE 1 END
+            FROM customers AS c
+            WHERE c.customer_id = NEW.customer_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS _subscription_activity_plan_changed
+        AFTER UPDATE OF plan ON subscriptions
+        WHEN OLD.status = 'subscribed'
+         AND NEW.status = 'subscribed'
+         AND OLD.plan <> NEW.plan
+        BEGIN
+            INSERT INTO _subscription_activity_event (
+                day, subscription_id, customer_type, event_type, seats
+            )
+            SELECT
+                COALESCE((SELECT MAX(day) FROM service_day), NEW.start_day),
+                NEW.subscription_id,
+                c.customer_type,
+                CASE
+                    WHEN instr('ABC', NEW.plan) > instr('ABC', OLD.plan)
+                    THEN 'upgraded'
+                    ELSE 'downgraded'
+                END,
+                CASE WHEN c.customer_type = 'large' THEN NEW.seat_count ELSE 1 END
+            FROM customers AS c
+            WHERE c.customer_id = NEW.customer_id;
+        END;
     """)
 
     initialize_evaluation_schema(conn)

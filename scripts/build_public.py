@@ -56,6 +56,7 @@ _ENGINE_MODULES = [
     "simulator/public_week_snapshot",
     "simulator/shocks",
     "simulator/simulation",
+    "simulator/subscription_activity",
     "simulator/tools",
     "runtime/__init__",
     "runtime/_embedded_key",

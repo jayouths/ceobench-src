@@ -2,6 +2,7 @@
 
 from saas_bench.agents.bash_agent.analysis.evidence_cards import (
     _format_metric_value,
+    _format_observation,
     build_evidence_cards,
     state_core_evidence_ids,
 )
@@ -100,3 +101,10 @@ def test_metric_values_include_unambiguous_units():
     assert _format_metric_value("product.reliability.peak_p95_ms", 236.45) == (
         "236.45 毫秒"
     )
+
+
+def test_churn_rate_without_customer_base_has_specific_status_text():
+    assert _format_observation(
+        "customer.churn.weekly_rates.enterprise_accounts",
+        {"value": None, "status": "not_applicable"},
+    ) == "无客户基数"

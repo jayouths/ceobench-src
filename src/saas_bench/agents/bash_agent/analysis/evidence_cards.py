@@ -72,8 +72,12 @@ _STATE_CORE_METRICS = {
         "customer.customer_base.active_enterprise_seats",
         "customer.customer_base.individual_net_change",
         "customer.customer_base.enterprise_seat_net_change",
-        "customer.churn.weekly_account_churn_rate",
-        "customer.churn.trailing_28d_account_churn_rate",
+        "customer.churn.weekly_rates.individual_accounts",
+        "customer.churn.weekly_rates.enterprise_accounts",
+        "customer.churn.weekly_rates.enterprise_seats",
+        "customer.churn.trailing_28d_rates.individual_accounts",
+        "customer.churn.trailing_28d_rates.enterprise_accounts",
+        "customer.churn.trailing_28d_rates.enterprise_seats",
         "customer.issues.open_issues",
         "customer.issues.open_over_7_days",
         "customer.issues.average_resolution_days",
@@ -258,6 +262,12 @@ def _format_observation(metric: str, observation: dict[str, Any]) -> str:
     status = observation["status"]
     if status == DataStatus.AVAILABLE.value:
         return _format_metric_value(metric, observation["value"])
+    if (
+        status == DataStatus.NOT_APPLICABLE.value
+        and ".churn." in metric
+        and "_rates." in metric
+    ):
+        return "无客户基数"
     return {
         DataStatus.INSUFFICIENT_DATA.value: "数据不足",
         DataStatus.NOT_APPLICABLE.value: "不适用",

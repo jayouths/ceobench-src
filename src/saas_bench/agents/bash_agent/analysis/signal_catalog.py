@@ -132,9 +132,9 @@ SIGNAL_CATALOG = {
         "最近7天与前7天",
     ),
     "customer.churn": SignalDefinition(
-        "取消、升降级及账户流失率",
+        "个人与企业取消、升降级及分类流失率",
         ("public_week_snapshot.weekly_activity", "历史 signals.json"),
-        "周流失率=本周取消/周初活跃账户；28天口径累计四周取消",
+        "分类流失率=窗口内取消/(窗口初存量+窗口内新增)；企业同时按账户和席位计算",
         "最近7天、前7天与最近28天",
     ),
     "customer.issues": SignalDefinition(

@@ -16,6 +16,7 @@ def test_initial_dashboard_is_rendered_from_public_snapshot(make_initialized_sim
     assert snapshot.to_dict()["current_state"] == {
         "cash": 1_000_000.0,
         "individual_subscribers": 0,
+        "enterprise_subscribed_accounts": 0,
         "enterprise_subscribed_seats": 0,
         "open_issues": 0,
     }
@@ -24,6 +25,7 @@ def test_initial_dashboard_is_rendered_from_public_snapshot(make_initialized_sim
 
 Cash: $1,000,000
 Individual Subscribers: 0
+Enterprise Subscribed Accounts: 0
 Enterprise Subscribed Seats: 0
 Open Issues: 0
 
@@ -59,9 +61,13 @@ def test_weekly_activity_has_one_structured_source(make_initialized_sim):
         error_rate=0.004,
         new_subscribers=5,
         new_leads=299,
-        cancellations=2,
-        upgrades=1,
-        downgrades=3,
+        individual_cancellations=2,
+        enterprise_cancellations=1,
+        enterprise_cancelled_seats=12,
+        individual_upgrades=1,
+        enterprise_upgrades=2,
+        individual_downgrades=3,
+        enterprise_downgrades=4,
         payments_received=0,
         total_costs=0,
         cash=1_000_000,
@@ -69,8 +75,10 @@ def test_weekly_activity_has_one_structured_source(make_initialized_sim):
         new_individual_leads=296,
         new_enterprise_leads=3,
         new_individual_subscribers=5,
+        new_enterprise_subscriber_accounts=1,
         new_enterprise_subscribers_seats=20,
         total_individual_subscribers=5,
+        total_enterprise_subscribers=1,
         total_enterprise_subscription_seats=20,
     )
 
@@ -84,12 +92,16 @@ def test_weekly_activity_has_one_structured_source(make_initialized_sim):
     dashboard = render_weekly_dashboard(snapshot)
 
     assert snapshot.weekly_activity is not None
+    assert snapshot.weekly_activity.cancellations.enterprise_accounts == 1
+    assert snapshot.weekly_activity.cancellations.enterprise_seats == 12
     assert snapshot.weekly_activity.new_enterprise_subscribed_seats == 20
     assert snapshot.weekly_calculations == {"forecast": "x" * 500}
     assert snapshot.inbox_items == ["3 new enterprise leads"]
     assert "Usage: 1,080 units" in dashboard
     assert "New Individual Leads: 296 | New Enterprise Leads: 3" in dashboard
-    assert "New Individual Subscribers: 5 | New Enterprise Subscribed Seats: 20" in dashboard
+    assert "New Individual Subscribers: 5 | New Enterprise Subscribers: 1 accounts / 20 seats" in dashboard
+    assert "Cancellations: Individual=2 | Enterprise=1 accounts / 12 seats" in dashboard
+    assert "Plan Changes: Individual Up=1, Down=3 | Enterprise Up=2, Down=4" in dashboard
     assert "Overload (peak): 12.5%" in dashboard
     assert "Outage: YES (15 min total)" in dashboard
     assert "[forecast]\n" + "x" * 500 in dashboard

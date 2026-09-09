@@ -17,9 +17,11 @@ from .signal_models import (
     AnalysisSignals,
     AnalysisWindows,
     CapacitySignals,
+    CancellationSignals,
     ChangeDirection,
     ChannelGroupEfficiency,
     ChurnSignals,
+    ChurnRateSignals,
     CostSignals,
     CustomerBase,
     CustomerSignals,
@@ -39,6 +41,7 @@ from .signal_models import (
     PaidAcquisition,
     PaidEfficiency,
     PlanConfigurationSignals,
+    PlanChangeSignals,
     PlanCustomerBase,
     ProductConfigurationSignals,
     ProductSignals,
@@ -195,6 +198,7 @@ class SignalCollector:
         day = snapshot.day
         windows = build_analysis_windows(day)
         start_14d = max(1, day - 13)
+        start_28d = max(1, day - 27)
 
         # SQL 集中定义在 signal_queries；这里一次读取四个角色需要的公开事实，
         # 后续构建阶段只做确定性计算，不再访问数据库。
@@ -225,7 +229,7 @@ class SignalCollector:
         research_rows = self.query(signal_queries.RESEARCH_PROJECTS)
         customer_base_rows = self.query(signal_queries.CUSTOMER_BASE)
         paid_subscription_rows = (
-            self.query(signal_queries.paid_subscriptions(start_14d, day)) if day else []
+            self.query(signal_queries.paid_subscriptions(start_28d, day)) if day else []
         )
         issue_rows = self._query_issues(windows)
         negotiation_summary = self._query_negotiation_summary(day)
@@ -811,7 +815,6 @@ class SignalCollector:
         negotiation_outcomes: list[dict[str, Any]],
     ) -> CustomerSignals:
         plan_values = {plan: {"individual": 0, "enterprise": 0, "seats": 0} for plan in "ABC"}
-        enterprise_accounts = 0
         for row in customer_base_rows:
             plan = str(row["plan"])
             if plan not in plan_values:
@@ -823,16 +826,19 @@ class SignalCollector:
                 seats = int(row["seats"] or 0)
                 plan_values[plan]["enterprise"] += accounts
                 plan_values[plan]["seats"] += seats
-                enterprise_accounts += accounts
 
         prior = history.get(snapshot.day - 7)
         current_individual = snapshot.current_state.individual_subscribers
+        current_enterprise = snapshot.current_state.enterprise_subscribed_accounts
         current_seats = snapshot.current_state.enterprise_subscribed_seats
         previous_individual = (
             prior.customer.customer_base.active_individual_accounts.value if prior else None
         )
         previous_seats = (
             prior.customer.customer_base.active_enterprise_seats.value if prior else None
+        )
+        previous_enterprise = (
+            prior.customer.customer_base.active_enterprise_accounts.value if prior else None
         )
         point_previous_status = DataStatus.AVAILABLE if prior else DataStatus.INSUFFICIENT_DATA
 
@@ -849,58 +855,107 @@ class SignalCollector:
         activity = snapshot.weekly_activity
         previous_activity = prior.public_week_snapshot.weekly_activity if prior else None
 
-        def activity_pair(field: str) -> MetricComparison:
+        def activity_pair(section: str, field: str) -> MetricComparison:
+            current_section = getattr(activity, section) if activity else None
+            previous_section = (
+                getattr(previous_activity, section) if previous_activity else None
+            )
             return _comparison(
-                getattr(activity, field) if activity else None,
-                getattr(previous_activity, field) if previous_activity else None,
+                getattr(current_section, field) if current_section else None,
+                getattr(previous_section, field) if previous_section else None,
                 cs if activity else DataStatus.INSUFFICIENT_DATA,
                 ps if previous_activity else DataStatus.INSUFFICIENT_DATA,
             )
 
-        cancellations = activity_pair("cancellations")
-        week_start = prior.customer.customer_base if prior else None
-        starting_accounts = None
-        if week_start:
-            starting_accounts = (
-                (week_start.active_individual_accounts.value or 0)
-                + (week_start.active_enterprise_accounts.value or 0)
-            )
-        weekly_churn_status = (
-            DataStatus.AVAILABLE
-            if activity and starting_accounts and starting_accounts > 0
-            else DataStatus.NOT_APPLICABLE if activity and starting_accounts == 0
-            else DataStatus.INSUFFICIENT_DATA
-        )
-        weekly_churn = (
-            activity.cancellations / starting_accounts
-            if weekly_churn_status is DataStatus.AVAILABLE else None
+        def churn_rate(
+            cancelled: int | None,
+            opening: int | float | None,
+            started: int,
+            window_status: DataStatus,
+        ) -> NumericObservation:
+            """分母使用窗口初存量加窗口内新增，与离线评测口径一致。"""
+            if (
+                window_status is not DataStatus.AVAILABLE
+                or cancelled is None
+                or opening is None
+            ):
+                return _observation(None, DataStatus.INSUFFICIENT_DATA)
+            denominator = float(opening) + started
+            if denominator <= 0:
+                return _observation(None, DataStatus.NOT_APPLICABLE)
+            return _observation(cancelled / denominator)
+
+        weekly_rates = ChurnRateSignals(
+            individual_accounts=churn_rate(
+                activity.cancellations.individual_accounts if activity else None,
+                previous_individual,
+                paid(current_paid, "small", "accounts"),
+                cs,
+            ),
+            enterprise_accounts=churn_rate(
+                activity.cancellations.enterprise_accounts if activity else None,
+                previous_enterprise,
+                paid(current_paid, "large", "accounts"),
+                cs,
+            ),
+            enterprise_seats=churn_rate(
+                activity.cancellations.enterprise_seats if activity else None,
+                previous_seats,
+                paid(current_paid, "large", "seats"),
+                cs,
+            ),
         )
 
         day_28 = history.get(snapshot.day - 28)
         weekly_artifacts = [history.get(snapshot.day - offset) for offset in (0, 7, 14, 21)]
         # 当前周尚未写入 history，因此用当前快照补到四周窗口。
-        cancellation_values = [activity.cancellations] if activity else []
+        trailing_activities = [activity] if activity else []
         for artifact in weekly_artifacts[1:]:
             if artifact and artifact.public_week_snapshot.weekly_activity:
-                cancellation_values.append(
-                    artifact.public_week_snapshot.weekly_activity.cancellations
-                )
-        if day_28 and len(cancellation_values) == 4:
-            base = day_28.customer.customer_base
-            start_28_accounts = (
-                (base.active_individual_accounts.value or 0)
-                + (base.active_enterprise_accounts.value or 0)
-            )
-            trailing_status = (
-                DataStatus.AVAILABLE if start_28_accounts > 0 else DataStatus.NOT_APPLICABLE
-            )
-            trailing_churn = (
-                sum(cancellation_values) / start_28_accounts
-                if start_28_accounts > 0 else None
-            )
-        else:
-            trailing_status = DataStatus.INSUFFICIENT_DATA
-            trailing_churn = None
+                trailing_activities.append(artifact.public_week_snapshot.weekly_activity)
+
+        recent_paid = self._period_rows(paid_subscription_rows, windows.recent_28d)
+        trailing_window_status = (
+            DataStatus.AVAILABLE
+            if day_28 and len(trailing_activities) == 4
+            else DataStatus.INSUFFICIENT_DATA
+        )
+        trailing_base = day_28.customer.customer_base if day_28 else None
+
+        def trailing_cancelled(field: str) -> int | None:
+            if len(trailing_activities) != 4:
+                return None
+            return sum(getattr(item.cancellations, field) for item in trailing_activities)
+
+        trailing_rates = ChurnRateSignals(
+            individual_accounts=churn_rate(
+                trailing_cancelled("individual_accounts"),
+                (
+                    trailing_base.active_individual_accounts.value
+                    if trailing_base else None
+                ),
+                paid(recent_paid, "small", "accounts"),
+                trailing_window_status,
+            ),
+            enterprise_accounts=churn_rate(
+                trailing_cancelled("enterprise_accounts"),
+                (
+                    trailing_base.active_enterprise_accounts.value
+                    if trailing_base else None
+                ),
+                paid(recent_paid, "large", "accounts"),
+                trailing_window_status,
+            ),
+            enterprise_seats=churn_rate(
+                trailing_cancelled("enterprise_seats"),
+                (
+                    trailing_base.active_enterprise_seats.value
+                    if trailing_base else None
+                ),
+                paid(recent_paid, "large", "seats"),
+                trailing_window_status,
+            ),
+        )
 
         def issue_observation(key: str) -> NumericObservation:
             value = issue.get(key)
@@ -941,7 +996,7 @@ class SignalCollector:
         return CustomerSignals(
             customer_base=CustomerBase(
                 active_individual_accounts=_observation(current_individual),
-                active_enterprise_accounts=_observation(enterprise_accounts),
+                active_enterprise_accounts=_observation(current_enterprise),
                 active_enterprise_seats=_observation(current_seats),
                 individual_net_change=_comparison(
                     current_individual, previous_individual,
@@ -976,11 +1031,21 @@ class SignalCollector:
                 ),
             ),
             churn=ChurnSignals(
-                cancellations=cancellations,
-                upgrades=activity_pair("upgrades"),
-                downgrades=activity_pair("downgrades"),
-                weekly_account_churn_rate=_observation(weekly_churn, weekly_churn_status),
-                trailing_28d_account_churn_rate=_observation(trailing_churn, trailing_status),
+                cancellations=CancellationSignals(
+                    individual_accounts=activity_pair("cancellations", "individual_accounts"),
+                    enterprise_accounts=activity_pair("cancellations", "enterprise_accounts"),
+                    enterprise_seats=activity_pair("cancellations", "enterprise_seats"),
+                ),
+                upgrades=PlanChangeSignals(
+                    individual_accounts=activity_pair("upgrades", "individual_accounts"),
+                    enterprise_accounts=activity_pair("upgrades", "enterprise_accounts"),
+                ),
+                downgrades=PlanChangeSignals(
+                    individual_accounts=activity_pair("downgrades", "individual_accounts"),
+                    enterprise_accounts=activity_pair("downgrades", "enterprise_accounts"),
+                ),
+                weekly_rates=weekly_rates,
+                trailing_28d_rates=trailing_rates,
             ),
             issues=IssueSignals(
                 open_issues=_observation(snapshot.current_state.open_issues),

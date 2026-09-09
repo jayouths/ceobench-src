@@ -13,6 +13,7 @@ from saas_bench.agents.bash_agent.analysis.signals import (
 )
 from saas_bench.agents.bash_agent.analysis.signal_queries import issue_summary
 from saas_bench.simulator.public_week_snapshot import build_public_week_snapshot
+from saas_bench.simulator.simulation import DayResult
 from tests.support.harness import make_analysis_pipeline
 
 
@@ -89,6 +90,93 @@ def test_issue_resolution_signals_exclude_churn_closures(make_initialized_sim):
 
     assert row["current_resolved"] == 1
     assert row["current_resolution_days"] == pytest.approx(2.0)
+
+
+def test_churn_rates_separate_individual_enterprise_accounts_and_seats(
+    make_initialized_sim,
+):
+    """流失率的分子、分母必须使用相同客户类型和计量单位。"""
+    conn, _, _ = make_initialized_sim(seed=42)
+    collector = SignalCollector(_direct_query(conn))
+    day_0 = collector.collect(build_public_week_snapshot(conn, 0))
+
+    def add_subscription(customer_type: str, seats: int, cancelled: bool) -> None:
+        customer = conn.execute(
+            """
+            INSERT INTO customers (
+                customer_type, group_id, created_day,
+                steepness_left, steepness_right, c_max, q_max, q_min,
+                usage_demand, quality_sensitivity, price_sensitivity,
+                willingness_to_pay, usage_scale, patience, seat_count
+            )
+            VALUES (?, ?, 1, 0.01, 0.01, 200, 0.9, 0.1,
+                    10, 0.5, 0.5, 200, 10, 0.5, ?)
+            """,
+            (customer_type, "S1" if customer_type == "small" else "E1", seats),
+        ).lastrowid
+        subscription = conn.execute(
+            """
+            INSERT INTO subscriptions (
+                customer_id, plan, listed_price, effective_price, seat_count,
+                start_day, status, billing_day_mod30
+            )
+            VALUES (?, 'A', 20, 20, ?, 1, 'subscribed', 1)
+            """,
+            (customer, seats),
+        ).lastrowid
+        if cancelled:
+            conn.execute(
+                """
+                UPDATE subscriptions
+                SET status = 'cancelled', end_day = 7
+                WHERE subscription_id = ?
+                """,
+                (subscription,),
+            )
+
+    for index in range(10):
+        add_subscription("small", 1, cancelled=index < 2)
+    add_subscription("large", 100, cancelled=False)
+    add_subscription("large", 10, cancelled=True)
+
+    result = DayResult(
+        day=7,
+        total_usage=0,
+        overload=0,
+        outage=False,
+        downtime_minutes=0,
+        p95_ms=0,
+        error_rate=0,
+        new_subscribers=10,
+        new_leads=12,
+        individual_cancellations=2,
+        enterprise_cancellations=1,
+        enterprise_cancelled_seats=10,
+        individual_upgrades=0,
+        enterprise_upgrades=0,
+        individual_downgrades=0,
+        enterprise_downgrades=0,
+        payments_received=0,
+        total_costs=0,
+        cash=1_000_000,
+        mrr=0,
+        new_individual_subscribers=10,
+        new_enterprise_subscriber_accounts=2,
+        new_enterprise_subscribers_seats=110,
+        total_individual_subscribers=8,
+        total_enterprise_subscribers=1,
+        total_enterprise_subscription_seats=100,
+    )
+    snapshot = build_public_week_snapshot(conn, 7, result)
+    signals = collector.collect(snapshot, {0: day_0})
+
+    rates = signals.customer.churn.weekly_rates
+    assert rates.individual_accounts.value == pytest.approx(2 / 10)
+    assert rates.enterprise_accounts.value == pytest.approx(1 / 2)
+    assert rates.enterprise_seats.value == pytest.approx(10 / 110)
+    assert signals.customer.churn.trailing_28d_rates.individual_accounts.status is (
+        DataStatus.INSUFFICIENT_DATA
+    )
 
 
 def test_four_week_signal_pipeline_computes_all_roles(
