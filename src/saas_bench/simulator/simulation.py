@@ -5770,6 +5770,7 @@ Guidelines:
         # reuse this instead of each running the same expensive GROUP BY.
         _t0 = _time.monotonic()
         self.conn.execute("DROP TABLE IF EXISTS _tmp_latest_turns")
+        # 线程终态属于真正的最新消息；必须先取最新行，再判断是否仍活动。
         self.conn.execute("""
             CREATE TEMP TABLE _tmp_latest_turns AS
             SELECT thread_id, message_id, customer_id, thread_type,
@@ -5777,8 +5778,7 @@ Guidelines:
             FROM (
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY message_id DESC) AS rn
                 FROM enterprise_turns
-                WHERE _internal_status IS NULL
-            ) WHERE rn = 1 AND closed = 0
+            ) WHERE rn = 1 AND closed = 0 AND _internal_status IS NULL
         """)
         _ent_timings['latest_turns_cache'] = _time.monotonic() - _t0
 

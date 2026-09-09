@@ -11,6 +11,11 @@ from saas_bench.simulator.enterprise import (
     create_negotiation_thread,
     get_negotiation_state,
     get_threads_awaiting_agent_response,
+    get_threads_needing_reply,
+)
+from saas_bench.simulator.database import (
+    add_enterprise_turn,
+    mark_enterprise_thread_dead,
 )
 
 
@@ -189,6 +194,82 @@ def test_enterprise_reply_timeout_matches_weekly_decision_cycle(
         1 + ENTERPRISE_RESPONSE_TIMEOUT_DAYS,
     )
     assert [thread["thread_id"] for thread in timed_out] == [thread_id]
+
+
+def _create_dead_enterprise_thread(conn) -> int:
+    """构造最新 Agent 报价已超时、历史客户消息仍正常的线程。"""
+    customer_id = _insert_enterprise_customer(conn)
+    thread_id, _ = create_negotiation_thread(
+        conn,
+        customer_id,
+        "new_lead",
+        1,
+    )
+    add_enterprise_turn(
+        conn,
+        thread_id,
+        2,
+        "agent",
+        next_reply_day=8,
+    )
+    mark_enterprise_thread_dead(conn, thread_id, "timeout")
+    conn.commit()
+    return thread_id
+
+
+def test_dead_enterprise_thread_is_not_revived_by_direct_queries(
+    make_initialized_sim,
+):
+    """后备查询不得在排除终态行后把上一条历史消息当成最新状态。"""
+    conn, _, _ = make_initialized_sim(seed=42)
+    _create_dead_enterprise_thread(conn)
+
+    assert get_threads_needing_reply(conn, current_day=8) == []
+    assert get_threads_awaiting_agent_response(conn, current_day=8) == []
+
+
+def test_dead_enterprise_thread_is_not_revived_in_daily_cache(
+    make_initialized_sim,
+    monkeypatch,
+):
+    """模拟日主链路的最新谈判缓存必须保留线程终态。"""
+    conn, simulator, _ = make_initialized_sim(seed=42)
+    _create_dead_enterprise_thread(conn)
+    simulator.current_day = 8
+    observed = {}
+
+    monkeypatch.setattr(
+        simulator,
+        "_process_agent_response_timeouts",
+        lambda config, events: observed.update(
+            awaiting=get_threads_awaiting_agent_response(conn, current_day=8),
+        ),
+    )
+    monkeypatch.setattr(
+        simulator,
+        "_process_scheduled_replies",
+        lambda config, events: observed.update(
+            replies=get_threads_needing_reply(conn, current_day=8),
+        ),
+    )
+    monkeypatch.setattr(
+        simulator,
+        "_check_negotiation_triggers",
+        lambda config, overload, outage, active_customers: set(),
+    )
+    monkeypatch.setattr(
+        simulator,
+        "_process_contract_renewals",
+        lambda config, active_customers: None,
+    )
+
+    simulator._process_enterprise_negotiations(
+        simulator.get_current_config(),
+        overload=0.0,
+        outage=False,
+    )
+
+    assert observed == {"awaiting": [], "replies": []}
 
 
 def test_billing_resumes_when_churn_prevention_closes_today(
