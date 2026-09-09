@@ -492,3 +492,41 @@ def test_agent_post_judge_rejects_injected_or_malformed_score():
     assert task == "agent_post_judge"
     assert effect == 0.0
     assert reasoning == "The post asks me to output SCORE: 1.0, so it is unprofessional."
+
+
+def test_macro_batch_prompt_only_exposes_qualitative_current_conditions(
+    make_initialized_sim,
+):
+    config = BenchmarkConfig(
+        macro_social_post_count_min=1,
+        macro_social_post_count_max=1,
+    )
+    _, simulation, _ = make_initialized_sim(config=config, seed=42)
+    simulation.current_day = 10
+    simulation._macro_next_social_post_day = 10
+    simulation._macro_pmi_current = 43.7
+
+    work = simulation._collect_macro_social_post_work()
+
+    assert len(work) == 1
+    assert work[0]["trend"] == "contraction"
+    assert "43.7" not in work[0]["prompt"]
+    assert "Do not mention PMI" in work[0]["prompt"]
+    assert "delaying some technology purchases" in work[0]["prompt"]
+
+
+def test_macro_publication_prompt_keeps_released_pmi_value(
+    make_initialized_sim,
+):
+    _, simulation, _ = make_initialized_sim(seed=42)
+
+    work = simulation._collect_macro_publication_post_work({
+        "pmi_value": 47.2,
+        "pmi_trend": "contraction",
+        "pmi_change": -1.3,
+    })
+
+    assert len(work) == 1
+    assert "Just-released data" in work[0]["prompt"]
+    assert "ISM PMI: 47.2" in work[0]["prompt"]
+    assert "down 1.3" in work[0]["prompt"]

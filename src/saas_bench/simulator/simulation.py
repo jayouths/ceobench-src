@@ -4428,7 +4428,7 @@ class Simulator:
             'strong_expansion': [
                 "Business is booming. Our SaaS stack just got approved for a major expansion. Economy is clearly humming.",
                 "Seeing more RFPs than ever this quarter. Companies are investing heavily in new tools.",
-                "Tech hiring is up, budgets are up, morale is up. PMI numbers back up what we're seeing on the ground.",
+                "Tech hiring is up, budgets are up, morale is up. The momentum is visible across the market.",
             ],
             'expansion': [
                 "Cautiously expanding our tool subscriptions this quarter. Economy looks stable enough to invest.",
@@ -4438,7 +4438,7 @@ class Simulator:
             'neutral': [
                 "Hard to read the market right now. Some sectors growing, others pulling back. Holding steady on tech spend.",
                 "Mixed signals everywhere. We're keeping our current subscriptions but holding off on new ones.",
-                "Budget planning is tricky in this environment. PMI hovering around 50 doesn't give much clarity.",
+                "Budget planning is tricky in this environment. The signals are too mixed to justify a major change.",
             ],
             'contraction': [
                 "Starting to see clients delay software renewals. The economic slowdown is real.",
@@ -5264,6 +5264,17 @@ Requirements:
             'severe_contraction': 'alarmed/pessimistic',
         }
         sentiment = sentiment_map.get(trend, 'neutral')
+        observable_conditions = {
+            'strong_expansion': 'Hiring, purchasing, and new business initiatives are accelerating.',
+            'expansion': 'Technology budgets and purchasing activity are growing steadily.',
+            'neutral': 'Businesses report mixed demand and remain cautious about new spending.',
+            'contraction': 'Businesses are reviewing budgets and delaying some technology purchases.',
+            'severe_contraction': 'Businesses are making broad budget cuts and cancelling discretionary subscriptions.',
+        }
+        observable_condition = observable_conditions.get(
+            trend,
+            observable_conditions['neutral'],
+        )
 
         # Pre-draw perspectives from _macro_rng BEFORE any early returns.
         # This ensures _macro_rng state advances deterministically regardless of
@@ -5289,16 +5300,18 @@ Requirements:
         for i in range(n_posts):
             perspective = drawn_perspectives[i]
 
-            prompt = f"""Write ONE social media post (Twitter/LinkedIn style, 1-3 sentences) from the perspective of {perspective} about the current macroeconomic situation.
+            # 日常舆情只提供实时方向，不得把模拟器内部 PMI 冒充成已发布数据。
+            prompt = f"""Write ONE social media post (Twitter/LinkedIn style, 1-3 sentences) from the perspective of {perspective} about observable current business conditions.
 
-Current conditions:
-- ISM PMI: {pmi:.1f} ({trend.replace('_', ' ')})
+Private generation guidance (do not cite as official data):
+- Broad business-cycle signal: {trend.replace('_', ' ')}
 - Sentiment: {sentiment}
-- PMI > 50 = expansion, < 50 = contraction. Current reading indicates {"strong growth" if pmi > 55 else "moderate growth" if pmi > 52 else "borderline conditions" if pmi > 48 else "economic weakness" if pmi > 42 else "recessionary conditions"}.
+- Observable pattern: {observable_condition}
 
 Requirements:
 - Reflect how the economy affects technology purchasing, SaaS subscriptions, business investment
-- {"Positive: growth, expanding budgets, new initiatives" if pmi > 55 else "Cautiously positive: growth continuing" if pmi > 52 else "Uncertain: mixed signals" if pmi > 48 else "Cautious/negative: budget reviews, delayed purchases" if pmi > 42 else "Alarm: budget cuts, subscription cancellations"}
+- Describe only experience, market sentiment, or observable business behavior
+- Do not mention PMI, an economic index value, or an official data release
 - No hashtags, no @mentions, keep it concise and authentic
 - Return ONLY the post text, nothing else
 
