@@ -1045,7 +1045,9 @@ def get_qualities_for_all_plans_batch(
     # Batch-fetch customer data (relationship, open_issue_days, subscription start_day, etc.)
     rows = chunked_select(conn, """
         SELECT cs.customer_id, cs.relationship, cs.open_issue_days,
-               c.usage_demand, c.ads_quality_sensitivity, c.group_id,
+               c.usage_demand, c.seat_count AS expected_seat_count,
+               c.ads_quality_sensitivity, c.group_id,
+               s.subscription_id AS active_subscription_id,
                s.start_day, s.daily_usage_rate
         FROM customer_state cs
         JOIN customers c ON cs.customer_id = c.customer_id
@@ -1084,9 +1086,15 @@ def get_qualities_for_all_plans_batch(
                 # Issue penalty
                 issue_penalty = 0.03 * (cust['open_issue_days'] or 0)
 
-                # Quota quality factor (use actual sampled daily_usage_rate, consistent with satisfaction)
-                daily_usage_rate = cust['daily_usage_rate'] if cust['daily_usage_rate'] else 0.0
-                total_demand = daily_usage_rate * weekly_usage_mult
+                # 新线索尚无真实用量，谈判时必须沿用获客资格检查的预计需求；
+                # 已订阅客户则使用当期真实用量，并保留每周用量波动。
+                if cust['active_subscription_id'] is None:
+                    expected_usage = float(cust['usage_demand'] or 0.0)
+                    expected_seats = int(cust['expected_seat_count'] or 1)
+                    total_demand = expected_usage * expected_seats
+                else:
+                    daily_usage_rate = float(cust['daily_usage_rate'] or 0.0)
+                    total_demand = daily_usage_rate * weekly_usage_mult
                 plan_quota = plan_quotas[plan]
                 quota_factor = compute_quota_quality_factor(plan_quota, total_demand)
 

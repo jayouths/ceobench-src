@@ -6,7 +6,10 @@ import pytest
 
 import saas_bench.simulator.enterprise as enterprise_module
 from saas_bench.simulator.config import BenchmarkConfig
-from saas_bench.simulator.enterprise import create_negotiation_thread
+from saas_bench.simulator.enterprise import (
+    create_negotiation_thread,
+    get_qualities_for_all_plans_batch,
+)
 
 
 def _insert_enterprise_customer(conn) -> int:
@@ -90,6 +93,57 @@ def _create_rejectable_enterprise_thread(
     )
     conn.commit()
     return customer_id, thread_id
+
+
+def test_new_enterprise_lead_uses_expected_demand_for_plan_qualities(
+    make_initialized_sim,
+):
+    """新线索用预计用量评估零、低和足额配额，不得把未采样用量当作零需求。"""
+    conn, simulator, config = make_initialized_sim(seed=42)
+    customer_id = _insert_enterprise_customer(conn)
+    simulator._create_enterprise_lead(customer_id, {"seat_count": 20})
+    conn.execute(
+        """
+        UPDATE config_history
+        SET tier_A = 4, tier_B = 4, tier_C = 4,
+            quota_A = 0, quota_B = 100, quota_C = 200
+        WHERE day = 0
+        """
+    )
+
+    qualities = get_qualities_for_all_plans_batch(conn, [customer_id], config)
+
+    # 预计需求为 10 单位/席位 × 20 席位 = 200，三档配额因子为 0、0.5、1。
+    assert qualities[customer_id] == pytest.approx(
+        {"A": 0.0, "B": 0.1, "C": 0.2}
+    )
+
+
+def test_existing_enterprise_customer_uses_sampled_usage_for_plan_qualities(
+    make_initialized_sim,
+):
+    """存量企业客户仍以订阅中的真实用量评估配额。"""
+    conn, _, config = make_initialized_sim(seed=42)
+    customer_id, _ = _create_active_enterprise_thread(conn)
+    conn.execute(
+        "UPDATE subscriptions SET daily_usage_rate = 50 WHERE customer_id = ?",
+        (customer_id,),
+    )
+    conn.execute(
+        """
+        UPDATE config_history
+        SET tier_A = 4, tier_B = 4, tier_C = 4,
+            quota_A = 0, quota_B = 25, quota_C = 50
+        WHERE day = 0
+        """
+    )
+
+    qualities = get_qualities_for_all_plans_batch(conn, [customer_id], config)
+
+    # Day 0 的每周倍率为 1；真实需求 50 应得到 0、0.5、1 三档配额因子。
+    assert qualities[customer_id] == pytest.approx(
+        {"A": 0.0, "B": 0.1, "C": 0.2}
+    )
 
 
 @pytest.mark.parametrize(
