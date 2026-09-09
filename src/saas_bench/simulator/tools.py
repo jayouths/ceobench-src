@@ -1,7 +1,8 @@
 """Agent tools (actions) for SaaS Bench."""
 
-import sqlite3
 import json
+import math
+import sqlite3
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Any
 from pathlib import Path
@@ -567,8 +568,32 @@ TOOL_DOCS = {
                     "items": {
                         "type": "array",
                         "description": "[customer_id, offerings] where offerings = [[plan, price], ...]",
-                        "items": {}
-                    }
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "prefixItems": [
+                            {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Enterprise customer ID",
+                            },
+                            {
+                                "type": "array",
+                                "description": "One to three enterprise offerings",
+                                "minItems": 1,
+                                "maxItems": 3,
+                                "items": {
+                                    "type": "array",
+                                    "description": "[plan, non-negative price_per_seat]",
+                                    "minItems": 2,
+                                    "maxItems": 2,
+                                    "prefixItems": [
+                                        {"type": "string", "enum": ["A", "B", "C"]},
+                                        {"type": "number", "minimum": 0},
+                                    ],
+                                },
+                            },
+                        ],
+                    },
                 }
             },
             "required": ["deals"]
@@ -582,7 +607,7 @@ TOOL_DOCS = {
         },
         "returns": {
             "success": "Processed 2/2 deals:\n  Customer #312: reply sent with 2 offering(s)\n  Customer #88: renegotiation initiated, 2 offering(s) sent",
-            "failure": "Customer #312: not found / Customer #88: already has an active thread / offerings required"
+            "failure": "Customer #312: not found / offerings must contain 1-3 items / offering 0 has invalid plan or price"
         },
         "output_schema": {
             "results": "List[Dict] — one dict per deal with keys: customer_id (int), success (bool), status (str), error (str, if failed)",
@@ -605,6 +630,8 @@ TOOL_DOCS = {
             "failure": [
                 {"label": "Customer not found", "input": {"deals": [[999, [["A", 9.0]]]]}, "output": "Customer #999: not found"},
                 {"label": "Missing offerings", "input": {"deals": [[312, []]]}, "output": "Customer #312: offerings required"},
+                {"label": "Invalid plan", "input": {"deals": [[312, [["D", 9.0]]]]}, "output": "Customer #312: offering 0 plan must be one of A, B, C"},
+                {"label": "Negative price", "input": {"deals": [[312, [["A", -1.0]]]]}, "output": "Customer #312: offering 0 price must be a finite non-negative number"},
                 {"label": "Contract duration is not configurable", "input": {"deals": [[312, [["A", 9.0, 6]]]]}, "output": "Customer #312: offering 0 must be [plan, price]; contracts are month-to-month"},
                 {"label": "Customer has active thread", "input": {"deals": [[88, [["B", 11.0]]]]}, "output": "Processed 0/1 deals (1 failed):\n  Customer #88: already has an active negotiation thread"}
             ]
@@ -2830,9 +2857,9 @@ class AgentTools:
         # --- Phase 1: Parse all deals (no SQL) ---
         parsed_deals = []  # list of (customer_id, deal_offerings)
         for deal in deals:
-            if isinstance(deal, (list, tuple)) and len(deal) >= 2:
+            if isinstance(deal, (list, tuple)) and len(deal) == 2:
                 customer_id = deal[0]
-                raw_offerings = deal[1] if len(deal) > 1 else []
+                raw_offerings = deal[1]
             elif isinstance(deal, dict):
                 customer_id = deal.get('customer_id')
                 raw_offerings = deal.get('offerings', [])
@@ -2841,17 +2868,28 @@ class AgentTools:
                 results.append({'error': 'invalid format'})
                 continue
 
-            if customer_id is None:
-                summaries.append("Error: customer_id required")
-                results.append({'error': 'missing customer_id'})
+            if (
+                not isinstance(customer_id, int)
+                or isinstance(customer_id, bool)
+                or customer_id < 1
+            ):
+                summaries.append("Error: customer_id must be a positive integer")
+                results.append({'error': 'invalid customer_id'})
                 continue
-
-            customer_id = int(customer_id)
 
             deal_offerings = []
             if not raw_offerings or not isinstance(raw_offerings, list):
                 summaries.append(f"Customer #{customer_id}: offerings required")
                 results.append({'customer_id': customer_id, 'error': 'offerings required'})
+                continue
+            if len(raw_offerings) > max_offerings:
+                summaries.append(
+                    f"Customer #{customer_id}: offerings must contain 1-{max_offerings} items"
+                )
+                results.append({
+                    'customer_id': customer_id,
+                    'error': f'too many offerings; maximum is {max_offerings}',
+                })
                 continue
 
             valid = True
@@ -2868,12 +2906,7 @@ class AgentTools:
                         })
                         valid = False
                         break
-                    deal_offerings.append({
-                        'plan': str(off[0]),
-                        'price_per_seat': float(off[1]),
-                        # 主实验的企业合同按月续约，Agent 不能改变合同期限。
-                        'contract_months': 1,
-                    })
+                    plan, price = off
                 elif isinstance(off, dict):
                     if 'contract_months' in off:
                         summaries.append(
@@ -2886,21 +2919,54 @@ class AgentTools:
                         })
                         valid = False
                         break
+                    if 'plan' not in off:
+                        summaries.append(f"Customer #{customer_id}: offering {i} must include plan")
+                        results.append({'customer_id': customer_id, 'error': f'offering {i} missing plan'})
+                        valid = False
+                        break
                     if 'price_per_seat' not in off and 'price' not in off:
                         summaries.append(f"Customer #{customer_id}: offering {i} must include price_per_seat")
                         results.append({'customer_id': customer_id, 'error': f'offering {i} missing price'})
                         valid = False
                         break
-                    deal_offerings.append({**off, 'contract_months': 1})
+                    plan = off['plan']
+                    price = off.get('price_per_seat', off.get('price'))
                 else:
                     summaries.append(f"Customer #{customer_id}: offering {i} invalid")
                     results.append({'customer_id': customer_id, 'error': f'offering {i} invalid'})
                     valid = False
                     break
+
+                if not isinstance(plan, str) or plan not in {'A', 'B', 'C'}:
+                    summaries.append(
+                        f"Customer #{customer_id}: offering {i} plan must be one of A, B, C"
+                    )
+                    results.append({'customer_id': customer_id, 'error': f'offering {i} invalid plan'})
+                    valid = False
+                    break
+                if (
+                    not isinstance(price, (int, float))
+                    or isinstance(price, bool)
+                    or not math.isfinite(price)
+                    or price < 0
+                ):
+                    summaries.append(
+                        f"Customer #{customer_id}: offering {i} price must be a finite non-negative number"
+                    )
+                    results.append({'customer_id': customer_id, 'error': f'offering {i} invalid price'})
+                    valid = False
+                    break
+
+                # 内部只保留一种标准报价结构，避免谈判阶段再猜测字段语义。
+                deal_offerings.append({
+                    'plan': plan,
+                    'price_per_seat': float(price),
+                    'contract_months': 1,
+                })
             if not valid:
                 continue
 
-            parsed_deals.append((customer_id, deal_offerings[:max_offerings]))
+            parsed_deals.append((customer_id, deal_offerings))
 
         if not parsed_deals:
             # All deals failed parsing

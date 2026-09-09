@@ -133,6 +133,20 @@ def test_enterprise_deal_docs_only_advertise_monthly_contracts():
     assert "longer contracts" not in docs["impact"]
 
 
+def test_enterprise_deal_schema_constrains_offerings():
+    """Provider 必须直接看到报价数量、套餐和价格边界。"""
+    deal_schema = TOOL_DOCS["send_enterprise_deal"]["inputSchema"]["properties"][
+        "deals"
+    ]["items"]
+    offerings_schema = deal_schema["prefixItems"][1]
+    offering_schema = offerings_schema["items"]
+
+    assert (deal_schema["minItems"], deal_schema["maxItems"]) == (2, 2)
+    assert (offerings_schema["minItems"], offerings_schema["maxItems"]) == (1, 3)
+    assert offering_schema["prefixItems"][0]["enum"] == ["A", "B", "C"]
+    assert offering_schema["prefixItems"][1]["minimum"] == 0
+
+
 def test_group_research_requires_explicit_target_level():
     """工具 schema 与公开 Python 客户端都必须要求研究目标等级。"""
     docs = TOOL_DOCS["research_group"]

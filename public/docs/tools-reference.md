@@ -606,7 +606,41 @@ Send enterprise deal offerings. Compact tuple format: each deal = [customer_id, 
       "items": {
         "type": "array",
         "description": "[customer_id, offerings] where offerings = [[plan, price], ...]",
-        "items": {}
+        "minItems": 2,
+        "maxItems": 2,
+        "prefixItems": [
+          {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Enterprise customer ID"
+          },
+          {
+            "type": "array",
+            "description": "One to three enterprise offerings",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+              "type": "array",
+              "description": "[plan, non-negative price_per_seat]",
+              "minItems": 2,
+              "maxItems": 2,
+              "prefixItems": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "A",
+                    "B",
+                    "C"
+                  ]
+                },
+                {
+                  "type": "number",
+                  "minimum": 0
+                }
+              ]
+            }
+          }
+        ]
       }
     }
   },
@@ -620,7 +654,7 @@ Send enterprise deal offerings. Compact tuple format: each deal = [customer_id, 
 - success: Processed 2/2 deals:
   Customer #312: reply sent with 2 offering(s)
   Customer #88: renegotiation initiated, 2 offering(s) sent
-- failure: Customer #312: not found / Customer #88: already has an active thread / offerings required
+- failure: Customer #312: not found / offerings must contain 1-3 items / offering 0 has invalid plan or price
 
 **Impact:** Customer evaluates ALL offerings and picks the one with highest satisfaction. Satisfaction = quality_perceived - quality_required(price). All contracts are month-to-month, so contract duration is not configurable. Customer accepts if best satisfaction > 0, counter-offers otherwise. Max negotiation turns = customer ghosts. Late replies (>1 day) damage relationship -0.02/day. No response within 7 days = customer permanently lost. Renegotiation (no open thread): creates new thread. WARNING: if the customer rejects all offerings OR the thread times out, the customer CHURNS (cancels subscription).
 

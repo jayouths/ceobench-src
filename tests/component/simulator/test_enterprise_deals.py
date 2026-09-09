@@ -64,16 +64,24 @@ def _create_active_enterprise_thread(conn) -> tuple[int, int]:
     return customer_id, thread_id
 
 
-def test_enterprise_deal_stores_the_fixed_monthly_contract(
+@pytest.mark.parametrize(
+    "offering",
+    [
+        ["B", 50.0],
+        {"plan": "B", "price": 50.0},
+    ],
+)
+def test_enterprise_deal_normalizes_the_fixed_monthly_contract(
     make_initialized_sim,
     make_agent_tools,
+    offering,
 ):
-    """标准报价只包含套餐和价格，合同期限由模拟器固定为一个月。"""
+    """支持的输入格式统一转为标准报价，合同期限固定为一个月。"""
     conn, _, config = make_initialized_sim(seed=42)
     customer_id, thread_id = _create_active_enterprise_thread(conn)
 
     result = make_agent_tools(conn, config).send_enterprise_deal(
-        [[customer_id, [["B", 50.0]]]],
+        [[customer_id, [offering]]],
     )
 
     assert result.success
@@ -120,6 +128,88 @@ def test_enterprise_deal_rejects_agent_supplied_contract_duration(
         (thread_id,),
     ).fetchone()[0]
     assert agent_turns == 0
+
+
+@pytest.mark.parametrize(
+    ("offering", "expected_message"),
+    [
+        (["D", 50.0], "plan must be one of A, B, C"),
+        (["A", -1.0], "finite non-negative number"),
+        (["A", float("nan")], "finite non-negative number"),
+        (["A", True], "finite non-negative number"),
+        ({"price_per_seat": 50.0}, "must include plan"),
+    ],
+)
+def test_enterprise_deal_rejects_invalid_offering_without_side_effects(
+    make_initialized_sim,
+    make_agent_tools,
+    offering,
+    expected_message,
+):
+    """非法报价不能消耗谈判轮次、安排回复或惩罚客户关系。"""
+    conn, _, config = make_initialized_sim(seed=42)
+    customer_id, thread_id = _create_active_enterprise_thread(conn)
+
+    result = make_agent_tools(conn, config, day=5).send_enterprise_deal(
+        [[customer_id, [offering]]],
+    )
+
+    assert not result.success
+    assert expected_message in result.message
+    thread = conn.execute(
+        """
+        SELECT COUNT(*) AS agent_turns, MAX(next_reply_day) AS next_reply_day
+        FROM enterprise_turns
+        WHERE thread_id = ? AND sender = 'agent'
+        """,
+        (thread_id,),
+    ).fetchone()
+    relationship = conn.execute(
+        "SELECT relationship FROM customer_state WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()["relationship"]
+    assert thread["agent_turns"] == 0
+    assert thread["next_reply_day"] is None
+    assert relationship == pytest.approx(0.5)
+
+
+def test_enterprise_deal_rejects_more_than_configured_offerings(
+    make_initialized_sim,
+    make_agent_tools,
+):
+    """超出公开上限的报价必须整体失败，不能静默截断后发送。"""
+    conn, _, config = make_initialized_sim(seed=42)
+    customer_id, thread_id = _create_active_enterprise_thread(conn)
+    offerings = [["A", 10.0], ["B", 20.0], ["C", 30.0], ["A", 40.0]]
+
+    result = make_agent_tools(conn, config).send_enterprise_deal(
+        [[customer_id, offerings]],
+    )
+
+    assert not result.success
+    assert "offerings must contain 1-3 items" in result.message
+    assert conn.execute(
+        """
+        SELECT COUNT(*) FROM enterprise_turns
+        WHERE thread_id = ? AND sender = 'agent'
+        """,
+        (thread_id,),
+    ).fetchone()[0] == 0
+
+
+def test_enterprise_deal_rejects_non_integer_customer_id(
+    make_initialized_sim,
+    make_agent_tools,
+):
+    """客户 ID 格式错误应返回工具失败，而不是抛出转换异常。"""
+    conn, _, config = make_initialized_sim(seed=42)
+
+    result = make_agent_tools(conn, config).send_enterprise_deal(
+        [["not-an-id", [["A", 10.0]]]],
+    )
+
+    assert not result.success
+    assert "customer_id must be a positive integer" in result.message
 
 
 def test_existing_enterprise_evaluates_offer_at_promoted_price(
