@@ -60,7 +60,7 @@ nm.pricing.set_promotion(global_promotion=5.0, by_group={"E1": 10.0})
 # via set_targeted_ad_spend. Format: {channel_id: {group_id: $/day}}.
 nm.marketing.set_daily_spend(operations=200, development=1000)
 nm.marketing.set_targeted_ad_spend(targeted_spend={"social_media": {"S1": 50}, "linkedin": {"E1": 200}})
-nm.marketing.set_ads_strength(global_strength=1.0, by_group={"S2": 1.5})
+nm.marketing.set_ads_strength(global_strength=0.2, by_group={"S2": 0.1})
 nm.marketing.set_lead_promotion(global_promotion=5.0)
 nm.marketing.post_social_media(content="Exciting update!", reply_to_post_id=123)  # max 280 chars, 1/day
 

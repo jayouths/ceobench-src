@@ -59,6 +59,23 @@ def test_operations_docs_follow_simulator_defaults():
     assert f"scale_g = {config.enterprise_ops_scale:g}" in operations_docs
 
 
+def test_ads_strength_guidance_matches_simulator_rules():
+    """获客投放与产品内广告必须在 Agent 说明中保持分离。"""
+    config = BenchmarkConfig()
+    instructions = Path(
+        "src/saas_bench/agents/simulator_instructions.md"
+    ).read_text()
+    system_prompt = Path(
+        "src/saas_bench/agents/bash_agent/system_prompt.md"
+    ).read_text()
+
+    assert config.ads_strength_global == 0.0
+    assert "ads_strength = 0.0" in instructions
+    assert "it does not change lead generation" in instructions
+    assert "multiplier on ad effectiveness" not in instructions
+    assert 'by_group={"S2": 1.5}' not in system_prompt
+
+
 def test_model_tier_docs_follow_simulator_rules(make_initialized_sim, make_agent_tools):
     """档位配置、工具返回和 Agent 可见示例必须使用同一组模型参数。"""
     conn, _, config = make_initialized_sim()
