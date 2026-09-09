@@ -215,6 +215,68 @@ def test_service_incidents_reduce_all_instant_quality_paths(
     assert outage == pytest.approx((0.4, 0.4))
 
 
+def test_customer_targeted_ads_reduce_individual_renewal_quality(
+    make_initialized_sim,
+    monkeypatch,
+):
+    """个人客户续费时必须计入只对该客户生效的广告副作用。"""
+    config = BenchmarkConfig(seed=123, base_product_quality=0.6)
+    conn, sim, _config = make_initialized_sim(config=config, seed=123)
+    customer_id = _create_subscribed_customer(conn, sim)
+    conn.execute(
+        "UPDATE customers SET ads_quality_sensitivity = 0.2 WHERE customer_id = ?",
+        (customer_id,),
+    )
+    subscription = conn.execute(
+        """
+        SELECT s.customer_id, s.plan, s.listed_price, s.promotion,
+               s.first_billing_done, s.start_day, s.daily_usage_rate,
+               c.group_id, c.usage_demand, s.seat_count,
+               c.ads_quality_sensitivity, cs.relationship, cs.open_issue_days
+        FROM subscriptions s
+        JOIN customers c ON c.customer_id = s.customer_id
+        JOIN customer_state cs ON cs.customer_id = s.customer_id
+        WHERE s.customer_id = ?
+        """,
+        (customer_id,),
+    ).fetchone()
+    plan_config = {
+        **_make_plan_config(1_000),
+        "price_A": 10.0,
+        "price_B": 25.0,
+        "price_C": 40.0,
+    }
+    sim._cache_step_day_globals(plan_config)
+    evaluated_qualities = []
+    monkeypatch.setattr(sim, "_compute_satisfaction", lambda *args: 0.0)
+
+    def record_quality(_left, _right, _c_max, quality, *_args):
+        evaluated_qualities.append(quality)
+        return False
+
+    monkeypatch.setattr(sim, "_plan_acceptable", record_quality)
+    call_args = (
+        0.8,
+        1.6,
+        100.0,
+        subscription,
+        plan_config,
+        0.0,
+        False,
+        0.8,
+        0.2,
+        1.0,
+    )
+
+    sim._select_best_plan_inline(*call_args)
+    sim.config.ads_strength_by_customer[customer_id] = 1.0
+    sim._select_best_plan_inline(*call_args)
+
+    assert evaluated_qualities[3:] == pytest.approx(
+        [quality - 0.2 for quality in evaluated_qualities[:3]]
+    )
+
+
 def test_enterprise_plan_change_uses_weekly_quota_multiplier(
     make_initialized_sim, monkeypatch
 ):
@@ -235,6 +297,7 @@ def test_enterprise_plan_change_uses_weekly_quota_multiplier(
     monkeypatch.setattr(sim, "_create_plan_change_thread", lambda *args: None)
 
     enterprise = {
+        "customer_id": 1,
         "plan": "A",
         "listed_price": 10.0,
         "effective_price": 10.0,
@@ -296,7 +359,12 @@ def test_enterprise_plan_change_compares_promoted_prices(
 
     sim._check_plan_change_opportunity(
         customer_id=1,
-        ent={"plan": "A", "effective_price": 10.0, "group_id": "E1"},
+        ent={
+            "customer_id": 1,
+            "plan": "A",
+            "effective_price": 10.0,
+            "group_id": "E1",
+        },
         current_quality=0.6,
         steepness_left=0.8,
         steepness_right=1.6,

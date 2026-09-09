@@ -372,8 +372,9 @@ class Simulator:
                        + relationship_bonus + stickiness_bonus) × quota_factor
                     - issue_penalty - ads_penalty
 
-        sub_row must have: usage_demand, seat_count, group_id, ads_quality_sensitivity,
-                          relationship, start_day, daily_usage_rate, open_issue_days
+        sub_row must have: customer_id, usage_demand, seat_count, group_id,
+                          ads_quality_sensitivity, relationship, start_day,
+                          daily_usage_rate, open_issue_days
         """
         q_shared = self._cached_q_shared_per_plan.get(plan, 0.5)
 
@@ -410,11 +411,11 @@ class Simulator:
         ads_sensitivity = sub_row['ads_quality_sensitivity'] or 0.0
         ads_penalty = 0.0
         if ads_sensitivity > 0 and group_id:
-            ads_global = self.config.ads_strength_global
-            ads_group = self.config.ads_strength_by_group.get(group_id, 0.0)
-            strength = min(max(ads_global + ads_group, 0.0), 1.0)
-            if strength > 0:
-                effective_ads = math.log(1.0 + 9.0 * strength) / math.log(10.0)
+            # 广告收入和客户去留必须使用同一份全局、客群、客户三级强度。
+            effective_ads = self._get_effective_ads_strength(
+                sub_row['customer_id'], group_id
+            )
+            if effective_ads > 0:
                 ads_penalty = ads_sensitivity * effective_ads
 
         service_penalty = (

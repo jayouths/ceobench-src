@@ -324,6 +324,56 @@ def test_outage_can_trigger_enterprise_churn_prevention(
     assert thread["thread_type"] == "churn_prevention"
 
 
+def test_customer_targeted_ads_reduce_enterprise_churn_quality(
+    make_initialized_sim,
+    monkeypatch,
+):
+    """企业流失判断必须计入只对该客户生效的广告副作用。"""
+    benchmark_config = BenchmarkConfig(seed=42, base_product_quality=0.6)
+    conn, simulator, _ = make_initialized_sim(
+        config=benchmark_config,
+        seed=42,
+    )
+    customer_id = _insert_enterprise_customer(conn)
+    conn.execute(
+        "UPDATE customers SET ads_quality_sensitivity = 0.2 WHERE customer_id = ?",
+        (customer_id,),
+    )
+    _insert_enterprise_subscription(conn, customer_id, billing_day=5)
+    simulator.current_day = 5
+    config = simulator.get_current_config()
+    config.update({"tier_A": 4, "tier_B": 4, "tier_C": 4})
+    simulator._cache_step_day_globals(config)
+    evaluated_qualities = []
+
+    def record_quality(_left, _right, _c_max, quality, *_args):
+        evaluated_qualities.append(quality)
+        return 1.0
+
+    monkeypatch.setattr(simulator, "_compute_satisfaction", record_quality)
+    monkeypatch.setattr(
+        simulator,
+        "_check_plan_change_opportunity",
+        lambda *args, **kwargs: None,
+    )
+
+    simulator._check_negotiation_triggers(
+        config,
+        overload=0.0,
+        outage=False,
+        active_thread_customers=set(),
+    )
+    simulator.config.ads_strength_by_customer[customer_id] = 1.0
+    simulator._check_negotiation_triggers(
+        config,
+        overload=0.0,
+        outage=False,
+        active_thread_customers=set(),
+    )
+
+    assert evaluated_qualities[1] == pytest.approx(evaluated_qualities[0] - 0.2)
+
+
 def test_enterprise_churn_uses_effective_subscription_price(
     make_initialized_sim,
     monkeypatch,
