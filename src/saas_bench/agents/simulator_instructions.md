@@ -108,7 +108,7 @@ Each customer has a personal quality-price curve:
 ### Proactive Renegotiation
 - `send_enterprise_deal` auto-detects: if a customer has an open thread, it replies; if no open thread, it initiates a renegotiation
 - No separate tool needed — just call `send_enterprise_deal` with `deals=[[customer_id, [["plan", price_per_seat], ...]]]` for any active enterprise subscriber
-- Use `reject_enterprise_deal` to explicitly reject threads — WARNING: rejecting renegotiation/renewal/churn_prevention threads causes the customer to CHURN
+- Use `reject_enterprise_deal` to explicitly reject threads — WARNING: rejecting renegotiation/renewal/churn_prevention/plan_change threads causes the customer to CHURN
 
 ### Batch Operations (Efficiency)
 - `send_enterprise_deal(deals=[[cid1, [["plan", price]], [cid2, [["plan", price]]]])` — send offerings to multiple enterprise customers in one call

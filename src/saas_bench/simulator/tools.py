@@ -27,6 +27,8 @@ from .database import (
     record_config_override,
     # Notifications
     add_notification,
+    # Group reputation
+    get_group_reputation, set_group_reputation,
     # Agent social media
     add_agent_social_post, get_agent_posts_today, get_recent_agent_posts_for_judge,
 )
@@ -1125,7 +1127,7 @@ TOOL_DOCS = {
             }
         },
         "returns": {
-            "success": "Processed 2/2 rejections:\n  Customer #312: Rejected (new_lead). Lead marked as lost.\n  Customer #88: Rejected (churn_prevention). Customer may cancel.",
+            "success": "Processed 2/2 rejections:\n  Customer #312: rejected (new_lead); lead lost\n  Customer #88: rejected (churn_prevention); customer churned with reputation damage",
             "failure": "Customer #312: no active thread / Customer #999: not found"
         },
         "output_schema": {
@@ -1139,9 +1141,9 @@ TOOL_DOCS = {
         },
         "sample_io": {
             "success": [
-                {"label": "Reject single customer", "input": {"deals": [{"customer_id": 312}]}, "output": "Processed 1/1 rejections:\n  Customer #312: Rejected (new_lead). Lead marked as lost."},
-                {"label": "Reject existing customer", "input": {"deals": [{"customer_id": 88}]}, "output": "Processed 1/1 rejections:\n  Customer #88: Rejected (churn_prevention). Customer may cancel."},
-                {"label": "Batch rejection", "input": {"deals": [{"customer_id": 312}, {"customer_id": 88}]}, "output": "Processed 2/2 rejections:\n  Customer #312: Rejected (new_lead). Lead marked as lost.\n  Customer #88: Rejected (plan_change)."}
+                {"label": "Reject single customer", "input": {"deals": [{"customer_id": 312}]}, "output": "Customer #312: rejected (new_lead); lead lost"},
+                {"label": "Reject existing customer", "input": {"deals": [{"customer_id": 88}]}, "output": "Customer #88: rejected (churn_prevention); customer churned with reputation damage"},
+                {"label": "Batch rejection", "input": {"deals": [{"customer_id": 312}, {"customer_id": 88}]}, "output": "Processed 2/2 rejections:\n  Customer #312: rejected (new_lead); lead lost\n  Customer #88: rejected (plan_change); customer churned with reputation damage"}
             ],
             "failure": [
                 {"label": "No active thread", "input": {"deals": [{"customer_id": 999}]}, "output": "Processed 0/1 rejections (1 failed):\n  Customer #999: no active thread"},
@@ -4312,6 +4314,7 @@ os.chdir('{self.workspace_path}')
 
         # --- Phase 3: Process rejections using pre-fetched data ---
         new_lead_lost_cids = []  # customer_ids to mark subscriptions as lost
+        existing_customer_rejections = []  # (customer_id, thread_type)
 
         for customer_id in parsed_cids:
             at = active_threads.get(customer_id)
@@ -4335,9 +4338,25 @@ os.chdir('{self.workspace_path}')
 
             if at['thread_type'] == 'new_lead':
                 new_lead_lost_cids.append(customer_id)
+            else:
+                existing_customer_rejections.append(
+                    (customer_id, at['thread_type'])
+                )
 
-            summaries.append(f"Customer #{customer_id}: rejected ({at['thread_type']})")
-            results.append({'customer_id': customer_id, 'success': True})
+            if at['thread_type'] == 'new_lead':
+                outcome = 'lead lost'
+            elif at['thread_type'] in ('churn_prevention', 'plan_change'):
+                outcome = 'customer churned with reputation damage'
+            else:
+                outcome = 'customer churned'
+            summaries.append(
+                f"Customer #{customer_id}: rejected ({at['thread_type']}); {outcome}"
+            )
+            results.append({
+                'customer_id': customer_id,
+                'thread_type': at['thread_type'],
+                'success': True,
+            })
 
         # Batch update lost subscriptions for new_lead rejections
         for cid in new_lead_lost_cids:
@@ -4345,6 +4364,49 @@ os.chdir('{self.workspace_path}')
                 UPDATE subscriptions SET status = 'lost', end_day = ?
                 WHERE customer_id = ? AND status = 'lead'
             """, (self.current_day, cid))
+
+        for cid, thread_type in existing_customer_rejections:
+            # 主动拒绝存量谈判代表谈判失败，不能只关闭线程却保留订阅。
+            cancelled = self.conn.execute("""
+                UPDATE subscriptions
+                SET status = 'cancelled', end_day = ?
+                WHERE customer_id = ?
+                  AND status = 'subscribed'
+                  AND end_day IS NULL
+            """, (self.current_day, cid)).rowcount
+
+            if cancelled and thread_type in ('churn_prevention', 'plan_change'):
+                customer = self.conn.execute(
+                    "SELECT group_id FROM customers WHERE customer_id = ?",
+                    (cid,),
+                ).fetchone()
+                if customer and customer['group_id']:
+                    group_id = customer['group_id']
+                    subscriber_count = self.conn.execute("""
+                        SELECT COUNT(*)
+                        FROM subscriptions s
+                        JOIN customers c ON c.customer_id = s.customer_id
+                        WHERE c.group_id = ?
+                          AND s.status = 'subscribed'
+                          AND s.end_day IS NULL
+                    """, (group_id,)).fetchone()[0]
+                    # 与模拟器其他单客户声誉事件使用相同的按客群规模归一公式。
+                    # 查询发生在取消之后，加回当前客户才是事件发生时的客群规模。
+                    population = max(subscriber_count + 1, 2)
+                    event_scale = math.log2(population) / population
+                    damage = (
+                        self.config.reputation_quality_cancel_damage
+                        * (0.5 + self.rng.random())
+                        * event_scale
+                    )
+                    current_reputation = get_group_reputation(self.conn, group_id)
+                    set_group_reputation(
+                        self.conn,
+                        group_id,
+                        max(0.0, current_reputation - damage),
+                        self.current_day,
+                        reason=f'{thread_type}_agent_rejected_churn',
+                    )
 
         # Single commit for all changes
         self.conn.commit()

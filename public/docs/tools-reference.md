@@ -563,8 +563,8 @@ Reject one or more enterprise deals. List-based: each deal identified by custome
 
 **Returns:**
 - success: Processed 2/2 rejections:
-  Customer #312: Rejected (new_lead). Lead marked as lost.
-  Customer #88: Rejected (churn_prevention). Customer may cancel.
+  Customer #312: rejected (new_lead); lead lost
+  Customer #88: rejected (churn_prevention); customer churned with reputation damage
 - failure: Customer #312: no active thread / Customer #999: not found
 
 **Impact:** For new_lead threads: lead is permanently lost. For renegotiation/renewal threads: customer CHURNS (cancels subscription). For churn_prevention/plan_change threads: customer churns with reputation damage.

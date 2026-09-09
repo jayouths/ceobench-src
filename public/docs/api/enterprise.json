@@ -168,7 +168,7 @@
       ]
     },
     "returns": {
-      "success": "Processed 2/2 rejections:\n  Customer #312: Rejected (new_lead). Lead marked as lost.\n  Customer #88: Rejected (churn_prevention). Customer may cancel.",
+      "success": "Processed 2/2 rejections:\n  Customer #312: rejected (new_lead); lead lost\n  Customer #88: rejected (churn_prevention); customer churned with reputation damage",
       "failure": "Customer #312: no active thread / Customer #999: not found"
     },
     "output_schema": {

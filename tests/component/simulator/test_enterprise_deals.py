@@ -64,6 +64,34 @@ def _create_active_enterprise_thread(conn) -> tuple[int, int]:
     return customer_id, thread_id
 
 
+def _create_rejectable_enterprise_thread(
+    conn,
+    thread_type: str,
+) -> tuple[int, int]:
+    """创建可供 Agent 主动拒绝的线索或存量客户谈判。"""
+    customer_id = _insert_enterprise_customer(conn)
+    subscription_status = "lead" if thread_type == "new_lead" else "subscribed"
+    conn.execute(
+        """
+        INSERT INTO subscriptions (
+            customer_id, plan, listed_price, effective_price, seat_count,
+            start_day, status, billing_day_mod30, first_billing_done,
+            contract_months, contract_end_day
+        )
+        VALUES (?, 'B', 50.0, 50.0, 20, 0, ?, 0, 1, 1, 30)
+        """,
+        (customer_id, subscription_status),
+    )
+    thread_id, _ = create_negotiation_thread(
+        conn,
+        customer_id,
+        thread_type,
+        0,
+    )
+    conn.commit()
+    return customer_id, thread_id
+
+
 @pytest.mark.parametrize(
     "offering",
     [
@@ -210,6 +238,75 @@ def test_enterprise_deal_rejects_non_integer_customer_id(
 
     assert not result.success
     assert "customer_id must be a positive integer" in result.message
+
+
+@pytest.mark.parametrize(
+    ("thread_type", "expected_status", "damages_reputation"),
+    [
+        ("new_lead", "lost", False),
+        ("renegotiation", "cancelled", False),
+        ("renewal", "cancelled", False),
+        ("churn_prevention", "cancelled", True),
+        ("plan_change", "cancelled", True),
+    ],
+)
+def test_reject_enterprise_deal_applies_documented_terminal_effects(
+    make_initialized_sim,
+    make_agent_tools,
+    thread_type,
+    expected_status,
+    damages_reputation,
+):
+    """主动拒绝必须结束谈判，并按谈判类型落实线索或客户流失。"""
+    conn, _, config = make_initialized_sim(seed=42)
+    customer_id, thread_id = _create_rejectable_enterprise_thread(
+        conn,
+        thread_type,
+    )
+    initial_reputation = conn.execute(
+        "SELECT reputation FROM group_reputation WHERE group_id = 'E1'",
+    ).fetchone()["reputation"]
+
+    result = make_agent_tools(conn, config, day=7).reject_enterprise_deal(
+        [{"customer_id": customer_id}],
+    )
+
+    assert result.success
+    assert result.data["results"] == [{
+        "customer_id": customer_id,
+        "thread_type": thread_type,
+        "success": True,
+    }]
+    subscription = conn.execute(
+        "SELECT status, end_day FROM subscriptions WHERE customer_id = ?",
+        (customer_id,),
+    ).fetchone()
+    latest_turn = conn.execute(
+        """
+        SELECT closed, close_reason
+        FROM enterprise_turns
+        WHERE thread_id = ?
+        ORDER BY message_id DESC LIMIT 1
+        """,
+        (thread_id,),
+    ).fetchone()
+    current_reputation = conn.execute(
+        "SELECT reputation FROM group_reputation WHERE group_id = 'E1'",
+    ).fetchone()["reputation"]
+
+    assert tuple(subscription) == (expected_status, 7)
+    assert tuple(latest_turn) == (1, "agent_rejected")
+    if damages_reputation:
+        assert current_reputation < initial_reputation
+        assert conn.execute(
+            """
+            SELECT COUNT(*) FROM reputation_history
+            WHERE group_id = 'E1' AND change_reason = ?
+            """,
+            (f"{thread_type}_agent_rejected_churn",),
+        ).fetchone()[0] == 1
+    else:
+        assert current_reputation == pytest.approx(initial_reputation)
 
 
 def test_existing_enterprise_evaluates_offer_at_promoted_price(
