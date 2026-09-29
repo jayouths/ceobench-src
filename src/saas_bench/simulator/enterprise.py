@@ -994,7 +994,8 @@ def get_quality_for_plan(
         relationship_bonus = config.relationship_quality_bonus_max * (relationship - 0.5) * 2
         # Q_perceived = delivered_quality + bonuses
         q_perceived = delivered_quality + relationship_bonus
-        return min(1.0, max(-1.0, q_perceived))
+        # 客户质量门槛可超过 1；只保留下限，避免研发收益被截断。
+        return max(-1.0, q_perceived)
 
     return delivered_quality
 
@@ -1139,7 +1140,7 @@ def get_qualities_for_all_plans_batch(
                     quality_before_incident_penalties * quota_factor
                     - issue_penalty - ads_penalty
                 )
-                qualities[plan] = min(1.0, max(-1.0, q_perceived))
+                qualities[plan] = max(-1.0, q_perceived)
             else:
                 qualities[plan] = dq
         result[cid] = qualities

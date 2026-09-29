@@ -201,6 +201,26 @@ def test_enterprise_plan_qualities_include_current_tenure(make_initialized_sim):
     )
 
 
+@pytest.mark.parametrize("raw_quality, expected", [(2.5, 2.5), (-3.0, -1.0)])
+def test_enterprise_quality_has_no_upper_cap_but_keeps_lower_floor(
+    make_initialized_sim, raw_quality, expected,
+):
+    conn, _, config = make_initialized_sim(seed=42)
+    customer_id = _insert_enterprise_customer(conn)
+    config.base_product_quality = raw_quality
+    conn.execute(
+        "UPDATE config_history SET tier_A = 4, quota_A = 100000 WHERE day = 0"
+    )
+
+    assert get_quality_for_plan(conn, "A", customer_id, config) == pytest.approx(
+        expected
+    )
+    qualities = get_qualities_for_all_plans_batch(
+        conn, [customer_id], config, current_day=0
+    )
+    assert qualities[customer_id]["A"] == pytest.approx(expected)
+
+
 def test_zero_relationship_remains_worst_in_enterprise_paths(
     make_initialized_sim,
 ):

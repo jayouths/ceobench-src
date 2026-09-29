@@ -53,6 +53,7 @@ class CheckpointStore:
         agent: BashAgent | None,
         decision_cost_by_currency: dict[str, float],
         server_log_offsets: dict[str, int],
+        request_journal_bytes: int = 0,
         resume_conversation: bool = False,
         pending_observation: str | None = None,
     ) -> dict[str, Any]:
@@ -102,6 +103,7 @@ class CheckpointStore:
             "runtime": {
                 "runner_log_offsets": self.capture_runner_log_offsets(),
                 "server_log_offsets": dict(server_log_offsets),
+                "request_journal_bytes": request_journal_bytes,
                 "conversation": {
                     "file": str(conversation_snapshot.relative_to(self.workspace_dir)),
                 },
@@ -161,6 +163,12 @@ class CheckpointStore:
 
         session_id = checkpoint["session_id"]
         session_dir = self.agent_workspace / "sessions" / session_id
+        journal_file = session_dir / "request-journal.jsonl"
+        journal_size = journal_file.stat().st_size if journal_file.exists() else 0
+        if journal_size != runtime.get("request_journal_bytes", 0):
+            raise ValueError(
+                "Unrecoverable session: requests occurred after the stable checkpoint"
+            )
         if not session_dir.is_dir():
             raise FileNotFoundError(f"Checkpoint session directory not found: {session_dir}")
         session_meta = session_dir / "session.json"

@@ -19,6 +19,8 @@
 4. [实验产物与离线评价](experiments/artifacts-and-evaluation.md)：复算指标和生成分析结果。
 5. [实验结果设计](experiments/results/README.md)：查看研究问题、指标和图表方案。
 
+上游分叉后的改动处理进度见 [上游分叉改动复核](audits/upstream-divergence.md)。
+
 ## 权威范围
 
 - 代码模块和可见性边界以 [工程架构](engineering/architecture.md) 为准。

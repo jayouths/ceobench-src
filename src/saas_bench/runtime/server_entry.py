@@ -13,6 +13,7 @@ Commands:
 """
 
 import argparse
+import fcntl
 import json
 import os
 import signal
@@ -38,6 +39,7 @@ from saas_bench.simulator.shocks import ShockManager
 from saas_bench.simulator.event_logger import EventLogger
 from saas_bench.experiment.json_io import write_json_atomic
 from saas_bench.runtime.api_server import NovaMindAPIServer
+from saas_bench.runtime.request_journal import RequestJournal
 from saas_bench.runtime.db_protection import (
     save_session_db,
     load_session_db,
@@ -330,6 +332,13 @@ def cmd_start_server(args, base: Path):
     """Start the API server for a session (runs in foreground)."""
     session_id = _resolve_session(base, args.session)
     sdir = _session_dir(base, session_id)
+    # Only one process may own a session's in-memory world and request journal.
+    server_lock = open(sdir / ".server.lock", "a+")
+    try:
+        fcntl.flock(server_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        server_lock.close()
+        raise RuntimeError(f"Session {session_id} already has a running server") from exc
 
     # Load session metadata
     meta = json.loads(_session_meta_path(base, session_id).read_text())
@@ -344,6 +353,9 @@ def cmd_start_server(args, base: Path):
         sys.exit(1)
 
     conn = load_session_db(nmdb_path)
+    request_journal = RequestJournal(
+        sdir / "request-journal.jsonl", meta.get("request_journal_bytes")
+    )
 
     # Refresh planner stats on the loaded DB. Without this, the planner picks a
     # nested-loop plan for the open_issues dashboard query (scans 166k active subs
@@ -462,6 +474,7 @@ def cmd_start_server(args, base: Path):
             async_saver.raise_if_failed()
         last_persisted_day = day
         meta["persisted_day"] = day
+        meta["request_journal_bytes"] = request_journal.size
         write_json_atomic(_session_meta_path(base, session_id), meta)
         # 断点不仅要固定数据库，也要固定服务端追加日志的边界。
         # EventLogger 每 10 条才自动 flush，因此必须先主动刷盘再取字节偏移。
@@ -472,6 +485,7 @@ def cmd_start_server(args, base: Path):
                 "history": history_path.stat().st_size if history_path.exists() else 0,
                 "event_log": event_logger.log_file.stat().st_size,
             },
+            "request_journal_bytes": request_journal.size,
         }
 
     def _finalize_run(outcome: str, day: int, final_cash: float) -> None:
@@ -501,6 +515,7 @@ def cmd_start_server(args, base: Path):
         event_logger=event_logger,
         checkpoint_persist_callback=_persist_checkpoint,
         run_finalize_callback=_finalize_run,
+        request_journal=request_journal,
     )
     api_server.start(unix_socket_path=args.unix_socket)
 

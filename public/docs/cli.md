@@ -2,15 +2,16 @@
 
 ```text
 usage: novamind-operation [-h]
-                          {new-session,next-week,python,python-c,query,status,history,list-sessions,stop} ...
+                          {new-session,next-week,request-status,python,python-c,query,status,history,list-sessions,stop} ...
 
 CEOBench Simulation CLI
 
 positional arguments:
-  {new-session,next-week,python,python-c,query,status,history,list-sessions,stop}
+  {new-session,next-week,request-status,python,python-c,query,status,history,list-sessions,stop}
     new-session         Create a new simulation session
     next-week           Advance simulation by one week (7 days). Requires a
                         rationale string + 12 cash forecasts.
+    request-status      Inspect a write request by ID
     python              Execute a Python script with novamind_api
     python-c            Execute inline Python code with novamind_api
     query               Execute a SQL query
@@ -53,6 +54,7 @@ options:
 
 ```text
 usage: novamind-operation next-week [-h] [--session SESSION]
+                                    [--request-id REQUEST_ID]
                                     rationale cash_1wk_point cash_1wk_lower
                                     cash_1wk_upper cash_4wk_point
                                     cash_4wk_lower cash_4wk_upper
@@ -69,20 +71,35 @@ each horizon. Rationale replaces the old standalone log_rationale tool — it is
 now a required argument here.
 
 positional arguments:
-  rationale          Your strategic reasoning for this week's actions
-                     (required, non-empty)
-  cash_1wk_point     Point estimate of cash +7 days
-  cash_1wk_lower     95% CI lower bound, +7 days
-  cash_1wk_upper     95% CI upper bound, +7 days
-  cash_4wk_point     Point estimate of cash +28 days
-  cash_4wk_lower     95% CI lower bound, +28 days
-  cash_4wk_upper     95% CI upper bound, +28 days
-  cash_12wk_point    Point estimate of cash +84 days
-  cash_12wk_lower    95% CI lower bound, +84 days
-  cash_12wk_upper    95% CI upper bound, +84 days
-  cash_26wk_point    Point estimate of cash +182 days (~6 months)
-  cash_26wk_lower    95% CI lower bound, +182 days
-  cash_26wk_upper    95% CI upper bound, +182 days
+  rationale             Your strategic reasoning for this week's actions
+                        (required, non-empty)
+  cash_1wk_point        Point estimate of cash +7 days
+  cash_1wk_lower        95% CI lower bound, +7 days
+  cash_1wk_upper        95% CI upper bound, +7 days
+  cash_4wk_point        Point estimate of cash +28 days
+  cash_4wk_lower        95% CI lower bound, +28 days
+  cash_4wk_upper        95% CI upper bound, +28 days
+  cash_12wk_point       Point estimate of cash +84 days
+  cash_12wk_lower       95% CI lower bound, +84 days
+  cash_12wk_upper       95% CI upper bound, +84 days
+  cash_26wk_point       Point estimate of cash +182 days (~6 months)
+  cash_26wk_lower       95% CI lower bound, +182 days
+  cash_26wk_upper       95% CI upper bound, +182 days
+
+options:
+  -h, --help            show this help message and exit
+  --session SESSION     Session ID (default: latest)
+  --request-id REQUEST_ID
+                        Reuse the same ID only to retry this exact request
+```
+
+## `./novamind-operation request-status`
+
+```text
+usage: novamind-operation request-status [-h] [--session SESSION] request_id
+
+positional arguments:
+  request_id
 
 options:
   -h, --help         show this help message and exit

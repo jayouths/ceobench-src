@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 import argparse
+import uuid
 from pathlib import Path
 
 try:
@@ -181,11 +182,20 @@ def _api_call(port: int, method: str, path: str, body: dict = None) -> dict:
                             timeout=1800, port=port)
     except HTTPTransportError as exc:
         if isinstance(exc.payload, dict):
+            if exc.status >= 500 and body and body.get("request_id"):
+                exc.payload["request_id"] = body["request_id"]
             return exc.payload
         text = exc.body.decode('utf-8', errors='replace')[:500]
         print(f"Error: HTTP {exc.status}: {text}", file=sys.stderr)
         sys.exit(1)
     except (ConnectionError, OSError, ValueError) as exc:
+        if body and body.get("request_id"):
+            print(
+                f"Error: Request outcome unknown; request_id={body['request_id']}. "
+                "Check request-status before retrying with the same ID.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(f"Error: Failed to connect to server: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -226,6 +236,7 @@ def cmd_next_week(args):
         print("Error: rationale is required and must be a non-empty string.", file=sys.stderr)
         sys.exit(1)
     body = {
+        "request_id": args.request_id or uuid.uuid4().hex,
         "rationale": rationale,
         "predictions": {
             "cash_1wk":  {"point": float(args.cash_1wk_point),  "lower": float(args.cash_1wk_lower),  "upper": float(args.cash_1wk_upper)},
@@ -248,9 +259,22 @@ def cmd_next_week(args):
     else:
         error = result.get("error", "Unknown error")
         print(f"Error: {error}", file=sys.stderr)
+        if error == "internal_error":
+            print(
+                f"Request outcome unknown; request_id={body['request_id']}. "
+                "Check request-status before retrying.",
+                file=sys.stderr,
+            )
         if error in ("step_week_timeout", "step_day_timeout"):
             print("The simulation week took too long; the run will be terminated.", file=sys.stderr)
         sys.exit(1)
+
+
+def cmd_request_status(args):
+    session_id = _resolve_session(args.session)
+    port = _ensure_server_running(session_id)
+    result = _api_call(port, "GET", f"/request-status/{args.request_id}")
+    print(json.dumps(result, indent=2))
 
 
 def cmd_python(args):
@@ -495,6 +519,11 @@ Examples:
     p.add_argument("cash_26wk_lower", type=float, help="95%% CI lower bound, +182 days")
     p.add_argument("cash_26wk_upper", type=float, help="95%% CI upper bound, +182 days")
     p.add_argument("--session", type=str, default=None, help="Session ID (default: latest)")
+    p.add_argument("--request-id", type=str, default=None, help="Reuse the same ID only to retry this exact request")
+
+    p = subparsers.add_parser("request-status", help="Inspect a write request by ID")
+    p.add_argument("request_id", type=str)
+    p.add_argument("--session", type=str, default=None, help="Session ID (default: latest)")
 
     p = subparsers.add_parser("python", help="Execute a Python script with novamind_api")
     p.add_argument("script", type=str, help="Path to Python script")
@@ -553,6 +582,7 @@ def main():
     cmd_map = {
         "new-session": cmd_new_session,
         "next-week": cmd_next_week,
+        "request-status": cmd_request_status,
         "python": cmd_python,
         "python-c": cmd_python_c,
         "query": cmd_query,

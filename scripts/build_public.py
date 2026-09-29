@@ -62,6 +62,7 @@ _ENGINE_MODULES = [
     "runtime/__init__",
     "runtime/_embedded_key",
     "runtime/api_server",
+    "runtime/request_journal",
     "runtime/db_protection",
     "runtime/docs_generator",
     "runtime/server_entry",

@@ -3,6 +3,7 @@
 import shutil
 
 import sqlite3
+import sqlcipher3
 
 import tempfile
 
@@ -15,7 +16,7 @@ import pytest
 from saas_bench.runtime.api_server import NovaMindAPIServer, _APIHandler
 from saas_bench.novamind_api import analytics
 from saas_bench.agents.bash_agent.analysis.signals import SignalCollector
-from saas_bench.simulator.database import get_mrr
+from saas_bench.simulator.database import TABLE_DOCS, get_mrr
 from saas_bench.simulator.public_week_snapshot import (
     build_public_week_snapshot,
     load_public_week_snapshot,
@@ -25,6 +26,7 @@ from saas_bench.simulator.simulation import DayResult
 from saas_bench.simulator.tools import _PUBLIC_CURRENT_MRR_SQL
 
 from saas_bench.runtime import _public_cli
+from saas_bench.runtime.db_protection import create_encrypted
 
 from saas_bench.novamind_api import _client as novamind_client
 
@@ -162,6 +164,7 @@ def test_api_requests_fresh_snapshot_after_state_revision_changes():
         "checkpoint_cash": 0.0,
         "environment_llm_usage": EMPTY_ENVIRONMENT_LLM_USAGE,
         "server_log_offsets": {"history": 12, "event_log": 34},
+        "request_journal_bytes": 0,
     }
     assert calls == [(7, True)]
 
@@ -452,30 +455,33 @@ def test_api_blocks_every_undocumented_internal_table(
 
 
 @pytest.mark.parametrize(
-    ("sql", "result_column"),
+    "sql",
     [
-        ("SELECT c_max AS leaked_c_max FROM customers LIMIT 1", "leaked_c_max"),
-        ("SELECT AVG(c_max) AS avg_hidden_budget FROM customers", "avg_hidden_budget"),
+        "SELECT c_max AS leaked_c_max FROM customers LIMIT 1",
+        "SELECT AVG(c_max) AS avg_hidden_budget FROM customers",
+        "SELECT 1 FROM customers WHERE c_max > 0",
+        "SELECT * FROM main.customers LIMIT 1",
+        "SELECT first_billing_done FROM subscriptions",
+        "SELECT effect_by_group FROM agent_social_media_posts",
+        "SELECT views_by_group FROM agent_social_media_posts",
+        "SELECT future_secret FROM subscriptions",
+        "SELECT first_billing_done FROM main.subscriptions",
         (
             "SELECT leaked_c_max FROM "
-            "(SELECT c_max AS leaked_c_max FROM customers LIMIT 1)",
-            "leaked_c_max",
+            "(SELECT c_max AS leaked_c_max FROM customers LIMIT 1)"
         ),
         (
             "WITH secret AS (SELECT c_max AS hidden_budget FROM customers LIMIT 1) "
-            "SELECT hidden_budget FROM secret",
-            "hidden_budget",
+            "SELECT hidden_budget FROM secret"
         ),
-        (
-            "SELECT seat_count AS leaked_seats FROM customers LIMIT 1",
-            "leaked_seats",
-        ),
+        "SELECT seat_count AS leaked_seats FROM customers LIMIT 1",
     ],
 )
 def test_api_hides_source_columns_through_aliases_and_expressions(
-    make_initialized_sim, monkeypatch, sql, result_column
+    make_initialized_sim, monkeypatch, sql
 ):
     conn, _, _ = make_initialized_sim()
+    conn.execute("ALTER TABLE subscriptions ADD COLUMN future_secret TEXT")
     monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
     server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
     responses = []
@@ -487,12 +493,69 @@ def test_api_hides_source_columns_through_aliases_and_expressions(
     handler._handle_query()
 
     payload, status = responses[0]
-    assert status == 200
-    assert payload["success"] is True
-    assert payload["columns"] == [result_column]
-    assert payload["rows"] == [{result_column: None}]
+    assert status == 400
+    assert payload == {
+        "success": False,
+        "error": "Column is not available in public query.",
+    }
     # 查询结束后必须移除授权器，模拟器仍可读取自己的内部状态。
     assert conn.execute("SELECT c_max FROM customers LIMIT 1").fetchone()[0] is not None
+
+
+def test_encrypted_public_query_uses_the_same_column_boundary(tmp_path, monkeypatch):
+    conn = create_encrypted(tmp_path / "query.nmdb", key="query-boundary-test")
+    try:
+        conn.row_factory = sqlcipher3.Row
+        conn.execute(
+            "CREATE TABLE subscriptions (subscription_id INTEGER, first_billing_done INTEGER)"
+        )
+        conn.execute("INSERT INTO subscriptions VALUES (1, 1)")
+        conn.commit()
+        monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+        server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+        handler = _APIHandler.__new__(_APIHandler)
+        handler.server = SimpleNamespace(_api_server=server)
+        responses = []
+        handler._send_json = lambda data, status=200: responses.append((data, status))
+
+        for sql in (
+            "SELECT * FROM subscriptions",
+            "SELECT first_billing_done FROM subscriptions",
+        ):
+            handler._read_body = lambda sql=sql: {"sql": sql}
+            handler._handle_query()
+
+        assert responses[0] == ({
+            "success": True,
+            "columns": ["subscription_id"],
+            "rows": [{"subscription_id": 1}],
+            "row_count": 1,
+        }, 200)
+        assert responses[1] == ({
+            "success": False,
+            "error": "Column is not available in public query.",
+        }, 400)
+        assert conn.execute("SELECT first_billing_done FROM subscriptions").fetchone()[0] == 1
+        assert conn.execute("SELECT name FROM sqlite_temp_master").fetchall() == []
+    finally:
+        conn.close()
+
+
+def test_api_rejects_application_sql_functions(make_initialized_sim, monkeypatch):
+    conn, _, _ = make_initialized_sim()
+    conn.create_function("app_secret", 0, lambda: "private")
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {"sql": "SELECT app_secret()"}
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    assert responses == [({"success": False, "error": "Query is not permitted."}, 403)]
+    assert conn.execute("SELECT app_secret()").fetchone()[0] == "private"
 
 
 def test_api_select_star_keeps_public_columns_and_removes_hidden_columns(
@@ -517,6 +580,26 @@ def test_api_select_star_keeps_public_columns_and_removes_hidden_columns(
     assert "seat_count" not in payload["columns"]
     assert "c_max" not in payload["rows"][0]
     assert "seat_count" not in payload["rows"][0]
+
+
+@pytest.mark.parametrize("table", ["subscriptions", "agent_social_media_posts"])
+def test_api_select_star_matches_documented_columns(
+    make_initialized_sim, monkeypatch, table,
+):
+    conn, _, _ = make_initialized_sim()
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    responses = []
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    handler._read_body = lambda: {"sql": f"SELECT * FROM {table} LIMIT 1"}
+    handler._send_json = lambda data, status=200: responses.append((data, status))
+
+    handler._handle_query()
+
+    payload, status = responses[0]
+    assert status == 200
+    assert payload["columns"] == list(TABLE_DOCS[table]["columns"])
 
 
 def test_public_mrr_query_counts_enterprise_subscription_seats(
@@ -636,7 +719,8 @@ def test_api_rejects_all_database_and_connection_changes(
     ).fetchone()[0] == initial_price
     assert conn.in_transaction is False
     assert conn.execute("PRAGMA query_only").fetchone()[0] == 0
-    assert [row[1] for row in conn.execute("PRAGMA database_list")] == ["main"]
+    assert [row[1] for row in conn.execute("PRAGMA database_list")] == ["main", "temp"]
+    assert conn.execute("SELECT name FROM sqlite_temp_master").fetchall() == []
 
 
 def test_api_keeps_complex_read_queries_available(make_initialized_sim, monkeypatch):

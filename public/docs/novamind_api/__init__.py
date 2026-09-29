@@ -29,7 +29,7 @@ from . import enterprise
 from . import market
 from . import research
 from . import analytics
-from ._client import vars, query, NovaMindAPIError
+from ._client import vars, query, request_status, NovaMindAPIError
 
 # Install custom exception hook: NovaMindAPIError prints only the error
 # message (no traceback), since the traceback through urllib internals
@@ -56,5 +56,6 @@ __all__ = [
     'analytics',
     'vars',
     'query',
+    'request_status',
     'NovaMindAPIError',
 ]

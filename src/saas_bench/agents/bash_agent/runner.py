@@ -404,7 +404,8 @@ class BashAgentRunner:
             raise RuntimeError(f"Invalid simulator status: {status!r}")
         if week_advance_failed:
             raise RuntimeError(
-                "Simulator week advancement failed; resume from the previous stable checkpoint"
+                "Simulator week advancement failed; request outcome may be unknown, "
+                "so this session cannot be safely resumed"
             )
         return status
 
@@ -727,6 +728,7 @@ class BashAgentRunner:
             agent=self.agent,
             decision_cost_by_currency=self.total_decision_agent_cost_by_currency,
             server_log_offsets=server_log_offsets,
+            request_journal_bytes=persisted.get("request_journal_bytes", 0),
             resume_conversation=resume_conversation,
             pending_observation=pending_observation,
         )
@@ -1352,7 +1354,10 @@ class BashAgentRunner:
                         status="timeout",
                     )
                     print(f"\n⚠️  next_week timed out on sim day {sim_day} ({e})")
-                    print("Auto-quitting. Keeping the previous completed checkpoint.")
+                    print(
+                        "Auto-quitting. The previous checkpoint remains available "
+                        "for analysis, but this session cannot be safely resumed."
+                    )
                     game_outcome = 'timeout'
                     break
                 _tool_elapsed = _time.monotonic() - _t0
@@ -1510,7 +1515,8 @@ class BashAgentRunner:
 
         # 所有结果字段都从同一个稳定断点读取，避免现金、日期和 Token 用量错位。
         if game_outcome == 'timeout':
-            # 超时后的后台 step_week 仍可能改变内存数据库，结果必须对齐上一个可恢复断点。
+            # 超时后的后台 step_week 仍可能改变内存数据库；旧断点只用于结果归档，
+            # 请求日志会阻止从该断点恢复并重放结果不明的动作。
             stable_checkpoint = self._load_checkpoint()
             if not stable_checkpoint:
                 raise RuntimeError("Timeout occurred without a stable checkpoint")

@@ -15,8 +15,17 @@ import sys
 import threading
 import traceback
 import uuid
+from contextlib import contextmanager
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Set
+
+try:
+    import sqlcipher3
+    _QUERY_ERRORS = (sqlite3.Error, sqlcipher3.Error)
+    _QUERY_OPERATIONAL_ERRORS = (sqlite3.OperationalError, sqlcipher3.OperationalError)
+except ImportError:
+    _QUERY_ERRORS = (sqlite3.Error,)
+    _QUERY_OPERATIONAL_ERRORS = (sqlite3.OperationalError,)
 
 # Oracle mode: when set, all hidden-table/column/schema filters are bypassed
 # so the agent can see internal simulation state and _eval_* evaluation facts.
@@ -25,6 +34,7 @@ from typing import Any, Dict, List, Optional, Set
 _ORACLE_MODE: bool = os.environ.get("ORACLE_MODE") == "1"
 
 from ..simulator.tools import AgentTools, ToolResult
+from .request_journal import RequestJournal
 from ..simulator.database import TABLE_DOCS
 from ..simulator.public_week_snapshot import (
     PublicWeekSnapshot,
@@ -39,67 +49,43 @@ class _ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStr
     daemon_threads = True
 
 
-# ---- Public query policy (same policy as python_exec sandbox) ----
-
-# TABLE_DOCS 是公开表的唯一登记入口；未登记实体表默认属于模拟器内部状态。
-_PUBLIC_TABLES: Set[str] = set(TABLE_DOCS)
-
-_HIDDEN_COLUMNS: Set[str] = {
-    # Social media hidden columns
-    'sentiment', 'reputation_impact', 'influence_score',
-    # Latent customer satisfaction curve parameters (customers table)
-    'steepness_left', 'steepness_right', 'c_max',
-    # Latent customer preferences (customers table)
-    'usage_demand', 'quality_sensitivity', 'price_sensitivity',
-    'willingness_to_pay', 'usage_scale', 'patience',
-    # Enterprise negotiation parameters (customers table)
-    'reply_delay_mean', 'reply_delay_std', 'negotiation_rate', 'max_negotiation_turns',
-    # Thread hidden columns - customer/VC reply timing is internal simulation state
-    'next_reply_day',
-    # Internal tracking columns
-    'current_offer_price',
-    # Usage rate hidden - agent should only see actual (quota-capped) usage from daily_usage table
-    'daily_usage_rate', 'billing_period_usage',
-    # Customer state hidden columns (customer_state table) - internal satisfaction tracking
-    'satisfaction', 'relationship', 'open_issue_days',
-    'current_steepness_left', 'current_steepness_right', 'current_c_max', 'current_slope',
-    'last_drift_day', 'plan_was_acceptable', 'last_quality', 'last_satisfaction', 'shock_event_id',
-    # Group-level hidden state (group_reputation, group_awareness tables)
-    'reputation', 'awareness', 'last_updated_day', 'last_marketing_day',
-    # Reputation history internals
-    'change_reason',
-    # R&D project internals
-    'actual_completion_day',
-    # Enterprise negotiation internal parameter (customers table)
-    'initial_offer_factor',
-    # Customer persona internal attribute (customers table)
-    'persona_communication',
-    # Internal thread status tracking (enterprise_turns)
-    '_internal_status',
-    # V4: Latent customer quality parameters (customers table)
-    'q_max', 'q_min', 'contract_lockin_penalty',
-    # V4: Internal ads sensitivity parameters (customers table)
-    'ads_quality_sensitivity', 'ads_return_sensitivity',
-    # V4: Subscription internals
-    'churn_reason',           # Internal churn categorization
-    # V4: Social media internals (agent sees content but not engagement mechanics)
-    'likes', 'shares', 'virality_score',
-    # V4: R&D internals
-    'current_decay_reduction', 'decay_reduction_expiry_day',
-    # V4: Ads revenue internals
-    'sensitivity',            # Per-customer ads return sensitivity
-    # V4: Segment discovery internals
-    'remaining_undiscovered',
+# TABLE_DOCS.columns 是普通 Agent 唯一可见的字段清单；新加的内部列默认不可读。
+_PUBLIC_COLUMNS = {
+    table.lower(): frozenset(column.lower() for column in doc['columns'])
+    for table, doc in TABLE_DOCS.items()
 }
 
-# Table-specific hidden columns (hidden only when querying these tables)
-_TABLE_HIDDEN_COLUMNS: Dict[str, Set[str]] = {
-    # seat_count hidden from customers/ads_revenue (internal float for drift)
-    # but visible on subscriptions table (floored integer for agent)
-    'customers': {'seat_count'},
-    'ads_revenue': {'seat_count'},
-    'social_media_posts': {'customer_id'},  # V4: Hide which customer posted
-}
+
+def _quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+@contextmanager
+def _public_query_views(conn, *, oracle_mode: bool):
+    """让 SELECT * 只展开公开字段；源表直读仍由授权器检查。"""
+    created = []
+    try:
+        if not oracle_mode:
+            for table, doc in TABLE_DOCS.items():
+                existing = {
+                    row[1].lower()
+                    for row in conn.execute(
+                        f"PRAGMA main.table_info({_quote_identifier(table)})"
+                    )
+                }
+                columns = [col for col in doc['columns'] if col.lower() in existing]
+                if not columns:
+                    continue
+                projection = ', '.join(_quote_identifier(col) for col in columns)
+                conn.execute(
+                    f"CREATE TEMP VIEW {_quote_identifier(table)} AS "
+                    f"SELECT {projection} FROM main.{_quote_identifier(table)}"
+                )
+                created.append(table)
+        yield
+    finally:
+        for table in reversed(created):
+            conn.execute(f"DROP VIEW temp.{_quote_identifier(table)}")
 
 # 查询接口不能改变共享连接的事务或附加数据库状态；这些动作不是数据查询。
 _QUERY_CONNECTION_ACTIONS = {
@@ -148,30 +134,15 @@ def _is_schema_query(query: str) -> bool:
     return any(p in q for p in blocked_patterns)
 
 
-def _get_effective_hidden(sql: str = None) -> Set[str]:
-    """Get the effective set of hidden columns, including table-specific ones."""
-    hidden = set(_HIDDEN_COLUMNS)
-    if sql:
-        q = sql.lower()
-        for table, cols in _TABLE_HIDDEN_COLUMNS.items():
-            if re.search(r'\b' + re.escape(table) + r'\b', q):
-                hidden |= cols
-    return hidden
-
-
-def _strip_hidden_columns(rows: List[Dict], columns: List[str], sql: str = None) -> List[Dict]:
-    """Remove hidden columns from result rows."""
-    hidden = _get_effective_hidden(sql)
-    visible = [c for c in columns if c not in hidden]
-    return [{k: row[k] for k in visible if k in row} for row in rows]
-
-
 class _QueryAuthorizer:
     """Enforce table, column, write, and connection policy inside SQLite."""
 
-    def __init__(self, *, oracle_mode: bool):
+    def __init__(self, *, oracle_mode: bool, built_in_functions: Set[str]):
         self.oracle_mode = oracle_mode
+        self.built_in_functions = built_in_functions
         self.denied_table: Optional[str] = None
+        self.denied_column = False
+        self.denied_write = False
 
     def __call__(
         self,
@@ -185,39 +156,37 @@ class _QueryAuthorizer:
             action_code in _QUERY_CONNECTION_ACTIONS
             or action_code in _QUERY_MUTATION_ACTIONS
         ):
+            self.denied_write = True
             return sqlite3.SQLITE_DENY
 
         # Oracle 只放宽数据可见性，不获得修改数据库或连接状态的权限。
         if self.oracle_mode:
             return sqlite3.SQLITE_OK
 
-        if action_code != sqlite3.SQLITE_READ or not table_name:
+        if action_code in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_RECURSIVE):
             return sqlite3.SQLITE_OK
 
-        table = table_name.lower()
-        if table not in _PUBLIC_TABLES:
-            # 在 SQLite 解析出的真实源表上校验，别名、子查询和 CTE 无法绕过。
-            self.denied_table = table
-            return sqlite3.SQLITE_DENY
-
-        if not column_name:
+        if action_code == sqlite3.SQLITE_READ:
+            table = (table_name or '').lower()
+            if database_name not in ('main', 'temp') or table not in _PUBLIC_COLUMNS:
+                self.denied_table = table
+                return sqlite3.SQLITE_DENY
+            if column_name and column_name.lower() not in _PUBLIC_COLUMNS[table]:
+                self.denied_column = True
+                return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
 
-        column = column_name.lower()
-        hidden_for_table = _TABLE_HIDDEN_COLUMNS.get(table, set())
-        if column in _HIDDEN_COLUMNS or column in hidden_for_table:
-            # 在 SQLite 读取源字段时替换为 NULL，别名、聚合、子查询和 CTE
-            # 都无法取得真实值；同时保留 SELECT * 查询公开列的可用性。
-            return sqlite3.SQLITE_IGNORE
-        return sqlite3.SQLITE_OK
+        if (
+            action_code == sqlite3.SQLITE_FUNCTION
+            and (column_name or '').lower() in self.built_in_functions
+        ):
+            return sqlite3.SQLITE_OK
+        return sqlite3.SQLITE_DENY
 
 
 # Build table→columns mapping for helpful error messages (exclude hidden columns)
 _TABLE_COLUMNS: Dict[str, List[str]] = {
-    table_name: [
-        c for c in table_info['columns'].keys()
-        if c not in _HIDDEN_COLUMNS and c not in _TABLE_HIDDEN_COLUMNS.get(table_name, set())
-    ]
+    table_name: list(table_info['columns'])
     for table_name, table_info in TABLE_DOCS.items()
 }
 
@@ -391,6 +360,10 @@ class _APIHandler(BaseHTTPRequestHandler):
                 self._handle_dashboard_get()
             elif self.path == '/game-status':
                 self._handle_game_status()
+            elif self.path.startswith('/request-status/'):
+                request_id = self.path.removeprefix('/request-status/')
+                server: NovaMindAPIServer = self.server._api_server
+                self._send_json(server.request_status(request_id))
             else:
                 self._send_json({"error": f"Unknown endpoint: {self.path}"}, 404)
         except Exception as exc:
@@ -458,15 +431,19 @@ class _APIHandler(BaseHTTPRequestHandler):
             body = self._read_body()
             tool_name = body.get('tool', '')
             args = body.get('args', {})
+            if not isinstance(tool_name, str) or not isinstance(args, dict):
+                self._send_json({
+                    "success": False,
+                    "error": "tool must be a string and args must be an object",
+                }, 400)
+                return
 
             server: NovaMindAPIServer = self.server._api_server
-            result = server.execute_tool(tool_name, args)
-
-            if isinstance(result, ToolResult):
-                self._send_json(result.to_json())
-            else:
-                # Fallback for non-ToolResult returns
-                self._send_json({"success": True, "data": {"output": str(result)}, "message": str(result)})
+            result = server.run_request(
+                body.get('request_id'), f'call:{tool_name}', args,
+                lambda: server.execute_tool(tool_name, args),
+            )
+            self._send_json(result)
         except Exception as e:
             self._send_internal_error(e, op="call")
 
@@ -572,7 +549,11 @@ class _APIHandler(BaseHTTPRequestHandler):
                     return
                 parsed[horizon] = {"cash": {"point": point, "lower": lower, "upper": upper}}
 
-            result = server.advance_week(predictions=parsed, rationale=rationale)
+            result = server.run_request(
+                body.get('request_id'), 'next-week',
+                {"rationale": rationale, "predictions": preds_raw},
+                lambda: server.advance_week(predictions=parsed, rationale=rationale),
+            )
             self._send_json(result)
         except Exception as e:
             self._send_internal_error(e, op="next-week")
@@ -600,8 +581,7 @@ class _APIHandler(BaseHTTPRequestHandler):
     def _handle_query(self):
         """Handle SQL queries: POST /query {"sql": "SELECT ..."}
 
-        Applies hidden column/table filtering so the agent cannot
-        access internal simulation state.
+        Ordinary Agent queries can read only documented public columns.
         """
         query_authorizer: Optional[_QueryAuthorizer] = None
         try:
@@ -629,43 +609,48 @@ class _APIHandler(BaseHTTPRequestHandler):
             import time as _qt_time
             with server._lock:
                 server._query_deadline = _qt_time.monotonic() + server.QUERY_TIMEOUT_SECONDS
-                query_only_enabled = False
-                authorizer_installed = False
                 try:
-                    # 交给 SQLite 自身保证只读，不限制 JOIN、聚合、窗口函数、
-                    # 子查询或 CTE 等正常查询能力。
-                    server.conn.execute("PRAGMA query_only = ON")
-                    query_only_enabled = True
-                    query_authorizer = _QueryAuthorizer(oracle_mode=_ORACLE_MODE)
-                    server.conn.set_authorizer(query_authorizer)
-                    authorizer_installed = True
-                    cursor = server.conn.execute(sql)
-                    columns = [desc[0] for desc in cursor.description] if cursor.description else []
-                    # Fetch up to limit+1 rows to detect overflow
-                    rows_raw = cursor.fetchmany(_QUERY_ROW_LIMIT + 1)
+                    built_in_functions = set()
+                    if not _ORACLE_MODE:
+                        built_in_functions = {
+                            row[0].lower()
+                            for row in server.conn.execute("PRAGMA function_list")
+                            if row[1] and row[0].lower() != 'load_extension'
+                        }
+                    with _public_query_views(server.conn, oracle_mode=_ORACLE_MODE):
+                        query_only_enabled = False
+                        authorizer_installed = False
+                        try:
+                            # 公开视图先建好，再开启只读保护并安装源字段授权器。
+                            server.conn.execute("PRAGMA query_only = ON")
+                            query_only_enabled = True
+                            query_authorizer = _QueryAuthorizer(
+                                oracle_mode=_ORACLE_MODE,
+                                built_in_functions=built_in_functions,
+                            )
+                            server.conn.set_authorizer(query_authorizer)
+                            authorizer_installed = True
+                            cursor = server.conn.execute(sql)
+                            try:
+                                columns = [desc[0] for desc in cursor.description] if cursor.description else []
+                                rows_raw = cursor.fetchmany(_QUERY_ROW_LIMIT + 1)
+                            finally:
+                                cursor.close()
+                        finally:
+                            if authorizer_installed:
+                                server.conn.set_authorizer(None)
+                            if query_only_enabled:
+                                server.conn.execute("PRAGMA query_only = OFF")
                 finally:
-                    # 两项保护都只约束当前查询，不能影响模拟器后续推进世界。
-                    if authorizer_installed:
-                        server.conn.set_authorizer(None)
-                    if query_only_enabled:
-                        server.conn.execute("PRAGMA query_only = OFF")
                     server._query_deadline = 0.0
                 truncated = len(rows_raw) > _QUERY_ROW_LIMIT
                 if truncated:
                     rows_raw = rows_raw[:_QUERY_ROW_LIMIT]
                 rows = [dict(row) for row in rows_raw]
 
-            # Strip hidden columns from results (bypassed in oracle mode)
-            if _ORACLE_MODE:
-                hidden = set()
-            else:
-                hidden = _get_effective_hidden(sql)
-                if rows and columns:
-                    rows = _strip_hidden_columns(rows, columns, sql)
-
             response = {
                 "success": True,
-                "columns": [c for c in columns if c not in hidden],
+                "columns": columns,
                 "rows": rows,
                 "row_count": len(rows),
             }
@@ -685,11 +670,25 @@ class _APIHandler(BaseHTTPRequestHandler):
 
             self._send_json(response)
 
-        except sqlite3.OperationalError as e:
-            if "readonly" in str(e).lower():
+        except _QUERY_OPERATIONAL_ERRORS as e:
+            if (
+                "readonly" in str(e).lower()
+                or "because it is a view" in str(e).lower()
+                or (query_authorizer and query_authorizer.denied_write)
+            ):
                 self._send_json({
                     "success": False,
                     "error": "Write queries are not allowed. Use the novamind_api for all actions.",
+                }, 403)
+            elif "no such column" in str(e).lower() and not _ORACLE_MODE:
+                self._send_json({
+                    "success": False,
+                    "error": "Column is not available in public query.",
+                }, 400)
+            elif "not authorized" in str(e).lower():
+                self._send_json({
+                    "success": False,
+                    "error": "Query is not permitted.",
                 }, 403)
             # Server-side query deadline (set_progress_handler) was hit.
             # Surface a concrete, recoverable message so the agent can narrow
@@ -706,7 +705,7 @@ class _APIHandler(BaseHTTPRequestHandler):
                 }, 504)
             else:
                 self._send_json({"success": False, "error": _get_helpful_query_error(e, sql)}, 500)
-        except sqlite3.Error as e:
+        except _QUERY_ERRORS as e:
             # SQL errors are deliberately surfaced to the agent (the helper
             # rewrites them into typed hints — no source paths or tracebacks).
             if query_authorizer and query_authorizer.denied_table:
@@ -714,10 +713,20 @@ class _APIHandler(BaseHTTPRequestHandler):
                     "success": False,
                     "error": f"Table '{query_authorizer.denied_table}' is not accessible.",
                 }, 403)
-            elif "not authorized" in str(e).lower():
+            elif query_authorizer and query_authorizer.denied_column:
+                self._send_json({
+                    "success": False,
+                    "error": "Column is not available in public query.",
+                }, 400)
+            elif query_authorizer and query_authorizer.denied_write:
                 self._send_json({
                     "success": False,
                     "error": "Write queries are not allowed. Use the novamind_api for all actions.",
+                }, 403)
+            elif "not authorized" in str(e).lower():
+                self._send_json({
+                    "success": False,
+                    "error": "Query is not permitted.",
                 }, 403)
             else:
                 self._send_json({"success": False, "error": _get_helpful_query_error(e, sql)}, 500)
@@ -855,7 +864,8 @@ class NovaMindAPIServer:
     def __init__(self, tools: AgentTools, simulator=None, conn=None,
                  day_callback=None, dashboard_callback=None,
                  shock_manager=None, event_logger=None,
-                 checkpoint_persist_callback=None, run_finalize_callback=None):
+                 checkpoint_persist_callback=None, run_finalize_callback=None,
+                 request_journal: Optional[RequestJournal] = None):
         """Initialize the API server.
 
         Args:
@@ -880,6 +890,7 @@ class NovaMindAPIServer:
         self.event_logger = event_logger
         self.checkpoint_persist_callback = checkpoint_persist_callback
         self.run_finalize_callback = run_finalize_callback
+        self.request_journal = request_journal
         self._httpd: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._unix_httpd: Optional[_ThreadingUnixHTTPServer] = None
@@ -969,11 +980,36 @@ class NovaMindAPIServer:
             self._state_revision += 1
             return result
 
+    def request_status(self, request_id: str) -> Dict[str, Any]:
+        if self.request_journal is None:
+            return {"request_id": request_id, "status": "unavailable"}
+        return self.request_journal.lookup(request_id)
+
+    def run_request(self, request_id: str, operation: str, payload: dict, callback) -> dict:
+        """Serialize requests so journal order matches world mutation order."""
+        if self.request_journal is None:
+            return {"success": False, "error": "request_journal_unavailable"}
+        with self._lock:
+            def execute():
+                result = callback()
+                if isinstance(result, ToolResult):
+                    return result.to_json()
+                if isinstance(result, dict):
+                    return result
+                return {"success": True, "data": {"output": str(result)}, "message": str(result)}
+
+            return self.request_journal.run(request_id, operation, payload, execute)
+
     def persist_checkpoint(self, expected_day: int) -> Dict[str, Any]:
         """Persist one exact simulator day and report the committed day."""
         from ..simulator.database import get_api_usage_summary, get_cash
 
         with self._lock:
+            if self.request_journal is not None and any(
+                record["status"] != "completed"
+                for record in self.request_journal.records.values()
+            ):
+                return {"success": False, "error": "unrecoverable_session"}
             # step_week 超时后工作线程不一定真正停止，数据库可能仍在变化。
             # 此时拒绝生成断点，Runner 会保留上一个已确认完整的断点。
             if (
@@ -1030,6 +1066,7 @@ class NovaMindAPIServer:
                     }
                 ),
                 "server_log_offsets": persistence.get("server_log_offsets"),
+                "request_journal_bytes": persistence.get("request_journal_bytes", 0),
             }
 
     def finalize_run(self, outcome: Any) -> Dict[str, Any]:

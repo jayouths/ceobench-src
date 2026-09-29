@@ -26,6 +26,8 @@
 
 普通 Agent 和 Analysis 具有相同的数据权限。Oracle 是显式白盒上界，只放宽信息可见性，不获得写数据库的能力。离线评价只发生在运行之外，其结果不得反馈给同一次经营决策。
 
+公开 SQL 查询以 `TABLE_DOCS` 中的 `columns` 为字段白名单；普通 Agent 的 `SELECT *` 只展开这些字段，显式读取内部或未登记字段会失败。Oracle 仍可读取模拟器内部字段和评价事实，但不能通过查询接口修改数据库。
+
 该表描述公开 API 的逻辑可见性。客户端数据库加密的实际威胁边界另见 [数据库加密与访问边界](database-encryption.md)。
 
 ## 3. Bash Agent Harness

@@ -1,6 +1,7 @@
 """HTTP client for communicating with the NovaMind API server."""
 
 import sys
+import uuid
 from typing import Any, Dict, Optional
 
 from ._transport import HTTPTransportError, request_json
@@ -9,6 +10,10 @@ from ._transport import HTTPTransportError, request_json
 class NovaMindAPIError(Exception):
     """Raised when an API call fails."""
     pass
+
+
+class NovaMindRequestOutcomeUnknown(NovaMindAPIError):
+    """Transport or server failure after a write may hide its outcome."""
 
 
 class _Vars:
@@ -26,15 +31,16 @@ def _request(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> D
     try:
         return request_json(method, path, body)
     except HTTPTransportError as exc:
+        error_type = NovaMindRequestOutcomeUnknown if exc.status >= 500 else NovaMindAPIError
         if isinstance(exc.payload, dict):
-            raise NovaMindAPIError(exc.payload.get('error', f'HTTP {exc.status}'))
+            raise error_type(exc.payload.get('error', f'HTTP {exc.status}')) from exc
         text = exc.body.decode('utf-8', errors='replace')[:500]
-        raise NovaMindAPIError(f"HTTP {exc.status}: {text}")
+        raise error_type(f"HTTP {exc.status}: {text}") from exc
     except (ConnectionError, OSError, ValueError) as exc:
-        raise NovaMindAPIError(f"Failed to connect to API server: {exc}")
+        raise NovaMindRequestOutcomeUnknown(f"Failed to connect to API server: {exc}") from exc
 
 
-def call(tool_name: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def call(tool_name: str, args: Optional[Dict[str, Any]] = None, *, request_id: Optional[str] = None) -> Dict[str, Any]:
     """Call a tool on the API server and return the result.
 
     Args:
@@ -47,7 +53,16 @@ def call(tool_name: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     Raises:
         NovaMindAPIError: On failure (also prints to stderr)
     """
-    result = _request('POST', '/call', {"tool": tool_name, "args": args or {}})
+    request_id = request_id or uuid.uuid4().hex
+    try:
+        result = _request('POST', '/call', {
+            "tool": tool_name, "args": args or {}, "request_id": request_id,
+        })
+    except NovaMindRequestOutcomeUnknown as exc:
+        raise NovaMindAPIError(
+            f"Request outcome unknown; request_id={request_id}. "
+            "Check request_status before retrying with the same ID."
+        ) from exc
 
     if not result.get('success', False):
         error_msg = result.get('error', 'Unknown error')
@@ -56,7 +71,7 @@ def call(tool_name: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     return result.get('data', {})
 
 
-def next_week(predictions: Dict[str, Any] = None, rationale: str = None) -> Dict[str, Any]:
+def next_week(predictions: Dict[str, Any] = None, rationale: str = None, *, request_id: Optional[str] = None) -> Dict[str, Any]:
     """Advance the simulator by one week (7 days).
 
     Args:
@@ -95,6 +110,7 @@ def next_week(predictions: Dict[str, Any] = None, rationale: str = None) -> Dict
         }
 
     body = {
+        "request_id": request_id or uuid.uuid4().hex,
         "rationale": rationale,
         "predictions": {
             "cash_1wk":  _entry(predictions["cash_1wk"]),
@@ -103,13 +119,24 @@ def next_week(predictions: Dict[str, Any] = None, rationale: str = None) -> Dict
             "cash_26wk": _entry(predictions["cash_26wk"]),
         },
     }
-    result = _request('POST', '/next-week', body)
+    try:
+        result = _request('POST', '/next-week', body)
+    except NovaMindRequestOutcomeUnknown as exc:
+        raise NovaMindAPIError(
+            f"Request outcome unknown; request_id={body['request_id']}. "
+            "Check request_status before retrying with the same ID."
+        ) from exc
 
     if not result.get('success', False):
         error_msg = result.get('error', 'Unknown error')
         raise NovaMindAPIError(error_msg)
 
     return result
+
+
+def request_status(request_id: str) -> Dict[str, Any]:
+    """Inspect a write request after a lost HTTP response."""
+    return _request('GET', f'/request-status/{request_id}')
 
 
 
