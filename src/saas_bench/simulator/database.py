@@ -156,6 +156,7 @@ TABLE_DOCS = {
         'columns': {
             'post_id': 'INTEGER PRIMARY KEY — Unique post ID',
             'day': 'INTEGER — Day posted',
+            'reply_to_agent_post_id': 'INTEGER — Agent post this customer post replies to (NULL for an original post)',
             'content': 'TEXT — Post content text',
         },
         'internal_columns': {

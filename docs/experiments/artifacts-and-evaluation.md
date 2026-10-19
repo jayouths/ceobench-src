@@ -13,6 +13,9 @@ outputs/runs/<experiment_name>/<北京时间>_seed-<seed>_<run_id>/
 ├── logs/
 │   ├── trajectory_<run_id>.jsonl
 │   └── performance_<run_id>.jsonl
+├── agent_workspace/sessions/<session_id>/
+│   ├── session.json
+│   └── request-journal.jsonl
 ├── analysis/day_XXX/             # 仅 Analysis 组存在
 └── evaluation/                   # 执行离线评价后生成
 ```
@@ -30,8 +33,21 @@ outputs/runs/<experiment_name>/<北京时间>_seed-<seed>_<run_id>/
 | `logs/trajectory_*.jsonl` | 按发生顺序记录周边界、模型调用、工具执行和重试 | 否 |
 | `logs/performance_*.jsonl` | 记录模型调用、耗时、Token 和成本汇总 | 仅运行与成本指标 |
 | `analysis/day_XXX/` | 保存信号、角色报告、经营画像和战略简报 | 仅模块过程分析 |
+| `agent_workspace/sessions/<session_id>/request-journal.jsonl` | 宿主侧写请求原始日志，保存幂等回执和动作审计字段 | 否 |
 
 经营结果统一从 `world.nmdb` 复算；日志不承担现金、订阅或服务状态采集。`result.json` 是运行结束时的便捷摘要，不替代原始事实。
+
+宿主侧查看经营动作：
+
+```bash
+uv run --frozen python scripts/audit_requests.py <run_dir>
+```
+
+只读输出包含动作、输入、调用前后模拟日、时间和已知成功状态，不包含原始工具回执。`completed` 仅表示服务端已写入结果；`world_snapshot_covered` 与 `runner_checkpoint_covered` 分别表示该结果是否已进入持久化世界与可恢复断点。`pending` 的执行结果未知，不能当作失败或成功。旧日志没有的审计字段保留为 `null`，不推断补齐；残缺日志会报错。
+
+公开 CLI 的 `history` 只读取 `client-history.jsonl` 中的本地查询、脚本和命令诊断，不是 SDK 动作审计。它与宿主 `history.jsonl` 的周推进记录分开，不能影响 Runner 的日志恢复边界。经 Runner 注入 Socket 的 Agent 不会写这份本地诊断文件。
+
+请求完成前统一提交内存数据库事务，避免高级配置修改后立即备份卡在未完成的写事务；内存提交不等于 `world.nmdb` 已持久化，仍以世界快照和 Runner 断点的覆盖边界为准。退出时无法完成安全保存，会记录具体错误并将非终态会话标记为 `unrecoverable`，不会伪报为正常停止或覆盖已有世界快照。
 
 ## 3. 数据可见性
 

@@ -3,12 +3,12 @@
     "name": "set_targeted_ops_spend",
     "python_call": "novamind_api.analytics.set_targeted_ops_spend(...)",
     "category": "Marketing & Spend",
-    "description": "Set ADDITIONAL operations spending targeted at specific scopes (group, plan, group+plan, individual customer). Each scope runs its own independent Poisson resolution pool on top of the global ops pool.",
+    "description": "Set ADDITIONAL operations spending targeted at specific scopes (group, plan, group+plan, individual customer). Amounts must be finite non-negative numbers, not booleans. Each scope runs its own independent Poisson resolution pool on top of the global ops pool.",
     "parameters": {
       "by_group": "Dict[str, float] \u2014 {group_id: $/day}. Groups: S1-S3, E1-E3, discovered.",
       "by_plan": "Dict[str, float] \u2014 {plan: $/day}, plan \u2208 {A, B, C}. Applies across all groups.",
       "by_group_plan": "Dict[str, Dict[str, float]] \u2014 {group_id: {plan: $/day}}. Intersection of group and plan.",
-      "by_customer": "Dict[str, float] \u2014 {customer_id (as string): $/day}. Single-customer targeting."
+      "by_customer": "Dict[str, float] \u2014 {positive integer customer_id (as string): $/day}. Single-customer targeting."
     },
     "inputSchema": {
       "type": "object",
@@ -46,7 +46,7 @@
     },
     "returns": {
       "success": "Targeted ops spend updated (extra $650/day on top of global ops):\n  Groups: E1: +$300/day\n  Plans: A: +$200/day\n  Group-Plans: E2/B: +$100/day\n  Customers: 1 target(s), +$50/day total",
-      "failure": "Invalid group IDs: {X}. | Invalid plans: {X}. Valid: ['A', 'B', 'C']. | Customer ID 'X' must be an integer."
+      "failure": "Invalid group IDs: {X}. | Invalid plans: {X}. Valid: ['A', 'B', 'C']. | Customer ID 'X' must be a positive integer. | Amounts and total spend must be finite non-negative numbers."
     },
     "output_schema": {
       "by_group": "Dict[str, float]",

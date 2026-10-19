@@ -260,8 +260,8 @@ def _create_simulator_llm_client(config: BenchmarkConfig, prefix: str):
 # Commands
 # =========================================================================
 
-def cmd_new_session(args, base: Path):
-    """Create a new simulation session."""
+def _create_new_session(args, base: Path):
+    """Initialize one session after the workspace's creation lock is acquired."""
     session_id = _generate_session_id()
     sdir = _session_dir(base, session_id)
     sdir.mkdir(parents=True, exist_ok=True)
@@ -328,6 +328,19 @@ def cmd_new_session(args, base: Path):
     print(json.dumps(result, indent=2))
 
 
+def cmd_new_session(args, base: Path):
+    """Allow one established game per workspace, including after it ends."""
+    base.mkdir(parents=True, exist_ok=True)
+    with (base / ".game-creation.lock").open("a+") as lock:
+        # Hold the lock through initialization: two concurrent callers must not
+        # both observe an empty sessions/ directory and create separate games.
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if any(_sessions_dir(base).glob("*/session.json")):
+            print(json.dumps({"success": False, "error": "one_game_only"}))
+            return
+        _create_new_session(args, base)
+
+
 def cmd_start_server(args, base: Path):
     """Start the API server for a session (runs in foreground)."""
     session_id = _resolve_session(base, args.session)
@@ -342,6 +355,8 @@ def cmd_start_server(args, base: Path):
 
     # Load session metadata
     meta = json.loads(_session_meta_path(base, session_id).read_text())
+    if meta.get("status") == "unrecoverable":
+        raise RuntimeError(f"Session cannot safely resume: {meta.get('error', 'unrecoverable_session')}")
     seed = meta["seed"]
     total_days = meta["total_days"]
 
@@ -397,8 +412,18 @@ def cmd_start_server(args, base: Path):
     # Restore RNG states from database for deterministic resume
     if current_day > 0:
         simulator.current_day = current_day
-        if not simulator.restore_rng_states():
-            print(f"WARNING: No saved RNG states found — RNG will NOT match continuous run", file=sys.stderr)
+        try:
+            restored = simulator.restore_rng_states()
+        except (KeyError, ValueError, TypeError, RuntimeError) as exc:
+            print(f"WARN: Invalid simulator checkpoint state: {exc}; resume aborted", file=sys.stderr)
+            raise RuntimeError("Invalid simulator checkpoint state; refusing an incomplete resume") from exc
+        if not restored:
+            # 丢失随机状态不能从初始种子接着跑，否则同一断点会进入另一个随机世界。
+            print("WARN: Checkpoint is missing the simulator RNG state; resume aborted", file=sys.stderr)
+            raise RuntimeError(
+                "Checkpoint is missing the simulator RNG state; "
+                "refusing a non-deterministic resume"
+            )
         if not shock_manager.restore_rng_state():
             raise RuntimeError(
                 "Checkpoint is missing the demand-shock RNG state; "
@@ -555,13 +580,21 @@ def cmd_start_server(args, base: Path):
         api_server.stop()
         # Runner 通常已先完成断点持久化。若仍有稳定的新状态，则在退出前补一次保存。
         try:
-            api_server.persist_checkpoint(tools.current_day)
-            async_saver.shutdown(wait=True, timeout=180.0)
-        except Exception:
-            pass
+            persisted = api_server.persist_checkpoint(tools.current_day)
+            if not persisted.get("success") and meta.get("status") not in {"completed", "bankrupt"}:
+                meta["status"] = "unrecoverable"
+                meta["error"] = persisted.get("error", "checkpoint_persistence_failed")
+                print(f"WARN: Session cannot be resumed after shutdown: {meta['error']}", file=sys.stderr)
+            if not async_saver.shutdown(wait=True, timeout=180.0):
+                raise TimeoutError("Timed out draining the encrypted database saver")
+        except Exception as exc:
+            if meta.get("status") not in {"completed", "bankrupt"}:
+                meta["status"] = "unrecoverable"
+                meta["error"] = "checkpoint_persistence_failed"
+            print(f"WARN: Unable to persist session during shutdown: {exc}", file=sys.stderr)
         event_logger.close()
         # completed/bankrupt 是实验终态，不能被进程退出状态覆盖。
-        if meta.get("status") not in {"completed", "bankrupt"}:
+        if meta.get("status") not in {"completed", "bankrupt", "unrecoverable"}:
             meta["status"] = "stopped"
         meta.pop("port", None)
         meta.pop("pid", None)
@@ -583,6 +616,25 @@ def cmd_start_server(args, base: Path):
         _shutdown(None, None)
 
 
+def _wait_for_exit(pid: int, timeout: float = 30.0) -> bool:
+    """停止信号仅表示已请求退出，必须等待进程确实结束。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        # Linux 僵尸进程已结束，仅等待父进程回收，不能误报仍在执行。
+        stat = Path(f"/proc/{pid}/stat")
+        try:
+            if stat.read_text().split(") ", 1)[1].startswith("Z"):
+                return True
+        except (OSError, IndexError):
+            pass
+        time.sleep(0.1)
+    return False
+
+
 def cmd_stop_server(args, base: Path):
     """Stop a running API server."""
     session_id = _resolve_session(base, args.session)
@@ -595,7 +647,12 @@ def cmd_stop_server(args, base: Path):
     pid = int(pid_path.read_text().strip())
     try:
         os.kill(pid, signal.SIGTERM)
-        print(json.dumps({"success": True, "stopped_pid": pid}))
+        stopped = _wait_for_exit(pid)
+        print(json.dumps({
+            "success": stopped,
+            "stopped_pid": pid if stopped else None,
+            "error": None if stopped else "stop_pending",
+        }))
     except ProcessLookupError:
         # Already dead, clean up
         pid_path.unlink(missing_ok=True)

@@ -13,7 +13,7 @@ and run scripts with `./novamind-operation python <script.py>` or
 | `set_model_tiers` | Set AI model tiers for plans A, B, and C. Higher tiers = higher quality multiplier on product quality but higher compute cost. |
 | `set_daily_spend` | Set daily spending for operations and development. Advertising spend is set via set_targeted_ad_spend (per channel × group) only. |
 | `set_targeted_ad_spend` | Set per-(channel, group) ad spend. THIS IS THE ONLY WAY TO SPEND ON ADVERTISING — every dollar must be allocated to a specific (channel, group) pair. |
-| `set_targeted_ops_spend` | Set ADDITIONAL operations spending targeted at specific scopes (group, plan, group+plan, individual customer). Each scope runs its own independent Poisson resolution pool on top of the global ops pool. |
+| `set_targeted_ops_spend` | Set ADDITIONAL operations spending targeted at specific scopes (group, plan, group+plan, individual customer). Amounts must be finite non-negative numbers, not booleans. Each scope runs its own independent Poisson resolution pool on top of the global ops pool. |
 | `set_targeted_dev_spend` | Set ADDITIONAL per-group development spending on top of the global dev spend. Provides a CUMULATIVE per-group quality bonus that grows daily while spending continues. Investment persists even after spending stops. |
 | `set_capacity_tier` | Set infrastructure capacity tier. Higher tiers handle more usage but cost more per day. |
 | `set_usage_quotas` | Set daily usage quotas (rate limits) per customer for each plan. Exceeding quota degrades experience. |
@@ -1113,14 +1113,14 @@ Set ADDITIONAL per-group development spending on top of the global dev spend. Pr
 
 **Python:** `novamind_api.analytics.set_targeted_ops_spend(...)`
 
-Set ADDITIONAL operations spending targeted at specific scopes (group, plan, group+plan, individual customer). Each scope runs its own independent Poisson resolution pool on top of the global ops pool.
+Set ADDITIONAL operations spending targeted at specific scopes (group, plan, group+plan, individual customer). Amounts must be finite non-negative numbers, not booleans. Each scope runs its own independent Poisson resolution pool on top of the global ops pool.
 
 **Parameters:**
 
 - `by_group`: Dict[str, float] — {group_id: $/day}. Groups: S1-S3, E1-E3, discovered.
 - `by_plan`: Dict[str, float] — {plan: $/day}, plan ∈ {A, B, C}. Applies across all groups.
 - `by_group_plan`: Dict[str, Dict[str, float]] — {group_id: {plan: $/day}}. Intersection of group and plan.
-- `by_customer`: Dict[str, float] — {customer_id (as string): $/day}. Single-customer targeting.
+- `by_customer`: Dict[str, float] — {positive integer customer_id (as string): $/day}. Single-customer targeting.
 
 **Input Schema:**
 ```json
@@ -1166,7 +1166,7 @@ Set ADDITIONAL operations spending targeted at specific scopes (group, plan, gro
   Plans: A: +$200/day
   Group-Plans: E2/B: +$100/day
   Customers: 1 target(s), +$50/day total
-- failure: Invalid group IDs: {X}. | Invalid plans: {X}. Valid: ['A', 'B', 'C']. | Customer ID 'X' must be an integer.
+- failure: Invalid group IDs: {X}. | Invalid plans: {X}. Valid: ['A', 'B', 'C']. | Customer ID 'X' must be a positive integer. | Amounts and total spend must be finite non-negative numbers.
 
 **Impact:** Fine-grained targeting of operations spend. Use by_customer to rescue a high-value individual, by_plan for tier-wide support surge, by_group for segment-wide, and by_group_plan for the most precise segment×tier investment.
 

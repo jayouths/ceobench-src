@@ -1,5 +1,7 @@
 """按职责拆分的 Harness 回归测试。"""
 
+import builtins
+import json
 import shutil
 
 import sqlite3
@@ -16,7 +18,7 @@ import pytest
 from saas_bench.runtime.api_server import NovaMindAPIServer, _APIHandler
 from saas_bench.novamind_api import analytics
 from saas_bench.agents.bash_agent.analysis.signals import SignalCollector
-from saas_bench.simulator.database import TABLE_DOCS, get_mrr
+from saas_bench.simulator.database import TABLE_DOCS, add_agent_social_post, get_mrr
 from saas_bench.simulator.public_week_snapshot import (
     build_public_week_snapshot,
     load_public_week_snapshot,
@@ -27,6 +29,7 @@ from saas_bench.simulator.tools import _PUBLIC_CURRENT_MRR_SQL
 
 from saas_bench.runtime import _public_cli
 from saas_bench.runtime.db_protection import create_encrypted
+from saas_bench.runtime.request_journal import RequestJournal
 
 from saas_bench.novamind_api import _client as novamind_client
 
@@ -127,6 +130,141 @@ def test_targeted_ops_api_dispatches_all_four_scopes():
             "by_customer": {"42": 50},
         }
     ]
+
+def test_targeted_ops_http_rejects_invalid_inputs_and_preserves_scope_semantics(
+    tmp_path, make_initialized_sim, make_agent_tools, monkeypatch,
+):
+    original, _, config = make_initialized_sim()
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    original.backup(conn)
+    original.close()
+    tools = make_agent_tools(conn, config)
+    journal = RequestJournal(tmp_path / "request-journal.jsonl", 0)
+    server = NovaMindAPIServer(tools, conn=conn, request_journal=journal)
+    server.start()
+    monkeypatch.delenv("NOVAMIND_API_SOCKET", raising=False)
+    monkeypatch.setenv("NOVAMIND_API_PORT", str(server.port))
+    try:
+        expected = analytics.set_targeted_ops_spend(
+            by_group={"S1": 10}, by_plan={"A": 20},
+            by_group_plan={"E1": {"C": 30}}, by_customer={"999999999": 40},
+        )
+        assert expected["total_extra_per_day"] == 100
+        before_records = list(conn.execute("SELECT * FROM config_overrides"))
+        before_ledger = list(conn.execute("SELECT * FROM ledger"))
+        invalid_inputs = [
+            {"by_group": {"S1": True}},
+            {"by_group": {"S1": 100}, "by_customer": {"0": 10}},
+            {"by_group": {"S1": 100}, "by_plaN": {"A": 20}},
+            {"by_group": {"S1": 1e308}, "by_plan": {"A": 1e308}},
+        ]
+        for index, args in enumerate(invalid_inputs):
+            request_id = f"invalid-ops-{index}"
+            result = request_json("POST", "/call", {
+                "request_id": request_id, "tool": "set_targeted_ops_spend", "args": args,
+            }, port=server.port)
+            assert result["success"] is False
+            assert journal.lookup(request_id)["status"] == "completed"
+            assert list(conn.execute("SELECT * FROM config_overrides")) == before_records
+            assert list(conn.execute("SELECT * FROM ledger")) == before_ledger
+        assert config.targeted_ops_spend == expected["by_group"]
+        assert config.targeted_ops_spend_by_plan == expected["by_plan"]
+        assert config.targeted_ops_spend_by_group_plan == expected["by_group_plan"]
+        assert config.targeted_ops_spend_by_customer == {999999999: 40.0}
+        assert analytics.set_targeted_ops_spend()["total_extra_per_day"] == 100
+        assert analytics.set_targeted_ops_spend(by_group={})["total_extra_per_day"] == 90
+        assert analytics.set_targeted_ops_spend(
+            by_plan={}, by_group_plan={}, by_customer={},
+        )["total_extra_per_day"] == 0
+        assert analytics.set_targeted_ops_spend(by_group={"S1": 0})["by_group"] == {"S1": 0.0}
+    finally:
+        server.stop()
+        conn.close()
+
+
+def test_social_processing_exposes_only_public_feedback(
+    tmp_path, make_initialized_sim, make_agent_tools, monkeypatch,
+):
+    original, simulator, config = make_initialized_sim(seed=42)
+    original.execute(
+        "ALTER TABLE social_media_posts ADD COLUMN future_private TEXT DEFAULT 'PRIVATE_FUTURE'"
+    )
+    post_id = add_agent_social_post(original, day=0, content="A public product update")
+    simulator.customer_simulator = SimpleNamespace(
+        create_social_response=lambda **kwargs: None,
+        _log_cost=lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "saas_bench.simulator.database.get_discovered_groups", lambda _conn: ["S1"],
+    )
+    monkeypatch.setattr(
+        "saas_bench.simulator.customer_llm.judge_agent_social_post",
+        lambda *args: (0.85, "PRIVATE_JUDGE_REASONING", 1, 1, 0, "mock", False),
+    )
+    monkeypatch.setattr(
+        "saas_bench.simulator.customer_llm.generate_customer_reply_to_agent",
+        lambda *args: ("A public customer response", 1, 1, 0, "mock", False),
+    )
+    original_open = builtins.open
+
+    def safe_open(path, *args, **kwargs):
+        assert "social_reply_debug" not in str(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", safe_open)
+    simulator.current_day = 1
+    simulator._process_agent_social_posts(simulator.get_current_config())
+    private = original.execute(
+        "SELECT * FROM agent_social_media_posts WHERE agent_post_id = ?", (post_id,),
+    ).fetchone()
+    assert json.loads(private["effect_by_group"]) == {"S1": 0.85}
+    assert json.loads(private["reasoning_by_group"]) == {"S1": "PRIVATE_JUDGE_REASONING"}
+    assert private["views"] > 0
+    comment_ids = json.loads(private["comment_post_ids"])
+    assert len(comment_ids) == 1
+
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    original.backup(conn)
+    original.close()
+    tools = make_agent_tools(conn, config, day=1)
+    server = NovaMindAPIServer(
+        tools, conn=conn,
+        request_journal=RequestJournal(tmp_path / "request-journal.jsonl", 0),
+    )
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+    monkeypatch.delenv("NOVAMIND_API_SOCKET", raising=False)
+    server.start()
+    monkeypatch.setenv("NOVAMIND_API_PORT", str(server.port))
+    try:
+        public_post = {
+            "post_id": comment_ids[0], "day": 1,
+            "content": "A public customer response", "reply_to_agent_post_id": post_id,
+        }
+        posts = analytics.get_social_posts()["posts"]
+        assert posts == [{**public_post, "replying_to_your_post": "A public product update"}]
+        assert novamind_client.query("SELECT * FROM social_media_posts")["rows"] == [public_post]
+        notification = novamind_client.query(
+            "SELECT message FROM notifications WHERE type = 'social_media'"
+        )["rows"][0]["message"]
+        assert f'{private["views"]:,} views' in notification
+        assert "A public product update" in notification
+        assert "Read customer comments" in notification
+        assert "Top reactions" not in notification and "positively" not in notification
+        assert "S1" not in notification and "PRIVATE" not in notification
+        for sql in (
+            "SELECT effect_by_group FROM agent_social_media_posts",
+            "SELECT reasoning_by_group FROM agent_social_media_posts",
+            "SELECT source_group_id FROM social_media_posts",
+            "SELECT future_private FROM social_media_posts",
+        ):
+            with pytest.raises(novamind_client.NovaMindAPIError):
+                novamind_client.query(sql)
+    finally:
+        server.stop()
+        conn.close()
+
 
 def test_api_rejects_checkpoint_while_week_state_is_unstable():
     calls = []
@@ -537,6 +675,40 @@ def test_encrypted_public_query_uses_the_same_column_boundary(tmp_path, monkeypa
         }, 400)
         assert conn.execute("SELECT first_billing_done FROM subscriptions").fetchone()[0] == 1
         assert conn.execute("SELECT name FROM sqlite_temp_master").fetchall() == []
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("driver", ["sqlite", "sqlcipher"])
+def test_every_public_column_accepts_sqlite_identifier_casing(
+    tmp_path, make_initialized_sim, monkeypatch, driver,
+):
+    from saas_bench.runtime.db_protection import load_session_db, save_session_db
+
+    conn, _, _ = make_initialized_sim()
+    if driver == "sqlcipher":
+        monkeypatch.setenv("NMDB_KEY", "column-casing-test-key")
+        path = tmp_path / "casing.nmdb"
+        save_session_db(conn, path)
+        conn.close()
+        conn = load_session_db(path, in_memory=False)
+    monkeypatch.setattr("saas_bench.runtime.api_server._ORACLE_MODE", False)
+    server = NovaMindAPIServer(tools=SimpleNamespace(current_day=0), conn=conn)
+    handler = _APIHandler.__new__(_APIHandler)
+    handler.server = SimpleNamespace(_api_server=server)
+    responses = []
+    handler._send_json = lambda payload, status=200: responses.append((payload, status))
+    try:
+        for table, doc in TABLE_DOCS.items():
+            for spelling in (str.upper, str.swapcase):
+                columns = ", ".join(f'"{spelling(column)}"' for column in doc['columns'])
+                for prefix in ("", "main."):
+                    sql = f'SELECT {columns} FROM {prefix}"{spelling(table)}" LIMIT 0'
+                    handler._read_body = lambda: {"sql": sql}
+                    handler._handle_query()
+                    payload, status = responses.pop()
+                    assert status == 200 and payload["success"], (sql, payload)
+                    assert len(payload["columns"]) == len(doc['columns'])
     finally:
         conn.close()
 

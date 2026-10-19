@@ -14,14 +14,16 @@ CLI and the ``novamind_api`` SDK source at ``docs/novamind_api/``.
 """
 
 import json
+import fcntl
+import http.client
 import os
-import signal
 import subprocess
 import sys
 import time
 import argparse
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     from _novamind_transport import HTTPTransportError, request_json
@@ -128,67 +130,90 @@ def _ensure_server_running(session_id: str) -> int:
     sdir = _sessions_dir() / session_id
     pid_file = sdir / ".server.pid"
     port_file = sdir / ".server.port"
-
-    if pid_file.exists() and port_file.exists():
-        pid = int(pid_file.read_text().strip())
-        try:
-            os.kill(pid, 0)
-            return int(port_file.read_text().strip())
-        except ProcessLookupError:
-            pid_file.unlink(missing_ok=True)
-            port_file.unlink(missing_ok=True)
-
-    # Redirect server stdout/stderr to a log file so the orphaned server
-    # can keep writing after this CLI process exits. Previously we used
-    # subprocess.PIPE; once the parent CLI exited, the pipe's read end was
-    # closed and the next server stderr write raised BrokenPipeError, which
-    # surfaced to the agent as "internal_error" on the second next-week call.
-    logs_dir = sdir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = logs_dir / "server.log"
-    log_fd = open(log_path, "ab", buffering=0)
-    try:
-        cmd = _server_cmd_prefix() + ["--base", str(_base_dir()),
-                                       "start-server", "--session", session_id]
-        subprocess.Popen(
-            cmd,
-            stdout=log_fd,
-            stderr=log_fd,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            env=_server_env(),
-        )
-    finally:
-        log_fd.close()
-
-    for _ in range(100):  # 10 s
-        time.sleep(0.1)
-        if port_file.exists():
+    with (sdir / ".startup.lock").open("a+") as startup_lock:
+        # 多个 CLI 调用只能共同等待一次启动，不能各自启动一个服务。
+        fcntl.flock(startup_lock, fcntl.LOCK_EX)
+        if pid_file.exists() and port_file.exists():
+            pid = int(pid_file.read_text().strip())
             try:
+                os.kill(pid, 0)
                 return int(port_file.read_text().strip())
-            except ValueError:
-                continue
+            except ProcessLookupError:
+                pass
+        meta = _session_meta(session_id)
+        if meta.get("status") != "created":
+            print(
+                "Error: Server is not running. Resume this same experiment through "
+                "the host --resume entry; do not restart or create a replacement game.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for path in (pid_file, port_file):
+            path.unlink(missing_ok=True)
 
-    print(
-        f"Error: Failed to start server. See {log_path} for details.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+        # 独立 CLI 仅可首次启动 created 会话；正式实验始终由 Runner 持有服务生命周期。
+        logs_dir = sdir / "logs"
+        logs_dir.mkdir(exist_ok=True)
+        log_path = logs_dir / "server.log"
+        with log_path.open("ab", buffering=0) as log_fd:
+            cmd = _server_cmd_prefix() + ["--base", str(_base_dir()),
+                                           "start-server", "--session", session_id]
+            child = subprocess.Popen(
+                cmd,
+                stdout=log_fd,
+                stderr=log_fd,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                env=_server_env(),
+            )
+
+        for _ in range(1800):  # Three minutes; only one launch, no automatic retry.
+            if child.poll() is not None:
+                print(
+                    f"Error: Server exited during startup. See {log_path}; "
+                    "do not create a replacement game.", file=sys.stderr,
+                )
+                sys.exit(1)
+            if port_file.exists():
+                try:
+                    return int(port_file.read_text().strip())
+                except ValueError:
+                    pass
+            time.sleep(0.1)
+
+        print(
+            f"Error: Server startup is not confirmed. See {log_path}; "
+            "do not launch another server or create a replacement game.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _api_call(port: int, method: str, path: str, body: dict = None) -> dict:
+    request_id = (body or {}).get("request_id")
     try:
-        return request_json(method, path, body if method in {"POST", "DELETE"} else None,
-                            timeout=1800, port=port)
+        result = request_json(method, path, body if method in {"POST", "DELETE"} else None,
+                              timeout=1800, port=port)
+        if request_id and (not isinstance(result, dict) or type(result.get("success")) is not bool):
+            print(
+                f"Error: Request outcome unknown; request_id={request_id}. "
+                "Invalid response; check request-status.", file=sys.stderr,
+            )
+            sys.exit(1)
+        return result
     except HTTPTransportError as exc:
+        if request_id and exc.status >= 500:
+            print(
+                f"Error: Request outcome unknown; request_id={request_id}. "
+                "Check request-status; do not replay with a new ID.", file=sys.stderr,
+            )
+            sys.exit(1)
         if isinstance(exc.payload, dict):
-            if exc.status >= 500 and body and body.get("request_id"):
-                exc.payload["request_id"] = body["request_id"]
             return exc.payload
         text = exc.body.decode('utf-8', errors='replace')[:500]
         print(f"Error: HTTP {exc.status}: {text}", file=sys.stderr)
         sys.exit(1)
-    except (ConnectionError, OSError, ValueError) as exc:
+    except (ConnectionError, OSError, ValueError, http.client.HTTPException) as exc:
         if body and body.get("request_id"):
             print(
                 f"Error: Request outcome unknown; request_id={body['request_id']}. "
@@ -203,7 +228,7 @@ def _api_call(port: int, method: str, path: str, body: dict = None) -> dict:
 def _log_history(session_id: str, entry: dict):
     if session_id == "__env__":
         return
-    history_path = _sessions_dir() / session_id / "history.jsonl"
+    history_path = _sessions_dir() / session_id / "client-history.jsonl"
     try:
         with open(history_path, "a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
@@ -245,6 +270,7 @@ def cmd_next_week(args):
             "cash_26wk": {"point": float(args.cash_26wk_point), "lower": float(args.cash_26wk_lower), "upper": float(args.cash_26wk_upper)},
         }
     }
+    print(json.dumps({"request_id": body["request_id"]}), file=sys.stderr, flush=True)
     result = _api_call(port, "POST", "/next-week", body)
     if result.get("success"):
         dashboard = result.get("dashboard", "")
@@ -273,7 +299,7 @@ def cmd_next_week(args):
 def cmd_request_status(args):
     session_id = _resolve_session(args.session)
     port = _ensure_server_running(session_id)
-    result = _api_call(port, "GET", f"/request-status/{args.request_id}")
+    result = _api_call(port, "GET", f"/request-status/{quote(args.request_id, safe='')}")
     print(json.dumps(result, indent=2))
 
 
@@ -324,17 +350,10 @@ def _execute_python(session_id: str, port: int, code: str, source: str = "unknow
 
     result = subprocess.run(
         [sys.executable, "-c", code],
-        capture_output=True,
         text=True,
         env=env,
         cwd=str(_base_dir()),
-        timeout=300,
     )
-
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
 
     _log_history(session_id, {
         "type": "python_exec",
@@ -401,7 +420,7 @@ def cmd_status(args):
 
 def cmd_history(args):
     session_id = _resolve_session(args.session)
-    history_path = _sessions_dir() / session_id / "history.jsonl"
+    history_path = _sessions_dir() / session_id / "client-history.jsonl"
     if not history_path.exists() or history_path.stat().st_size == 0:
         print(json.dumps({"history": [], "count": 0}))
         return
@@ -441,25 +460,21 @@ def cmd_list_sessions(args):
 
 def cmd_stop(args):
     session_id = _resolve_session(args.session)
+    if session_id == "__env__":
+        print(json.dumps({"success": False, "error": "server_managed_externally"}))
+        return
     sdir = _sessions_dir() / session_id
     pid_file = sdir / ".server.pid"
     if not pid_file.exists():
         print(json.dumps({"success": True, "message": "No server running"}))
         return
-    pid = int(pid_file.read_text().strip())
-    try:
-        os.kill(pid, signal.SIGTERM)
-        for _ in range(30):
-            time.sleep(0.1)
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
-        print(json.dumps({"success": True, "stopped_pid": pid}))
-    except ProcessLookupError:
-        pid_file.unlink(missing_ok=True)
-        (sdir / ".server.port").unlink(missing_ok=True)
-        print(json.dumps({"success": True, "message": "Server was not running"}))
+    result = _run_server_cmd(["stop-server", "--session", session_id])
+    if result.stdout:
+        print(result.stdout.strip())
+    if result.stderr:
+        print(result.stderr.strip(), file=sys.stderr)
+    if result.returncode:
+        sys.exit(result.returncode)
 
 
 def _build_parser():
@@ -540,7 +555,7 @@ Examples:
     p = subparsers.add_parser("status", help="Get session status")
     p.add_argument("--session", type=str, default=None, help="Session ID (default: latest)")
 
-    p = subparsers.add_parser("history", help="View action history")
+    p = subparsers.add_parser("history", help="View local CLI diagnostics, not the SDK action audit")
     p.add_argument("--session", type=str, default=None, help="Session ID (default: latest)")
     p.add_argument("--tail", type=int, default=50, help="Number of recent entries (default: 50)")
 

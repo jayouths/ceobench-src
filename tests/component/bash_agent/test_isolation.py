@@ -42,6 +42,16 @@ def test_failed_next_week_is_not_returned_to_the_decision_agent(tmp_path, monkey
             "command": "./novamind-operation next-week required-arguments"
         })
 
+
+def test_timed_out_bash_preserves_submitted_request_id(tmp_path, monkeypatch):
+    executor = BashAgentToolExecutor(tmp_path, bash_timeout=0.2)
+    monkeypatch.setattr(executor, "_build_bwrap_cmd", lambda *args: None)
+    output = executor._exec_bash({
+        "command": "printf '{\"request_id\":\"stable\"}\\n' >&2; sleep 10",
+    })
+    assert '"request_id":"stable"' in output
+    assert "timed out" in output
+
 def test_soft_sandbox_blocks_simulator_import(tmp_path, monkeypatch):
     executor = BashAgentToolExecutor(tmp_path)
     monkeypatch.setattr(executor, "_build_bwrap_cmd", lambda *args: None)

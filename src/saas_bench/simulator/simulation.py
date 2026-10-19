@@ -3,6 +3,7 @@
 import sqlite3
 import math
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
@@ -870,7 +871,6 @@ class Simulator:
         same RNG sequence as a continuous run.
         """
         import json as _json
-        from numpy.random import PCG64
 
         # Ensure table exists
         self.conn.execute("""
@@ -911,6 +911,7 @@ class Simulator:
 
         # Save simulator state variables that affect RNG-dependent behavior
         states['_sim_state'] = {
+            'shutdown_mode': self.shutdown_mode,
             '_macro_pmi_current': self._macro_pmi_current,
             '_macro_cycle_phase_offset': self._macro_cycle_phase_offset,
             '_macro_last_update_day': self._macro_last_update_day,
@@ -939,14 +940,14 @@ class Simulator:
         Called on resume to ensure deterministic continuation.
         """
         import json as _json
-        from numpy.random import Generator, PCG64
 
-        try:
-            row = self.conn.execute(
-                "SELECT state_json FROM _rng_states WHERE name = 'all'"
-            ).fetchone()
-        except Exception:
-            return False  # Table doesn't exist
+        if not self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_rng_states'"
+        ).fetchone():
+            return False
+        row = self.conn.execute(
+            "SELECT state_json FROM _rng_states WHERE name = 'all'"
+        ).fetchone()
 
         if not row:
             return False
@@ -968,45 +969,34 @@ class Simulator:
                     restored['state'][k] = v
             rng_obj.bit_generator.state = restored
 
-        _restore_state(self.rng, states['rng'])
-        _restore_state(self._macro_rng, states['_macro_rng'])
-        _restore_state(self._competitor_rng, states['_competitor_rng'])
-        _restore_state(
-            self._competitor_post_noise_rng,
-            states['_competitor_post_noise_rng'],
-        )
-        _restore_state(self._quality_rng, states['_quality_rng'])
-        if '_customer_quality_noise_rng' in states:
-            _restore_state(self._customer_quality_noise_rng, states['_customer_quality_noise_rng'])
-        if '_customer_pick_rng' in states:
-            _restore_state(self._customer_pick_rng, states['_customer_pick_rng'])
+        # 只恢复同版本的完整断点；缺失字段不能用新进程的初始状态静默补齐。
+        for name in (
+            'rng', '_macro_rng', '_competitor_rng', '_competitor_post_noise_rng',
+            '_quality_rng', '_customer_quality_noise_rng', '_customer_pick_rng',
+        ):
+            _restore_state(getattr(self, name), states[name])
 
-        # Restore per-group RNGs
-        if '_group_rngs' in states:
-            if not hasattr(self, '_group_rngs'):
-                self._group_rngs = {}
-            for gid, gstate in states['_group_rngs'].items():
-                if gid not in self._group_rngs:
-                    self._group_rngs[gid] = Generator(PCG64(0))  # Placeholder, state will be overwritten
-                _restore_state(self._group_rngs[gid], gstate)
+        group_states = states['_group_rngs']
+        if set(group_states) != set(self._group_rngs):
+            raise RuntimeError("Checkpoint customer-group RNG states do not match the initialized world")
+        for gid, saved in group_states.items():
+            _restore_state(self._group_rngs[gid], saved)
 
-        # Restore simulator state variables
-        if '_sim_state' in states:
-            ss = states['_sim_state']
-            self._macro_pmi_current = ss.get('_macro_pmi_current', self._macro_pmi_current)
-            self._macro_cycle_phase_offset = ss.get('_macro_cycle_phase_offset', self._macro_cycle_phase_offset)
-            self._macro_last_update_day = ss.get('_macro_last_update_day', self._macro_last_update_day)
-            self._macro_last_social_post_day = ss.get('_macro_last_social_post_day', self._macro_last_social_post_day)
-            self._macro_next_social_post_day = ss.get('_macro_next_social_post_day', self._macro_next_social_post_day)
-            self._macro_multipliers = ss.get('_macro_multipliers', {})
-            self._macro_pmi_daily_history = ss.get('_macro_pmi_daily_history', [])
-            self._macro_pending_publications = ss.get('_macro_pending_publications', [])
-            saved_noise = ss.get('_customer_quality_noise', {})
-            self._customer_quality_noise = {int(k): float(v) for k, v in saved_noise.items()}
-            # v3.4ai: restore monthly-noise leads overrides + apply to AD_CHANNELS in-process.
-            saved_leads = ss.get('_leads_per_1k_overrides', [])
-            self._leads_per_1k_overrides = {(ch, gid): float(v) for ch, gid, v in saved_leads}
-            self._restore_leads_overrides_to_ad_channels()
+        ss = states['_sim_state']
+        for name in (
+            'shutdown_mode', '_macro_pmi_current', '_macro_cycle_phase_offset',
+            '_macro_last_update_day', '_macro_last_social_post_day',
+            '_macro_next_social_post_day', '_macro_multipliers',
+            '_macro_pmi_daily_history', '_macro_pending_publications',
+        ):
+            setattr(self, name, ss[name])
+        self._customer_quality_noise = {
+            int(k): float(v) for k, v in ss['_customer_quality_noise'].items()
+        }
+        self._leads_per_1k_overrides = {
+            (ch, gid): float(v) for ch, gid, v in ss['_leads_per_1k_overrides']
+        }
+        self._restore_leads_overrides_to_ad_channels()
 
         return True
 
@@ -1994,7 +1984,7 @@ class Simulator:
         """Generate new customers using a simple, interpretable growth model per group.
 
         Growth formula:
-            daily_leads[group] = reputation[group] × (
+            daily_leads[group] = reputation_multiplier[group] × (
                 Σ(spend[channel] × leads_per_1k$[channel][group] / 1000)
               + existing_customers[group] × network_leads_per_1k_customers[group] / 1000
             )
@@ -2080,10 +2070,12 @@ class Simulator:
         segment_acquisition: dict[str, SegmentAcquisitionFact] = {}
 
         for group_id, group in active_groups.items():
-            # Reputation factor: reputation IS the multiplier directly
-            # rep=1e-3 (floor) → near-0 leads, rep=0.5 (neutral) → 0.5x, rep=1.0 → 1.0x
             rep = group_reps.get(group_id, 0.5)
-            reputation_factor = rep
+            # 声誉是 0–1 状态，不是获客倍率；中性声誉应对应配置中的基准获客量。
+            reputation_factor = (
+                self.config.reputation_lead_multiplier_min
+                + self.config.reputation_lead_multiplier_range * rep
+            )
 
             # Channel leads (sum across all channels)
             group_channel_leads = channel_leads.get(group_id, {})
@@ -4496,7 +4488,6 @@ class Simulator:
         import json
         import math
         import numpy as np
-        import traceback as _tb
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from .database import (
             get_discovered_groups, get_recent_agent_posts_for_judge,
@@ -4505,14 +4496,7 @@ class Simulator:
         from .personas import GROUP_CHARACTERISTICS
         from .customer_llm import judge_agent_social_post, generate_customer_reply_to_agent
 
-        _debug_log = "/tmp/social_reply_debug.log"
-
-        with open(_debug_log, "a") as _df:
-            _df.write(f"[ENTER] _process_agent_social_posts day={self.current_day}, has_cs={bool(self.customer_simulator)}\n")
-
         if not self.customer_simulator:
-            with open(_debug_log, "a") as _df:
-                _df.write(f"  SKIP: no customer_simulator\n")
             return
 
         # Get all unscored agent posts (effect_by_group == '{}')
@@ -4524,9 +4508,6 @@ class Simulator:
             WHERE effect_by_group = '{}'
             ORDER BY day ASC, agent_post_id ASC
         """).fetchall()
-
-        with open(_debug_log, "a") as _df:
-            _df.write(f"  unscored_posts={len(rows)}\n")
 
         if not rows:
             return
@@ -4660,16 +4641,15 @@ class Simulator:
             # Send inbox notification about post performance
             try:
                 truncated = content[:80] + ('...' if len(content) > 80 else '')
-                avg_effect = sum(effect_by_group.values()) / len(effect_by_group) if effect_by_group else 0.0
-                sentiment_word = 'positively' if avg_effect > 0.1 else ('negatively' if avg_effect < -0.1 else 'neutrally')
-                top_groups = sorted(effect_by_group.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
-                top_str = ', '.join(f'{g}: {e:+.1f}' for g, e in top_groups)
+                # 公开通知只描述可观察反馈，内部评审分数保留在私有数据库。
                 notif_msg = (f'Your social media post received {total_views:,} views: "{truncated}" '
-                             f'— Received {sentiment_word} overall. Top reactions: {top_str}')
+                             f'— Read customer comments for public reactions.')
                 add_notification(self.conn, self.current_day, 'social_media', notif_msg)
-            except Exception as _ne:
-                with open("/tmp/social_reply_debug.log", "a") as _df:
-                    _df.write(f"  NOTIF_ERR: {_ne}\n{_tb.format_exc()}\n")
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Unable to save social post notification (post_id=%s, day=%s)",
+                    post_id, self.current_day,
+                )
 
             # Generate customer replies for viral reactions
             reply_futures = {}
@@ -4678,9 +4658,6 @@ class Simulator:
                 if abs(effect_by_group.get(gid, 0.0)) >= viral_threshold
             ]
             comment_post_ids = []  # Collect post_ids of customer comments on this agent post
-
-            with open(_debug_log, "a") as _df:
-                _df.write(f"[{self.current_day}] Post {post_id}: viral_groups={viral_groups}, effects={effect_by_group}\n")
 
             if viral_groups:
                 with ThreadPoolExecutor(max_workers=min(len(viral_groups), 6)) as executor:
@@ -4747,9 +4724,6 @@ class Simulator:
                             source_group_id=gid
                         )
                         comment_post_ids.append(comment_pid)
-
-                        with open(_debug_log, "a") as _df:
-                            _df.write(f"  OK: {gid} -> post_id={comment_pid}, cust={customer_id}\n")
 
                         self.customer_simulator._log_cost(
                             self.current_day, 'agent_social_reply',

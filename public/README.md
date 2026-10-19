@@ -9,11 +9,22 @@ You must do whatever you can to maximize ending cash at the end of day 500. You 
 You drive the simulator entirely through the `./novamind-operation` CLI in this
 directory. There is no other interface.
 
-Do not stop until you bankrupt or complete all 500 days of simulations.
+Continue until bankruptcy or completion, unless the current session cannot safely continue.
 
 You can use your filesystem to write scripts / maintain memory in anyway you like.
 
 You are only allowed to play it once (one create-session allowed). The task is very difficult. Make sure you observe, analyze, act, advance a week, and observe, analyze, act again before advancing another week.
+
+Never reset the world, create a replacement game, restore an older turn, or replay
+an action whose outcome is unknown. SDK writes print their request ID before
+submission; use `request-status ID` to inspect an uncertain outcome. A slow
+advance is not evidence that it failed. Do not manually restart simulator
+processes or change runtime packages, credentials, or model routing during play.
+The host manages experiment recovery with its `--resume` entry; the Agent must
+not attempt to recover or replace a stopped session on its own.
+
+Only documented public tools and tables are observations. Host event logs,
+request journals and checkpoint files are not additional business information.
 
 ---
 
@@ -40,7 +51,10 @@ zipapp); `requirements.txt` only installs the third-party libraries used by
 the engine and the agent workspace (`numpy`, `pandas`, `scikit-learn`,
 `openai`, and `sqlcipher3-binary`).
 
-Requires Python 3.13+.
+Requires Python 3.13 for this bundled bytecode. The standalone dependency list
+is a convenience installation, not a frozen research environment. Main experiments
+use the repository's `uv.lock` with `uv sync --frozen`; do not change dependencies
+or rebuild the CLI during an experiment.
 
 ---
 
@@ -80,6 +94,10 @@ analysis files, whatever helps you decide. Common things you can do:
 ./novamind-operation python-c "<inline code>"
 ./novamind-operation history
 ```
+
+`history` shows local CLI diagnostics, not the authoritative record of SDK
+actions. Actual action auditing is performed separately by the host and is not
+an Agent observation.
 
 All simulator tools are accessed via the Python API (`import novamind_api as nm`)
 — see `docs/tools-reference.md`.

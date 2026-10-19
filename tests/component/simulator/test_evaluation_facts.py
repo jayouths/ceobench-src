@@ -256,7 +256,7 @@ def test_subscription_day_records_immutable_daily_stock(make_initialized_sim):
 
 
 def test_step_day_records_subscription_day(make_initialized_sim):
-    conn, simulator, _ = make_initialized_sim()
+    conn, simulator, config = make_initialized_sim()
     customer_id = _insert_customer(conn, "small", "TEST", 1)
     _insert_subscription(conn, customer_id, plan="A", price=20.0, start_day=0)
 
@@ -288,7 +288,10 @@ def test_step_day_records_subscription_day(make_initialized_sim):
     assert segment["market_capacity_multiplier"] is not None
     assert segment["actual_leads"] is not None
     assert segment["total_leads_expected"] == pytest.approx(
-        segment["reputation"]
+        (
+            config.reputation_lead_multiplier_min
+            + config.reputation_lead_multiplier_range * segment["reputation"]
+        )
         * segment["market_capacity_multiplier"]
         * segment["calendar_cycle_multiplier"]
         * segment["macroeconomic_multiplier"]

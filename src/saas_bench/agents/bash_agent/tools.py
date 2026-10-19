@@ -512,36 +512,14 @@ class BashAgentToolExecutor:
             return output
 
         except subprocess.TimeoutExpired:
-            # Capture any partial output before killing
-            partial_stdout = ""
-            partial_stderr = ""
-            try:
-                # Read whatever's in the pipe buffers
-                import selectors
-                sel = selectors.DefaultSelector()
-                sel.register(proc.stdout, selectors.EVENT_READ)
-                sel.register(proc.stderr, selectors.EVENT_READ)
-                while sel.select(timeout=0.1):
-                    for key, _ in sel.select(timeout=0):
-                        data = key.fileobj.read1(65536) if hasattr(key.fileobj, 'read1') else ''
-                        if key.fileobj == proc.stdout:
-                            partial_stdout += data if isinstance(data, str) else data.decode('utf-8', errors='replace')
-                        else:
-                            partial_stderr += data if isinstance(data, str) else data.decode('utf-8', errors='replace')
-                sel.close()
-            except Exception:
-                pass
-
             # Kill the entire process group (bash + all children)
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
-                pass
-            proc.kill()  # Fallback: kill the direct child
-            try:
-                proc.wait(timeout=5)  # Reap the zombie
-            except Exception:
-                pass
+                proc.kill()
+            # communicate() retains output collected before its timeout;
+            # draining after kill preserves request IDs printed by child scripts.
+            partial_stdout, partial_stderr = proc.communicate(timeout=5)
 
             # If command is ./novamind-operation next-week, raise to kill the run
             if './novamind-operation next-week' in command:

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -22,12 +23,16 @@ class RequestJournal:
                 for line in file:
                     record = json.loads(line)
                     self.records[record["request_id"]] = record
-        if any(record["status"] != "completed" for record in self.records.values()):
+        if self.has_pending_requests:
             raise RuntimeError("unrecoverable_session: interrupted request")
 
     @property
     def size(self) -> int:
         return self.path.stat().st_size if self.path.exists() else 0
+
+    @property
+    def has_pending_requests(self) -> bool:
+        return any(record["status"] != "completed" for record in self.records.values())
 
     def lookup(self, request_id: str) -> dict:
         record = self.records.get(request_id)
@@ -39,13 +44,16 @@ class RequestJournal:
             "result": record.get("result"),
         }
 
-    def run(self, request_id: str, operation: str, payload: dict, callback):
+    def run(self, request_id: str, operation: str, payload: dict, callback, day_reader=None):
         if not isinstance(request_id, str) or not request_id or len(request_id) > 128:
             return {"success": False, "error": "request_id_required"}
-        digest = hashlib.sha256(json.dumps(
-            [operation, payload], sort_keys=True, separators=(",", ":"),
-            allow_nan=False,
-        ).encode()).hexdigest()
+        try:
+            digest = hashlib.sha256(json.dumps(
+                [operation, payload], sort_keys=True, separators=(",", ":"),
+                allow_nan=False,
+            ).encode()).hexdigest()
+        except (TypeError, ValueError):
+            return {"success": False, "error": "invalid_request_payload"}
         previous = self.records.get(request_id)
         if previous:
             if previous["digest"] != digest:
@@ -53,11 +61,14 @@ class RequestJournal:
             if previous["status"] == "completed":
                 return previous["result"]
             return {"success": False, "error": "unrecoverable_session"}
-        if any(record["status"] != "completed" for record in self.records.values()):
+        if self.has_pending_requests:
             return {"success": False, "error": "unrecoverable_session"}
 
         self._append({
             "request_id": request_id, "digest": digest, "status": "pending",
+            "operation": operation, "input": payload,
+            "day_before": day_reader() if day_reader else None,
+            "started_at": datetime.now(timezone.utc).isoformat(),
         })
         # Any exception, including a timed-out week, leaves pending on disk.
         # The world may have changed; replaying the action would be unsafe.
@@ -67,6 +78,9 @@ class RequestJournal:
         self._append({
             "request_id": request_id, "digest": digest, "status": "completed",
             "result": result,
+            "day_after": day_reader() if day_reader else None,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "success": result.get("success") if type(result.get("success")) is bool else None,
         })
         return result
 

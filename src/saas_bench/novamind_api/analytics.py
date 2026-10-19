@@ -26,12 +26,15 @@ def set_targeted_ops_spend(
 ) -> Dict:
     """Set targeted operations spend for one or more scopes.
 
+    Amounts must be finite non-negative numbers, not booleans.
+    Omitted scopes stay unchanged; pass an empty dict to clear a scope.
+
     Args:
         by_group: Per-group daily spend, ``{group_id: amount}``.
         by_plan: Per-plan daily spend, ``{plan: amount}``.
         by_group_plan: Per-group-plan daily spend,
             ``{group_id: {plan: amount}}``.
-        by_customer: Per-customer daily spend,
+        by_customer: Per-customer daily spend for positive integer IDs,
             ``{customer_id_as_string: amount}``.
 
     Returns:

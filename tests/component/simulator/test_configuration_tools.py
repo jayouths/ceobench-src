@@ -1,29 +1,51 @@
 """复合经营配置工具的原子性回归测试。"""
 
+from copy import deepcopy
+
+import pytest
+
 
 def _override_count(conn):
     return conn.execute("SELECT COUNT(*) FROM config_overrides").fetchone()[0]
 
 
+@pytest.mark.parametrize("args", [
+    {"by_group": {"S1": 100}, "by_plan": {"INVALID": 200}},
+    {"by_group": {"S1": True}},
+    {"by_group": {"S1": 100}, "by_plan": {"A": float("nan")}},
+    {"by_group": {"S1": 100}, "by_group_plan": {"E1": {"C": float("inf")}}},
+    {"by_group": {"S1": 100}, "by_customer": {"42": -1}},
+    {"by_group": {"S1": 100}, "by_customer": {"0": 10}},
+    {"by_group": {"S1": 100}, "by_customer": {"-1": 10}},
+    {"by_group": {"S1": 100}, "by_customer": {1.5: 10}},
+    {"by_group": {"S1": 100}, "by_customer": {True: 10}},
+    {"by_group": {"S1": 1e308}, "by_plan": {"A": 1e308}},
+])
 def test_targeted_ops_failure_keeps_all_scopes_unchanged(
     make_initialized_sim,
     make_agent_tools,
+    args,
 ):
     conn, _, config = make_initialized_sim()
     tools = make_agent_tools(conn, config)
     config.targeted_ops_spend = {"E1": 10.0}
     config.targeted_ops_spend_by_plan = {"A": 20.0}
-    before_records = _override_count(conn)
-
-    result = tools.set_targeted_ops_spend(
-        by_group={"S1": 100},
-        by_plan={"INVALID": 200},
+    config.targeted_ops_spend_by_group_plan = {"E2": {"C": 30.0}}
+    config.targeted_ops_spend_by_customer = {42: 40.0}
+    fields = (
+        "targeted_ops_spend", "targeted_ops_spend_by_plan",
+        "targeted_ops_spend_by_group_plan", "targeted_ops_spend_by_customer",
     )
+    before_config = deepcopy([getattr(config, field) for field in fields])
+    before_records = _override_count(conn)
+    before_ledger = list(conn.execute("SELECT * FROM ledger"))
+
+    result = tools.set_targeted_ops_spend(**args)
 
     assert not result.success
-    assert config.targeted_ops_spend == {"E1": 10.0}
-    assert config.targeted_ops_spend_by_plan == {"A": 20.0}
+    assert [getattr(config, field) for field in fields] == before_config
     assert _override_count(conn) == before_records
+    assert list(conn.execute("SELECT * FROM ledger")) == before_ledger
 
 
 def test_ads_strength_failure_keeps_all_scopes_unchanged(

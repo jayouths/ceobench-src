@@ -307,7 +307,7 @@ TOOL_DOCS = {
     "set_targeted_ops_spend": {
         "name": "set_targeted_ops_spend",
         "category": "Marketing & Spend",
-        "description": "Set ADDITIONAL operations spending targeted at specific scopes (group, plan, group+plan, individual customer). Each scope runs its own independent Poisson resolution pool on top of the global ops pool.",
+        "description": "Set ADDITIONAL operations spending targeted at specific scopes (group, plan, group+plan, individual customer). Amounts must be finite non-negative numbers, not booleans. Each scope runs its own independent Poisson resolution pool on top of the global ops pool.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -338,11 +338,11 @@ TOOL_DOCS = {
             "by_group": "Dict[str, float] — {group_id: $/day}. Groups: S1-S3, E1-E3, discovered.",
             "by_plan": "Dict[str, float] — {plan: $/day}, plan ∈ {A, B, C}. Applies across all groups.",
             "by_group_plan": "Dict[str, Dict[str, float]] — {group_id: {plan: $/day}}. Intersection of group and plan.",
-            "by_customer": "Dict[str, float] — {customer_id (as string): $/day}. Single-customer targeting.",
+            "by_customer": "Dict[str, float] — {positive integer customer_id (as string): $/day}. Single-customer targeting.",
         },
         "returns": {
             "success": "Targeted ops spend updated (extra $650/day on top of global ops):\n  Groups: E1: +$300/day\n  Plans: A: +$200/day\n  Group-Plans: E2/B: +$100/day\n  Customers: 1 target(s), +$50/day total",
-            "failure": "Invalid group IDs: {X}. | Invalid plans: {X}. Valid: ['A', 'B', 'C']. | Customer ID 'X' must be an integer."
+            "failure": "Invalid group IDs: {X}. | Invalid plans: {X}. Valid: ['A', 'B', 'C']. | Customer ID 'X' must be a positive integer. | Amounts and total spend must be finite non-negative numbers."
         },
         "output_schema": {
             "by_group": "Dict[str, float]",
@@ -1854,13 +1854,22 @@ class AgentTools:
         resolved that day. All scope amounts sum into a single 'operations' ledger entry.
 
         Any argument left as None is unchanged; passing {} clears that scope.
+        Amounts must be finite non-negative numbers; booleans are invalid.
 
         Args:
             by_group: {group_id: $/day}. Valid group_ids: S1-S3, E1-E3, discovered.
             by_plan: {plan: $/day}. Plan ∈ {A, B, C}. Applies to all subscribers on that plan.
             by_group_plan: {group_id: {plan: $/day}}. Intersection of group + plan.
-            by_customer: {customer_id_str: $/day}. Single-customer boost (like promotion).
+            by_customer: {positive_integer_customer_id_str: $/day}. Single-customer boost (like promotion).
         """
+        def valid_amount(amount):
+            if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+                return False
+            try:
+                return math.isfinite(amount) and amount >= 0
+            except OverflowError:
+                return False
+
         valid_groups = set(INITIAL_CUSTOMER_GROUPS.keys()) | set(get_discovered_groups(self.conn))
         valid_plans = {'A', 'B', 'C'}
         parsed_group = None
@@ -1876,8 +1885,8 @@ class AgentTools:
             if invalid:
                 return ToolResult(False, f"Invalid group IDs: {invalid}. Valid: {sorted(valid_groups)}")
             for gid, amt in by_group.items():
-                if not isinstance(amt, (int, float)) or amt < 0:
-                    return ToolResult(False, f"Amount for {gid} must be a non-negative number")
+                if not valid_amount(amt):
+                    return ToolResult(False, f"Amount for {gid} must be a finite non-negative number")
             parsed_group = {k: float(v) for k, v in by_group.items()}
 
         # ── by_plan ──
@@ -1888,8 +1897,8 @@ class AgentTools:
             if invalid_plans:
                 return ToolResult(False, f"Invalid plans: {invalid_plans}. Valid: {sorted(valid_plans)}")
             for plan, amt in by_plan.items():
-                if not isinstance(amt, (int, float)) or amt < 0:
-                    return ToolResult(False, f"Amount for plan {plan} must be a non-negative number")
+                if not valid_amount(amt):
+                    return ToolResult(False, f"Amount for plan {plan} must be a finite non-negative number")
             parsed_plan = {k: float(v) for k, v in by_plan.items()}
 
         # ── by_group_plan ──
@@ -1908,8 +1917,8 @@ class AgentTools:
                     return ToolResult(False, f"Invalid plans for group {gid}: {bad_plans}. Valid: {sorted(valid_plans)}")
                 inner: Dict[str, float] = {}
                 for plan, amt in plans_dict.items():
-                    if not isinstance(amt, (int, float)) or amt < 0:
-                        return ToolResult(False, f"Amount for {gid}/{plan} must be a non-negative number")
+                    if not valid_amount(amt):
+                        return ToolResult(False, f"Amount for {gid}/{plan} must be a finite non-negative number")
                     inner[plan] = float(amt)
                 parsed_group_plan[gid] = inner
 
@@ -1920,33 +1929,33 @@ class AgentTools:
             parsed_customer = {}
             for k, amt in by_customer.items():
                 try:
+                    if isinstance(k, bool) or not isinstance(k, (int, str)):
+                        raise ValueError
                     cid = int(k)
+                    if cid <= 0:
+                        raise ValueError
                 except (ValueError, TypeError):
-                    return ToolResult(False, f"Customer ID '{k}' must be an integer")
-                if not isinstance(amt, (int, float)) or amt < 0:
-                    return ToolResult(False, f"Amount for customer {k} must be a non-negative number")
+                    return ToolResult(False, f"Customer ID '{k}' must be a positive integer")
+                if not valid_amount(amt):
+                    return ToolResult(False, f"Amount for customer {k} must be a finite non-negative number")
                 parsed_customer[cid] = float(amt)
 
-        # 复合配置必须全部校验通过后再生效，失败调用不得部分改变世界。
-        if parsed_group is not None:
-            self.config.targeted_ops_spend = parsed_group
-        if parsed_plan is not None:
-            self.config.targeted_ops_spend_by_plan = parsed_plan
-        if parsed_group_plan is not None:
-            self.config.targeted_ops_spend_by_group_plan = parsed_group_plan
-        if parsed_customer is not None:
-            self.config.targeted_ops_spend_by_customer = parsed_customer
-
-        # Summarise current state
-        g = self.config.targeted_ops_spend
-        p = self.config.targeted_ops_spend_by_plan
-        gp = self.config.targeted_ops_spend_by_group_plan
-        c = self.config.targeted_ops_spend_by_customer
+        g = self.config.targeted_ops_spend if parsed_group is None else parsed_group
+        p = self.config.targeted_ops_spend_by_plan if parsed_plan is None else parsed_plan
+        gp = self.config.targeted_ops_spend_by_group_plan if parsed_group_plan is None else parsed_group_plan
+        c = self.config.targeted_ops_spend_by_customer if parsed_customer is None else parsed_customer
         total_extra = (
             sum(g.values()) + sum(p.values())
             + sum(v for inner in gp.values() for v in inner.values())
             + sum(c.values())
         )
+        # 单项合法也可能在相加后溢出，合计校验同样必须在配置生效前完成。
+        if not math.isfinite(total_extra):
+            return ToolResult(False, "Total targeted operations spend must be finite.")
+        self.config.targeted_ops_spend = g
+        self.config.targeted_ops_spend_by_plan = p
+        self.config.targeted_ops_spend_by_group_plan = gp
+        self.config.targeted_ops_spend_by_customer = c
         parts = []
         if g:
             parts.append("  Groups: " + ", ".join(f"{k}: +${v:.0f}/day" for k, v in g.items()))
@@ -3554,12 +3563,11 @@ os.chdir('{self.workspace_path}')
             else:
                 summary.append(f"Day {p['day']}: \"{p['content'][:80]}\"")
 
-        # Strip hidden fields from returned data
-        _hidden_post_keys = {'sentiment', 'likes', 'shares', 'virality_score',
-                             'customer_id', 'reputation_impact', 'influence_score'}
+        # 工具与 SQL 共用公开字段清单，新增内部列不会自动进入工具回执。
+        public_post_keys = TABLE_DOCS['social_media_posts']['columns']
         clean_posts = []
         for p in posts:
-            post_data = {k: v for k, v in p.items() if k not in _hidden_post_keys}
+            post_data = {k: v for k, v in p.items() if k in public_post_keys}
             # Include agent post content for replies
             apid = p.get('reply_to_agent_post_id')
             if apid and apid in agent_post_content:

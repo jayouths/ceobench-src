@@ -16,7 +16,7 @@ positional arguments:
     python-c            Execute inline Python code with novamind_api
     query               Execute a SQL query
     status              Get session status
-    history             View action history
+    history             View local CLI diagnostics, not the SDK action audit
     list-sessions       List all sessions
     stop                Stop the simulation server
 

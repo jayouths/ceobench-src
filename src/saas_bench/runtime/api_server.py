@@ -18,6 +18,7 @@ import uuid
 from contextlib import contextmanager
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Set
+from urllib.parse import unquote
 
 try:
     import sqlcipher3
@@ -331,6 +332,26 @@ class _APIHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _handle_world_read(self, callback):
+        """经营观察只能读取完整、稳定的世界；诊断接口不经过此边界。"""
+        server: NovaMindAPIServer = self.server._api_server
+        # 周请求持锁等待后台模拟，先拒绝读取，避免查询排队等待整周。
+        if server._week_advance_in_progress:
+            self._send_json({"success": False, "error": "week_advance_in_progress"}, 409)
+            return
+        with server._lock:
+            # 获取锁前后状态可能变化；超时后台线程即使结束，也不能把半周视为完成。
+            if server._week_advance_failed:
+                self._send_json({"success": False, "error": "week_advance_failed"}, 409)
+            elif server._week_advance_in_progress or server._step_week_timed_out:
+                self._send_json({"success": False, "error": "week_advance_in_progress"}, 409)
+            elif server._unrecoverable or (
+                server.request_journal is not None and server.request_journal.has_pending_requests
+            ):
+                self._send_json({"success": False, "error": "unrecoverable_session"}, 409)
+            else:
+                callback()
+
     def do_POST(self):
         try:
             if self.path == '/call':
@@ -338,13 +359,13 @@ class _APIHandler(BaseHTTPRequestHandler):
             elif self.path == '/next-week':
                 self._handle_next_week()
             elif self.path == '/query':
-                self._handle_query()
+                self._handle_world_read(self._handle_query)
             elif self.path == '/persist-checkpoint':
                 self._handle_persist_checkpoint()
             elif self.path == '/finalize-run':
                 self._handle_finalize_run()
             elif self.path == '/reinitialize':
-                self._handle_reinitialize()
+                self._send_json({"success": False, "error": "game_reset_forbidden"}, 403)
             else:
                 self._send_json({"error": f"Unknown endpoint: {self.path}"}, 404)
         except Exception as exc:
@@ -353,15 +374,16 @@ class _APIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             if self.path == '/vars':
-                self._handle_vars()
+                self._handle_world_read(self._handle_vars)
             elif self.path == '/health':
                 self._send_json({"status": "ok"})
             elif self.path == '/dashboard':
-                self._handle_dashboard_get()
+                self._handle_world_read(self._handle_dashboard_get)
             elif self.path == '/game-status':
-                self._handle_game_status()
+                self._handle_world_read(self._handle_game_status)
             elif self.path.startswith('/request-status/'):
-                request_id = self.path.removeprefix('/request-status/')
+                # ID 是不透明标识，只解码一次；其中的 %2F 等字面量不能再被转换。
+                request_id = unquote(self.path.removeprefix('/request-status/'))
                 server: NovaMindAPIServer = self.server._api_server
                 self._send_json(server.request_status(request_id))
             else:
@@ -419,11 +441,15 @@ class _APIHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, data: Dict, status: int = 200):
         response = json.dumps(data, default=str).encode()
-        self.send_response(status)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(response)))
-        self.end_headers()
-        self.wfile.write(response)
+        try:
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+        except (BrokenPipeError, ConnectionResetError):
+            # 回执发送失败不能把已完成动作改判为失败；调用方应按原请求 ID 查询。
+            pass
 
     def _handle_call(self):
         """Handle a tool call: POST /call {"tool": "...", "args": {...}}."""
@@ -446,20 +472,6 @@ class _APIHandler(BaseHTTPRequestHandler):
             self._send_json(result)
         except Exception as e:
             self._send_internal_error(e, op="call")
-
-    def _handle_reinitialize(self):
-        """Handle reinitialize request: POST /reinitialize."""
-        try:
-            server: NovaMindAPIServer = self.server._api_server
-            # Force reload of the simulation module
-            if 'saas_bench.simulator.simulation' in sys.modules:
-                # Delete cached module to force reload
-                del sys.modules['saas_bench.simulator.simulation']
-            # Reinitialize the simulator to set up _group_rngs
-            server.simulator.initialize()
-            self._send_json({"success": True, "message": "Simulator reinitialized"})
-        except Exception as e:
-            self._send_internal_error(e, op="reinitialize")
 
     def _handle_next_week(self):
         """Handle next-week advancement: POST /next-week.
@@ -784,12 +796,6 @@ class _APIHandler(BaseHTTPRequestHandler):
         """
         from ..simulator.database import get_cash, get_active_subscriber_count
         server: NovaMindAPIServer = self.server._api_server
-        if server._week_advance_in_progress:
-            self._send_json({
-                "success": False,
-                "error": "week_advance_in_progress",
-            }, 409)
-            return
         cash = 0
         subs = 0
         if server.conn:
@@ -802,6 +808,14 @@ class _APIHandler(BaseHTTPRequestHandler):
             "timed_out": server._step_week_timed_out,
             "week_advance_failed": server._week_advance_failed,
         })
+
+
+def _dispatch_targeted_ops_spend(tools: AgentTools, args: Dict[str, Any]) -> ToolResult:
+    unknown = set(args) - {'by_group', 'by_plan', 'by_group_plan', 'by_customer'}
+    if unknown:
+        # 拼错参数也必须整体失败，不能静默忽略后应用其余范围。
+        return ToolResult(False, "Unknown targeted operations arguments: " + ", ".join(sorted(unknown)))
+    return tools.set_targeted_ops_spend(**args)
 
 
 # Map tool names to AgentTools methods + argument extraction
@@ -823,12 +837,7 @@ _TOOL_DISPATCH = {
     'research_group': lambda tools, args: tools.research_group(args.get('group_id', ''), args.get('target_level')),
     'get_market_overview': lambda tools, args: tools.get_market_overview(),
     'get_group_insights': lambda tools, args: tools.get_group_insights(args.get('group_id', '')),
-    'set_targeted_ops_spend': lambda tools, args: tools.set_targeted_ops_spend(
-        by_group=args.get('by_group'),
-        by_plan=args.get('by_plan'),
-        by_group_plan=args.get('by_group_plan'),
-        by_customer=args.get('by_customer'),
-    ),
+    'set_targeted_ops_spend': _dispatch_targeted_ops_spend,
     'set_targeted_dev_spend': lambda tools, args: tools.set_targeted_dev_spend(args.get('targeted_spend', args)),
     'set_ads_strength': lambda tools, args: tools.set_ads_strength(
         global_strength=args.get('global_strength'),
@@ -907,6 +916,7 @@ class NovaMindAPIServer:
         self._state_revision: int = 0
         self._checkpoint_snapshot_revision: int = 0
         self._finalized_outcome: Optional[str] = None
+        self._unrecoverable: bool = False
 
         # Per-query wall-clock deadline (monotonic seconds; 0 = disabled).
         # Set inside _handle_query before cursor.execute, cleared in finally.
@@ -990,24 +1000,40 @@ class NovaMindAPIServer:
         if self.request_journal is None:
             return {"success": False, "error": "request_journal_unavailable"}
         with self._lock:
+            if self._unrecoverable:
+                return {"success": False, "error": "unrecoverable_session"}
             def execute():
                 result = callback()
+                if self.conn is not None and not (
+                    isinstance(result, dict)
+                    and result.get("error") in {"step_week_timeout", "step_day_timeout"}
+                ):
+                    # 请求完成前提交内存事务，否则同日备份会因写事务未结束而一直等待。
+                    # 这不代表加密世界快照已落盘；其持久化边界仍由 persist_checkpoint 确认。
+                    self.conn.commit()
                 if isinstance(result, ToolResult):
                     return result.to_json()
                 if isinstance(result, dict):
                     return result
                 return {"success": True, "data": {"output": str(result)}, "message": str(result)}
 
-            return self.request_journal.run(request_id, operation, payload, execute)
+            try:
+                return self.request_journal.run(
+                    request_id, operation, payload, execute,
+                    day_reader=lambda: self.tools.current_day,
+                )
+            except BaseException:
+                # 工具或日志写入异常都可能留下已生效的部分状态，当前实例不得再用于实验。
+                self._unrecoverable = True
+                raise
 
     def persist_checkpoint(self, expected_day: int) -> Dict[str, Any]:
         """Persist one exact simulator day and report the committed day."""
         from ..simulator.database import get_api_usage_summary, get_cash
 
         with self._lock:
-            if self.request_journal is not None and any(
-                record["status"] != "completed"
-                for record in self.request_journal.records.values()
+            if self._unrecoverable or (
+                self.request_journal is not None and self.request_journal.has_pending_requests
             ):
                 return {"success": False, "error": "unrecoverable_session"}
             # step_week 超时后工作线程不一定真正停止，数据库可能仍在变化。
@@ -1076,6 +1102,10 @@ class NovaMindAPIServer:
         with self._lock:
             if outcome not in {"completed", "bankrupt"}:
                 return {"success": False, "error": "invalid_terminal_outcome"}
+            if self._unrecoverable or (
+                self.request_journal is not None and self.request_journal.has_pending_requests
+            ):
+                return {"success": False, "error": "unrecoverable_session"}
             if (
                 self._week_advance_in_progress
                 or self._step_week_timed_out
@@ -1163,7 +1193,7 @@ class NovaMindAPIServer:
         """Advance the simulator by one week (7 days) and return the dashboard.
 
         Enforces a hard timeout (STEP_WEEK_TIMEOUT seconds) on step_week().
-        If exceeded, returns an error so the runner can save checkpoint and exit.
+        If exceeded, the runner must stop without checkpointing the unstable world.
 
         If a shock_manager is configured, shocks are checked before step_week
         and inbox items are included in the dashboard.
@@ -1228,17 +1258,25 @@ class NovaMindAPIServer:
         try:
             week_result = future.result(timeout=self.STEP_WEEK_TIMEOUT)
         except FuturesTimeoutError:
+            # 模拟器内部抛出的 TimeoutError 不是等待超时，按真实推进异常处理。
+            if future.done() and isinstance(future.exception(), FuturesTimeoutError):
+                raise
             elapsed = _time.monotonic() - _step_start
             self._last_step_elapsed = elapsed
             self._step_week_timed_out = True
-            executor.shutdown(wait=False, cancel_futures=True)
             return {
                 "success": False,
                 "error": "step_week_timeout",
                 "elapsed": elapsed,
-                "message": f"step_week exceeded {self.STEP_WEEK_TIMEOUT}s timeout ({elapsed:.1f}s elapsed). Save checkpoint and exit.",
+                "message": (
+                    f"step_week exceeded {self.STEP_WEEK_TIMEOUT}s timeout ({elapsed:.1f}s elapsed). "
+                    "Request outcome unknown; stop this run, do not save a new checkpoint "
+                    "or replay the request."
+                ),
             }
-        executor.shutdown(wait=False)
+        finally:
+            # 普通推进异常也必须回收执行器；超时的活动线程仍由稳定性保护隔离。
+            executor.shutdown(wait=False, cancel_futures=True)
 
         self._last_step_elapsed = _time.monotonic() - _step_start
         new_day = week_result.day
