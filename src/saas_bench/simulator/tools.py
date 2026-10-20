@@ -23,7 +23,7 @@ from .database import (
     get_group_info_level, get_all_group_info_levels, get_discovered_groups,
     get_undiscovered_groups, upgrade_group_info_level,
     # Table documentation registry
-    TABLE_DOCS,
+    PUBLIC_ISSUES_SQL, TABLE_DOCS,
     # Config override recording
     record_config_override,
     # Notifications
@@ -80,7 +80,7 @@ def _render_model_tier_cost_sample() -> str:
 
 
 # Agent 只能使用 subscriptions 中公开的整数席位快照计算 MRR，
-# 不得引用 customers.seat_count 中用于模拟器漂移的隐藏状态。
+# 该快照可能滞后内部真值；不得为补齐差异读取隐藏的 customers.seat_count。
 _PUBLIC_MRR_VALUE_SQL = (
     "CASE WHEN c.customer_type = 'large' "
     "THEN s.effective_price * s.seat_count "
@@ -863,7 +863,7 @@ TOOL_DOCS = {
     "post_social_media": {
         "name": "post_social_media",
         "category": "Marketing & Social Media",
-        "description": "Post a social media message on company social media account. You can either post an original post or reply to an existing customer. Max 280 characters. Limit: 1 post per day. Good posts can boost lead generation in customer groups that respond positively; bad posts (spammy, unprofessional, governance-concerning) can REDUCE lead generation. Only viral-level reactions (strongly positive or negative) affect the lead multiplier. Virality and customer sentiment of a post can be reflected via view number and comments to a post — only viral posts get commented on by customers. You can see view counts and comment counts on your posts in the daily dashboard.",
+        "description": "Post a social media message on company social media account. You can either post an original post or reply to an existing customer. Max 280 characters. Limit: 1 post per day. Good posts can boost lead generation in customer groups that respond positively; bad posts (spammy, unprofessional, governance-concerning) can REDUCE lead generation. Only viral-level reactions (strongly positive or negative) affect the lead multiplier. Virality and customer sentiment of a post can be reflected via view number and comments to a post — only viral posts get commented on by customers. The next weekly dashboard shows cumulative view counts and comment counts for posts published from the previous decision day (inclusive) to the current decision day (exclusive).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -894,7 +894,7 @@ TOOL_DOCS = {
             "content": "str — the posted content",
             "reply_to_post_id": "int or null — post being replied to",
         },
-        "impact": "Viral posts perceived as positive by a customer group boost lead arrival speed for that group. Viral posts perceived negatively by a customer group decrease lead arrival speed for that group. Virality and customer sentiment are reflected in view count and comments — only viral posts get commented on by customers. Check the daily dashboard for comment counts on your posts.",
+        "impact": "Viral posts perceived as positive by a customer group boost lead arrival speed for that group. Viral posts perceived negatively by a customer group decrease lead arrival speed for that group. Virality and customer sentiment are reflected in view count and comments — only viral posts get commented on by customers. Check the next weekly dashboard for cumulative view and comment counts on your posts.",
         "example_call": {
             "tool": "post_social_media",
             "arguments": {"content": "We just shipped chunked prefill — P99 latency down 74%. Technical writeup in thread."}
@@ -1111,14 +1111,14 @@ TOOL_DOCS = {
     "research_group": {
         "name": "research_group",
         "category": "Market Discovery",
-        "description": "Research a discovered customer group to a specific info level. Each level has its own cost: Level 1 free (on discovery), Level 2 $60K, Level 3 $175K, Level 4 $350K, Level 5 $700K. Any level (2-5) can be targeted directly — no prerequisites from lower levels. Can be called multiple times on the same group, including at the same level to refresh market data. Each call deducts cost immediately. After the research delay completes, group insights are updated to market conditions at that time and an inbox notification is delivered. Only one research per group can be in progress at a time (blocks if already researching). Use get_group_insights() to retrieve the data.",
+        "description": "Research a discovered customer group to a specific info level. If target_level is omitted, Level 1 upgrades to Level 2; Levels 2-5 refresh at the current level. Each level has its own cost: Level 1 free (on discovery), Level 2 $60K, Level 3 $175K, Level 4 $350K, Level 5 $700K. Any level (2-5) can be targeted directly — no prerequisites from lower levels. Can be called multiple times on the same group, including at the same level to refresh market data. Each call deducts cost immediately. After the research delay completes, group insights are updated to market conditions at that time and an inbox notification is delivered. Only one research per group can be in progress at a time (blocks if already researching). Use get_group_insights() to retrieve the data.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "group_id": {"type": "string", "description": "Group ID to research (e.g., 'D_S01')"},
-                "target_level": {"type": "integer", "description": "Required target info level (2-5). Specify a higher level to improve accuracy or the current level to refresh market data."}
+                "target_level": {"type": "integer", "description": "Optional target info level (2-5). Defaults to max(current_level, 2): Level 1 upgrades to 2, Levels 2-5 refresh at the current level."}
             },
-            "required": ["group_id", "target_level"]
+            "required": ["group_id"]
         },
         "parameters": {
             "group_id": {
@@ -1128,7 +1128,7 @@ TOOL_DOCS = {
             },
             "target_level": {
                 "type": "integer",
-                "description": "Required target level (2-5). Can jump directly to a higher level; use the current level for a same-level refresh.",
+                "description": "Optional target level (2-5). Defaults to max(current_level, 2). Specify a higher level to upgrade or the current level to refresh.",
                 "examples": [2, 3, 4, 5]
             }
         },
@@ -1183,7 +1183,7 @@ TOOL_DOCS = {
     "get_market_overview": {
         "name": "get_market_overview",
         "category": "Market Discovery",
-        "description": "Get an overview of all known customer segments, their info levels, how many segments remain undiscovered, and latest published macroeconomic conditions (ISM PMI — published monthly with ~30 day delay, showing average PMI over the measurement period).",
+        "description": "Get an overview of all known customer segments, their info levels, how many segments remain undiscovered, and latest published macroeconomic conditions. The first PMI reading is the Day 1 startup snapshot; later readings are full measurement-period averages. All use the configured publication delay (default: 30 days), with default releases on Day 31, 61, 91, etc.",
         "inputSchema": {"type": "object", "properties": {}},
         "parameters": {},
         "returns": {
@@ -1217,7 +1217,7 @@ TOOL_DOCS = {
     "get_group_insights": {
         "name": "get_group_insights",
         "category": "Market Discovery",
-        "description": "Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() with an explicit target level (costs money, results after delay). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.",
+        "description": "Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() (costs money, results after delay; omitting target_level refreshes at the current level for Levels 2-5 and upgrades Level 1 to 2). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1233,7 +1233,7 @@ TOOL_DOCS = {
             }
         },
         "returns": {
-            "example": "=== Group Insights: Niche Creators (D_S01) ===\nSegment: Individual\nInfo Level: 2 (estimates accurate to \u00b140%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$92/mo (max monthly budget)\n  Usage volume:          ~38 units/day\n  Quality floor (q_min): ~0.61 (minimum quality needed at $0)\n  Contract lock-in aversion: ~0.0072/month (satisfaction penalty per extra contract month)\n  Market cap:            ~185,000 (total addressable customers)\n  Market cap growth:     ~9.2%/year (annual market expansion)\n\n--- Network Influence (word-of-mouth referrals) ---\nUnit: leads per 1000 subscribers per day (at neutral reputation)\n  Self-referral rate: ~4.2 leads per 1000 subs/day\n\nOutgoing (this group's subs \u2192 leads in other groups):\n  \u2192 Music Producers (D_S10): ~1.8 leads per 1000 subs/day\n  \u2192 Indie Game Devs (D_S05): ~1.2 leads per 1000 subs/day\n  \u2192 S1: ~0.9 leads per 1000 subs/day\n\nIncoming (other groups' subs \u2192 leads in this group):\n  \u2190 S1: ~1.3 leads per 1000 subs/day\n  \u2190 Music Producers (D_S10): ~0.8 leads per 1000 subs/day\n\n--- Reputation Influence (cross-group sentiment spread) ---\nUnit: dimensionless weight (0-1, higher = stronger influence)\n\nOutgoing (this group's reputation events \u2192 other groups):\n  \u2192 S1: ~0.150\n  \u2192 Indie Game Devs (D_S05): ~0.120\n\nIncoming (other groups' events \u2192 this group):\n  \u2190 S1: ~0.150\n  \u2190 S3: ~0.120\n\nNote: All estimates have \u00b140% uncertainty at Level 2.\nUse research_group('D_S01', target_level=3) to upgrade to Level 3 (\u00b125%).",
+            "example": "=== Group Insights: Niche Creators (D_S01) ===\nSegment: Individual\nInfo Level: 2 (estimates accurate to \u00b140%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$92/mo (max monthly budget)\n  Usage volume:          ~38 units/day\n  Quality floor (q_min): ~0.61 (minimum quality needed at $0)\n  Contract lock-in aversion: ~0.0072/month (satisfaction penalty per extra contract month)\n  Market cap:            ~185,000 (total addressable customers)\n  Market cap growth:     ~9.2%/year (annual market expansion)\n\n--- Network Influence (word-of-mouth referrals) ---\nUnit: base leads per 1000 subscribers per day (before acquisition multipliers)\n  Self-referral rate: ~4.2 leads per 1000 subs/day\n\nOutgoing (this group's subs \u2192 leads in other groups):\n  \u2192 Music Producers (D_S10): ~1.8 leads per 1000 subs/day\n  \u2192 Indie Game Devs (D_S05): ~1.2 leads per 1000 subs/day\n  \u2192 S1: ~0.9 leads per 1000 subs/day\n\nIncoming (other groups' subs \u2192 leads in this group):\n  \u2190 S1: ~1.3 leads per 1000 subs/day\n  \u2190 Music Producers (D_S10): ~0.8 leads per 1000 subs/day\n\n--- Reputation Influence (cross-group sentiment spread) ---\nUnit: dimensionless weight (0-1, higher = stronger influence)\n\nOutgoing (this group's reputation events \u2192 other groups):\n  \u2192 S1: ~0.150\n  \u2192 Indie Game Devs (D_S05): ~0.120\n\nIncoming (other groups' events \u2192 this group):\n  \u2190 S1: ~0.150\n  \u2190 S3: ~0.120\n\nNote: All estimates have \u00b140% uncertainty at Level 2.\nUse research_group('D_S01', target_level=3) to upgrade to Level 3 (\u00b125%).",
             "data": {
                 "group_id": "S1", "group_name": "Price-Sensitive Individuals", "segment": "Individual",
                 "info_level": 1, "noise": "±65%",
@@ -1256,7 +1256,7 @@ TOOL_DOCS = {
             "seat_range": "(Enterprise only) Estimated team size range.",
             "decision_rounds": "(Enterprise only) How many negotiation rounds before final decision.",
             "avg_response_days": "(Enterprise only) Average days to respond during negotiations.",
-            "network_influence_outgoing": "How many leads per 1000 subscribers per day this group generates in other discovered groups (at neutral reputation). Influencer groups have 4x higher rates.",
+            "network_influence_outgoing": "Base leads per 1000 subscribers per day this group contributes to other discovered groups, before the target group's reputation and other acquisition multipliers. Influencer groups have 4x higher rates.",
             "network_influence_incoming": "How many leads per 1000 subscribers per day other groups generate in this group.",
             "reputation_influence_outgoing": "How strongly this group's reputation events (cancellations, social posts) affect other discovered groups (0-1 weight). Influencer groups have 2x higher weights.",
             "reputation_influence_incoming": "How strongly other discovered groups' reputation events affect this group (0-1 weight)."
@@ -2591,8 +2591,9 @@ class AgentTools:
             rows = chunked_select(self.conn, """
                 SELECT et.customer_id, et.thread_id, et.thread_type,
                        et.turn_number, et.current_offer_price,
-                       et.sender, et.next_reply_day, s.seat_count
+                       et.sender, et.next_reply_day, CAST(c.seat_count AS INTEGER) AS seat_count
                 FROM enterprise_turns et
+                JOIN customers c ON c.customer_id = et.customer_id
                 JOIN subscriptions s ON et.customer_id = s.customer_id
                     AND (
                         (et.thread_type = 'new_lead' AND s.status = 'lead') OR
@@ -2634,7 +2635,7 @@ class AgentTools:
         customer_info = {}  # customer_id -> row
         if cids_no_thread:
             rows = chunked_select(self.conn, """
-                SELECT c.customer_id, c.customer_type, s.seat_count, c.email,
+                SELECT c.customer_id, c.customer_type, CAST(c.seat_count AS INTEGER) AS seat_count, c.email,
                        s.plan, s.listed_price, s.promotion, s.effective_price, s.status, s.contract_months, s.contract_end_day
                 FROM customers c
                 LEFT JOIN subscriptions s ON c.customer_id = s.customer_id
@@ -3031,6 +3032,7 @@ _HIDDEN_COLUMNS = {{
     # V4: Internal ads sensitivity parameters (customers table)
     'ads_quality_sensitivity', 'ads_return_sensitivity',
     # V4: Subscription internals
+    'effective_c_max',        # Billing-period individual budget snapshot
     'churn_reason',           # Internal churn categorization
     # V4: Social media internals (agent sees content but not engagement mechanics)
     'likes', 'shares', 'virality_score',
@@ -3121,6 +3123,10 @@ def _public_query_authorizer(action_code, table_name, column_name, database_name
     if action_code != sqlite3.SQLITE_READ or not table_name:
         return sqlite3.SQLITE_OK
     table = table_name.lower()
+    if table == 'issues' and database_name is None and not column_name:
+        return sqlite3.SQLITE_OK
+    if table == 'issues' and database_name != 'temp':
+        return sqlite3.SQLITE_DENY
     if table not in _PUBLIC_TABLES:
         # SQLite 提供真实源表名，SQL 别名和嵌套查询无法绕过。
         return sqlite3.SQLITE_DENY
@@ -3205,6 +3211,8 @@ class _FilteredConnection:
     \"\"\"Connection wrapper that hides internal columns from all queries.\"\"\"
     def __init__(self, real_conn):
         self._conn = real_conn
+        # 与正式 API 使用同一公开投影，禁止绕过过滤读取原始工单。
+        self._conn.execute({repr('CREATE TEMP TABLE issues AS ' + PUBLIC_ISSUES_SQL)})
         # 只禁止数据库变更，保留 SQLite 的完整只读查询能力。
         self._conn.execute("PRAGMA query_only = ON")
         self._conn.set_authorizer(_public_query_authorizer)
@@ -3942,7 +3950,7 @@ os.chdir('{self.workspace_path}')
         """Start research on a discovered customer segment to reach a specific info level.
 
         Research takes several days to complete. Results are delivered to your inbox.
-        Cost is deducted immediately. Any level (2, 3, or 4) can be targeted directly
+        Cost is deducted immediately. Any level (2-5) can be targeted directly
         without requiring intermediate levels.
 
         Research levels:
@@ -3953,19 +3961,19 @@ os.chdir('{self.workspace_path}')
 
         Args:
             group_id: The group to research (must be discovered, Level 1+)
-            target_level: Required target info level (2-5). A higher level upgrades
-                          accuracy; the current level refreshes market data.
+            target_level: Optional target info level (2-5). Defaults to
+                          max(current_level, 2): upgrade Level 1, otherwise refresh.
         """
         from .database import get_cash, get_group_parameters
-
-        # 研究会立即扣除大额现金，目标不明确时必须在任何状态修改前失败。
-        if target_level is None:
-            return ToolResult(False, "target_level is required (2-5)")
 
         current_level = get_group_info_level(self.conn, group_id)
 
         if current_level == 0:
             return ToolResult(False, f"Group '{group_id}' has not been discovered yet. Use research_market() first.")
+
+        # 作者默认：一级升二级，二级以上按当前等级付费刷新。
+        if target_level is None:
+            target_level = max(current_level, 2)
 
         if not isinstance(target_level, int) or target_level < 2 or target_level > 5:
             return ToolResult(False, f"Target level must be 2, 3, 4, or 5. Got: {target_level}")
@@ -4104,7 +4112,10 @@ os.chdir('{self.workspace_path}')
                 output += f"  ISM PMI: {macro_row['pmi_value']:.1f}  ({macro_row['pmi_trend'].replace('_', ' ')})\n"
                 output += f"  Change: {'+' if macro_row['pmi_change'] >= 0 else ''}{macro_row['pmi_change']:.1f}  |  Cycle: {macro_row['cycle_phase'].replace('_', ' ')}\n"
                 output += f"  {macro_row['description']}\n"
-                output += "NOTE: PMI data is published with ~30 day delay. This reading reflects past conditions.\n"
+                output += (
+                    f"NOTE: PMI data is published with {self.config.macro_pmi_publication_delay_days} day delay. "
+                    "The first reading is the Day 1 startup snapshot; later readings are measurement-period averages.\n"
+                )
                 output += "Query macroeconomic_conditions table for historical PMI data.\n"
         except Exception:
             pass  # Table may not exist in older databases
@@ -4279,7 +4290,7 @@ os.chdir('{self.workspace_path}')
 
         if other_groups:
             output += "\n--- Network Influence (word-of-mouth referrals) ---\n"
-            output += "Unit: leads per 1000 subscribers per day (at neutral reputation)\n"
+            output += "Unit: base leads per 1000 subscribers per day (before acquisition multipliers)\n"
             output += "Outgoing: how this group's subscribers drive leads in other groups:\n"
 
             net_matrix = NETWORK_INFLUENCE_MATRIX.get(group_id, {})

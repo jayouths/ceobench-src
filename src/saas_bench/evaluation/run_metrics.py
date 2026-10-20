@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from saas_bench.runtime.db_protection import load_session_db
+from saas_bench.simulator.database import PUBLIC_ISSUES_SQL
 
 from .metric_definitions import (
     TERMINAL_WINDOW_DAYS,
@@ -415,9 +416,9 @@ def _service_metrics(
 
 def _issue_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
     row = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) AS count, AVG(days_open) AS avg_days
-        FROM issues
+        FROM ({PUBLIC_ISSUES_SQL})
         WHERE status = 'open'
         """
     ).fetchone()

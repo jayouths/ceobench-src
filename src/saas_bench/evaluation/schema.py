@@ -114,9 +114,9 @@ def initialize_evaluation_schema(conn: sqlite3.Connection) -> None:
                 'started',
                 NEW.plan,
                 CASE WHEN c.customer_type = 'large'
-                     THEN NEW.seat_count ELSE 1 END,
+                     THEN CAST(c.seat_count AS INTEGER) ELSE 1 END,
                 CASE WHEN c.customer_type = 'large'
-                     THEN NEW.effective_price * NEW.seat_count
+                     THEN NEW.effective_price * CAST(c.seat_count AS INTEGER)
                      ELSE NEW.effective_price END,
                 NULL
             FROM customers AS c
@@ -143,9 +143,9 @@ def initialize_evaluation_schema(conn: sqlite3.Connection) -> None:
                 'started',
                 NEW.plan,
                 CASE WHEN c.customer_type = 'large'
-                     THEN NEW.seat_count ELSE 1 END,
+                     THEN CAST(c.seat_count AS INTEGER) ELSE 1 END,
                 CASE WHEN c.customer_type = 'large'
-                     THEN NEW.effective_price * NEW.seat_count
+                     THEN NEW.effective_price * CAST(c.seat_count AS INTEGER)
                      ELSE NEW.effective_price END,
                 NULL
             FROM customers AS c
@@ -170,9 +170,9 @@ def initialize_evaluation_schema(conn: sqlite3.Connection) -> None:
                 'ended',
                 OLD.plan,
                 CASE WHEN c.customer_type = 'large'
-                     THEN OLD.seat_count ELSE 1 END,
+                     THEN CAST(c.seat_count AS INTEGER) ELSE 1 END,
                 CASE WHEN c.customer_type = 'large'
-                     THEN OLD.effective_price * OLD.seat_count
+                     THEN OLD.effective_price * CAST(c.seat_count AS INTEGER)
                      ELSE OLD.effective_price END,
                 NEW.churn_reason
             FROM customers AS c

@@ -108,6 +108,59 @@ def _create_rejectable_enterprise_thread(
     return customer_id, thread_id
 
 
+@pytest.mark.parametrize("thread_type", ["new_lead", "renegotiation"])
+@pytest.mark.parametrize("pmi,price,decision", [
+    (40.0, 170.0, "counter"), (40.0, 159.6, "accept"),
+    (50.0, 170.0, "accept"), (60.0, 170.0, "accept"),
+])
+def test_enterprise_reply_uses_current_macro_budget(
+    make_initialized_sim, make_agent_tools, monkeypatch, thread_type, pmi, price, decision,
+):
+    conn, simulator, config = make_initialized_sim(seed=42)
+    customer_id, thread_id = _create_rejectable_enterprise_thread(conn, thread_type)
+    tools = make_agent_tools(conn, config, seed=42)
+    assert tools.send_enterprise_deal([[customer_id, [["B", price]]]]).success
+    simulator.current_day = conn.execute(
+        "SELECT next_reply_day FROM enterprise_turns WHERE thread_id = ? ORDER BY message_id DESC LIMIT 1",
+        (thread_id,),
+    ).fetchone()[0]
+    # 报价提交后环境发生变化：客户按回复日而非报价日的经济状况判断。
+    simulator._macro_multipliers = simulator._compute_macro_multipliers(pmi)
+    conn.execute("UPDATE group_parameters SET drift_c_max_total = 10 WHERE group_id = 'E1'")
+    simulator._cache_step_day_globals(simulator.get_current_config())
+    monkeypatch.setattr(simulator, "_get_customer_quality_noise", lambda customer: 1.0)
+    monkeypatch.setattr(
+        enterprise_module, "get_qualities_for_all_plans_batch",
+        lambda *args, **kwargs: {customer_id: {"A": 1.2, "B": 1.2, "C": 1.2}},
+    )
+    original_evaluate = enterprise_module.evaluate_offerings
+    evaluations = []
+
+    def evaluate(state, *args):
+        result = original_evaluate(state, *args)
+        evaluations.append((state.c_max, result))
+        return result
+
+    monkeypatch.setattr("saas_bench.simulator.simulation.evaluate_offerings", evaluate)
+    raw_state = get_negotiation_state(conn, thread_id)
+    assert get_negotiation_states_batch(conn, [thread_id])[thread_id] == raw_state
+    assert raw_state.c_max == 210.0
+    expected_budget = 210.0 * (1 + 1.2 * (pmi - 50) / 50)
+    for _ in range(2):
+        assert simulator._apply_macro_budget(raw_state.group_id, raw_state.c_max) == pytest.approx(expected_budget)
+
+    simulator._process_scheduled_replies(simulator.get_current_config(), [])
+
+    [(budget, result)] = evaluations
+    assert budget == pytest.approx(expected_budget)
+    assert result.decision == decision
+    if decision == "counter":
+        assert 0 < result.counter_offer_price <= expected_budget
+    assert conn.execute("SELECT c_max FROM customers WHERE customer_id = ?", (customer_id,)).fetchone()[0] == 200.0
+    assert conn.execute("SELECT current_c_max FROM customer_state WHERE customer_id = ?", (customer_id,)).fetchone()[0] == 200.0
+    assert get_negotiation_state(conn, thread_id).c_max == 210.0
+
+
 def test_enterprise_inbox_uses_new_lead_seat_snapshot(make_initialized_sim):
     """新线索应只计一次，并保留创建谈判时的席位规模。"""
 

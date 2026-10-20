@@ -163,13 +163,14 @@ def test_enterprise_deal_schema_constrains_offerings():
     assert offering_schema["prefixItems"][1]["minimum"] == 0
 
 
-def test_group_research_requires_explicit_target_level():
-    """工具 schema 与公开 Python 客户端都必须要求研究目标等级。"""
+def test_group_research_preserves_optional_target_level():
+    """工具与 SDK 均保留作者的默认升级/刷新语义。"""
     docs = TOOL_DOCS["research_group"]
-    assert "target_level" in docs["inputSchema"]["required"]
+    assert "target_level" not in docs["inputSchema"]["required"]
+    assert "max(current_level, 2)" in docs["parameters"]["target_level"]["description"]
     assert (
         signature(research_group).parameters["target_level"].default
-        is Parameter.empty
+        is None
     )
 
 

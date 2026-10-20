@@ -9,29 +9,14 @@ from saas_bench.simulator.config import AD_CHANNELS, BenchmarkConfig
 
 
 @pytest.mark.parametrize("source", ["advertising", "network", "both"])
-@pytest.mark.parametrize(
-    ("reputation", "minimum", "span", "expected_multiplier"),
-    [
-        (0.0, 0.6, 0.8, 0.6),
-        (0.5, 0.6, 0.8, 1.0),
-        (1.0, 0.6, 0.8, 1.4),
-        (0.5, 0.4, 1.0, 0.9),
-    ],
-)
-def test_reputation_maps_to_configured_acquisition_multiplier(
+@pytest.mark.parametrize("reputation", [0.0, 0.5, 1.0])
+def test_reputation_directly_scales_acquisition(
     make_initialized_sim,
     monkeypatch,
     source,
     reputation,
-    minimum,
-    span,
-    expected_multiplier,
 ):
-    config = BenchmarkConfig(
-        seed=42,
-        reputation_lead_multiplier_min=minimum,
-        reputation_lead_multiplier_range=span,
-    )
+    config = BenchmarkConfig(seed=42)
     conn, simulator, _ = make_initialized_sim(seed=42, config=config)
     if source in ("network", "both"):
         params = simulator._generate_customer_from_group("S1")
@@ -61,7 +46,7 @@ def test_reputation_maps_to_configured_acquisition_multiplier(
     assert (fact.channel_leads_expected > 0) == (source != "network")
     assert (fact.network_leads_expected > 0) == (source != "advertising")
     expected_leads = (
-        expected_multiplier
+        reputation
         * fact.market_capacity_multiplier
         * fact.calendar_cycle_multiplier
         * fact.macroeconomic_multiplier

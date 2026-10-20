@@ -402,6 +402,7 @@ def test_week_advance_commits_public_snapshot_before_checkpoint_callback(
     make_initialized_sim,
 ):
     conn, _, _ = make_initialized_sim()
+    post_id = add_agent_social_post(conn, day=0, content="A public product update", views=123)
     tools = SimpleNamespace(current_day=0)
     tools.set_current_day = lambda day: setattr(tools, "current_day", day)
     callback_observations = []
@@ -428,6 +429,8 @@ def test_week_advance_commits_public_snapshot_before_checkpoint_callback(
     assert callback_dashboard == result["dashboard"]
     assert in_transaction is False
     assert persisted_snapshot == server._last_public_week_snapshot
+    assert [post.post_id for post in persisted_snapshot.social_posts] == [post_id]
+    assert f"Post #{post_id}: 123 views, 0 comments" in result['dashboard']
 
 
 def test_analysis_signal_queries_pass_public_query_policy(
@@ -600,6 +603,7 @@ def test_api_blocks_every_undocumented_internal_table(
         "SELECT 1 FROM customers WHERE c_max > 0",
         "SELECT * FROM main.customers LIMIT 1",
         "SELECT first_billing_done FROM subscriptions",
+        "SELECT effective_c_max FROM subscriptions",
         "SELECT effect_by_group FROM agent_social_media_posts",
         "SELECT views_by_group FROM agent_social_media_posts",
         "SELECT future_secret FROM subscriptions",
@@ -707,6 +711,10 @@ def test_every_public_column_accepts_sqlite_identifier_casing(
                     handler._read_body = lambda: {"sql": sql}
                     handler._handle_query()
                     payload, status = responses.pop()
+                    if table == 'issues' and prefix:
+                        # 原始工单禁止直读；大小写不改变行过滤的权限边界。
+                        assert status == 403 and not payload["success"], (sql, payload)
+                        continue
                     assert status == 200 and payload["success"], (sql, payload)
                     assert len(payload["columns"]) == len(doc['columns'])
     finally:
@@ -818,10 +826,11 @@ def test_public_mrr_query_counts_enterprise_subscription_seats(
     assert payload["success"] is True
     # 个人订阅按账户计价，企业订阅按公开的订阅席位快照计价。
     assert payload["rows"] == [{"mrr": 20.0 + 80.0 * 10}]
-    assert get_mrr(conn) == 20.0 + 80.0 * 10
+    # 内部真实 MRR 仍按作者的实时客户席位计算，不强迫公开快照提前同步。
+    assert get_mrr(conn) == 20.0 + 80.0 * 37
     assert (
         build_public_week_snapshot(conn, 0).current_state.enterprise_subscribed_seats
-        == 10
+        == 37
     )
 
 

@@ -51,7 +51,7 @@ def record_evaluation_day(
 
 def record_subscription_day(conn: sqlite3.Connection, day: int) -> None:
     """记录日末有效订阅的账户、席位和 MRR 存量。"""
-    # 与模拟器 get_mrr() 使用相同口径：企业席位取订阅上当前生效的整数值，
+    # 与模拟器 get_mrr() 一致：真实席位取内部客户值的整数部分，不读滞后公开快照。
     # effective_price 为实际月费。无有效订阅的组合不写行，离线指标层结合
     # service_day 补零；流失率和增长率也只在离线阶段计算。
     conn.execute("DELETE FROM _eval_subscription_day WHERE day = ?", (day,))
@@ -69,13 +69,13 @@ def record_subscription_day(conn: sqlite3.Connection, day: int) -> None:
             COUNT(*) AS active_accounts,
             SUM(
                 CASE WHEN c.customer_type = 'large'
-                     THEN s.seat_count
+                     THEN CAST(c.seat_count AS INTEGER)
                      ELSE 1
                 END
             ) AS active_seats,
             SUM(
                 CASE WHEN c.customer_type = 'large'
-                     THEN s.effective_price * s.seat_count
+                     THEN s.effective_price * CAST(c.seat_count AS INTEGER)
                      ELSE s.effective_price
                 END
             ) AS mrr

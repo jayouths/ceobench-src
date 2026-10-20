@@ -38,7 +38,7 @@
     "name": "research_group",
     "python_call": "novamind_api.market.research_group(...)",
     "category": "Market Discovery",
-    "description": "Research a discovered customer group to a specific info level. Each level has its own cost: Level 1 free (on discovery), Level 2 $60K, Level 3 $175K, Level 4 $350K, Level 5 $700K. Any level (2-5) can be targeted directly \u2014 no prerequisites from lower levels. Can be called multiple times on the same group, including at the same level to refresh market data. Each call deducts cost immediately. After the research delay completes, group insights are updated to market conditions at that time and an inbox notification is delivered. Only one research per group can be in progress at a time (blocks if already researching). Use get_group_insights() to retrieve the data.",
+    "description": "Research a discovered customer group to a specific info level. If target_level is omitted, Level 1 upgrades to Level 2; Levels 2-5 refresh at the current level. Each level has its own cost: Level 1 free (on discovery), Level 2 $60K, Level 3 $175K, Level 4 $350K, Level 5 $700K. Any level (2-5) can be targeted directly \u2014 no prerequisites from lower levels. Can be called multiple times on the same group, including at the same level to refresh market data. Each call deducts cost immediately. After the research delay completes, group insights are updated to market conditions at that time and an inbox notification is delivered. Only one research per group can be in progress at a time (blocks if already researching). Use get_group_insights() to retrieve the data.",
     "parameters": {
       "group_id": {
         "type": "string",
@@ -50,7 +50,7 @@
       },
       "target_level": {
         "type": "integer",
-        "description": "Required target level (2-5). Can jump directly to a higher level; use the current level for a same-level refresh.",
+        "description": "Optional target level (2-5). Defaults to max(current_level, 2). Specify a higher level to upgrade or the current level to refresh.",
         "examples": [
           2,
           3,
@@ -68,12 +68,11 @@
         },
         "target_level": {
           "type": "integer",
-          "description": "Required target info level (2-5). Specify a higher level to improve accuracy or the current level to refresh market data."
+          "description": "Optional target info level (2-5). Defaults to max(current_level, 2): Level 1 upgrades to 2, Levels 2-5 refresh at the current level."
         }
       },
       "required": [
-        "group_id",
-        "target_level"
+        "group_id"
       ]
     },
     "returns": {
@@ -100,7 +99,7 @@
     "name": "get_market_overview",
     "python_call": "novamind_api.market.get_market_overview(...)",
     "category": "Market Discovery",
-    "description": "Get an overview of all known customer segments, their info levels, how many segments remain undiscovered, and latest published macroeconomic conditions (ISM PMI \u2014 published monthly with ~30 day delay, showing average PMI over the measurement period).",
+    "description": "Get an overview of all known customer segments, their info levels, how many segments remain undiscovered, and latest published macroeconomic conditions. The first PMI reading is the Day 1 startup snapshot; later readings are full measurement-period averages. All use the configured publication delay (default: 30 days), with default releases on Day 31, 61, 91, etc.",
     "parameters": {},
     "inputSchema": {
       "type": "object",
@@ -144,7 +143,7 @@
     "name": "get_group_insights",
     "python_call": "novamind_api.market.get_group_insights(...)",
     "category": "Market Discovery",
-    "description": "Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed \u2014 to get updated market data, call research_group() with an explicit target level (costs money, results after delay). Accuracy depends on info level (Level 1: \u00b165%, Level 5: \u00b15%). Attributes returned: (1) willingness_to_pay \u2014 max monthly budget, (2) usage_volume \u2014 daily compute usage, (3) quality_floor_q_min \u2014 minimum quality needed at $0, (4) contract_lockin_aversion \u2014 satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap \u2014 total addressable customers, (6) market_cap_growth \u2014 annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.",
+    "description": "Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed \u2014 to get updated market data, call research_group() (costs money, results after delay; omitting target_level refreshes at the current level for Levels 2-5 and upgrades Level 1 to 2). Accuracy depends on info level (Level 1: \u00b165%, Level 5: \u00b15%). Attributes returned: (1) willingness_to_pay \u2014 max monthly budget, (2) usage_volume \u2014 daily compute usage, (3) quality_floor_q_min \u2014 minimum quality needed at $0, (4) contract_lockin_aversion \u2014 satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap \u2014 total addressable customers, (6) market_cap_growth \u2014 annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.",
     "parameters": {
       "group_id": {
         "type": "string",
@@ -169,7 +168,7 @@
       ]
     },
     "returns": {
-      "example": "=== Group Insights: Niche Creators (D_S01) ===\nSegment: Individual\nInfo Level: 2 (estimates accurate to \u00b140%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$92/mo (max monthly budget)\n  Usage volume:          ~38 units/day\n  Quality floor (q_min): ~0.61 (minimum quality needed at $0)\n  Contract lock-in aversion: ~0.0072/month (satisfaction penalty per extra contract month)\n  Market cap:            ~185,000 (total addressable customers)\n  Market cap growth:     ~9.2%/year (annual market expansion)\n\n--- Network Influence (word-of-mouth referrals) ---\nUnit: leads per 1000 subscribers per day (at neutral reputation)\n  Self-referral rate: ~4.2 leads per 1000 subs/day\n\nOutgoing (this group's subs \u2192 leads in other groups):\n  \u2192 Music Producers (D_S10): ~1.8 leads per 1000 subs/day\n  \u2192 Indie Game Devs (D_S05): ~1.2 leads per 1000 subs/day\n  \u2192 S1: ~0.9 leads per 1000 subs/day\n\nIncoming (other groups' subs \u2192 leads in this group):\n  \u2190 S1: ~1.3 leads per 1000 subs/day\n  \u2190 Music Producers (D_S10): ~0.8 leads per 1000 subs/day\n\n--- Reputation Influence (cross-group sentiment spread) ---\nUnit: dimensionless weight (0-1, higher = stronger influence)\n\nOutgoing (this group's reputation events \u2192 other groups):\n  \u2192 S1: ~0.150\n  \u2192 Indie Game Devs (D_S05): ~0.120\n\nIncoming (other groups' events \u2192 this group):\n  \u2190 S1: ~0.150\n  \u2190 S3: ~0.120\n\nNote: All estimates have \u00b140% uncertainty at Level 2.\nUse research_group('D_S01', target_level=3) to upgrade to Level 3 (\u00b125%).",
+      "example": "=== Group Insights: Niche Creators (D_S01) ===\nSegment: Individual\nInfo Level: 2 (estimates accurate to \u00b140%)\n\nEstimated Parameters:\n  Willingness to pay:    ~$92/mo (max monthly budget)\n  Usage volume:          ~38 units/day\n  Quality floor (q_min): ~0.61 (minimum quality needed at $0)\n  Contract lock-in aversion: ~0.0072/month (satisfaction penalty per extra contract month)\n  Market cap:            ~185,000 (total addressable customers)\n  Market cap growth:     ~9.2%/year (annual market expansion)\n\n--- Network Influence (word-of-mouth referrals) ---\nUnit: base leads per 1000 subscribers per day (before acquisition multipliers)\n  Self-referral rate: ~4.2 leads per 1000 subs/day\n\nOutgoing (this group's subs \u2192 leads in other groups):\n  \u2192 Music Producers (D_S10): ~1.8 leads per 1000 subs/day\n  \u2192 Indie Game Devs (D_S05): ~1.2 leads per 1000 subs/day\n  \u2192 S1: ~0.9 leads per 1000 subs/day\n\nIncoming (other groups' subs \u2192 leads in this group):\n  \u2190 S1: ~1.3 leads per 1000 subs/day\n  \u2190 Music Producers (D_S10): ~0.8 leads per 1000 subs/day\n\n--- Reputation Influence (cross-group sentiment spread) ---\nUnit: dimensionless weight (0-1, higher = stronger influence)\n\nOutgoing (this group's reputation events \u2192 other groups):\n  \u2192 S1: ~0.150\n  \u2192 Indie Game Devs (D_S05): ~0.120\n\nIncoming (other groups' events \u2192 this group):\n  \u2190 S1: ~0.150\n  \u2190 S3: ~0.120\n\nNote: All estimates have \u00b140% uncertainty at Level 2.\nUse research_group('D_S01', target_level=3) to upgrade to Level 3 (\u00b125%).",
       "data": {
         "group_id": "S1",
         "group_name": "Price-Sensitive Individuals",

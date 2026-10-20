@@ -1,11 +1,11 @@
 {
   "table": "macroeconomic_conditions",
-  "description": "Macroeconomic conditions (ISM PMI business cycle index). PMI > 50 = expansion, PMI < 50 = contraction. Published monthly with ~30 day delay (like real ISM reports). Each reading is the AVERAGE PMI over the prior measurement period, not a single-day snapshot. NOTE: Data is delayed \u2014 the most recent reading reflects conditions from ~30 days ago.",
+  "description": "Macroeconomic conditions (ISM PMI business cycle index). PMI > 50 = expansion, PMI < 50 = contraction. The first reading is the Day 1 startup snapshot, not a full-period average. Later readings average each full measurement period (default: Days 2-31, 32-61, etc.). All readings use the configured publication delay (default: 30 days), so the first appears on Day 31, then Day 61, 91, etc. Published data reflects past conditions, not real-time PMI.",
   "columns": {
-    "day": "INTEGER PRIMARY KEY \u2014 Simulation day when PMI was MEASURED (not published). The reading appears in this table ~30 days after this day.",
-    "pmi_value": "REAL \u2014 Average ISM PMI over the measurement period (30-70 scale). >50 = expansion, <50 = contraction. This is a period average, not a point-in-time value.",
+    "day": "INTEGER PRIMARY KEY \u2014 Measurement-period end day (not publication day). Day 1 denotes the startup snapshot; later rows end full measurement periods. The row appears after the configured publication delay (default: 30 days).",
+    "pmi_value": "REAL \u2014 ISM PMI (30-70 scale): Day 1 startup snapshot for the first reading, full measurement-period average thereafter. >50 = expansion, <50 = contraction.",
     "pmi_trend": "TEXT \u2014 'strong_expansion' (>58), 'expansion' (52-58), 'neutral' (48-52), 'contraction' (42-48), 'severe_contraction' (<42)",
-    "pmi_change": "REAL \u2014 Change in average PMI from previous reading (positive = improving)",
+    "pmi_change": "REAL \u2014 Change from the previous reading (positive = improving); the startup reading is compared with the configured initial PMI.",
     "cycle_phase": "TEXT \u2014 'peak', 'declining', 'trough', 'recovering' \u2014 current position in business cycle",
     "description": "TEXT \u2014 Human-readable economic summary for the measurement period"
   }

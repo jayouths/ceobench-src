@@ -118,7 +118,7 @@
     "name": "post_social_media",
     "python_call": "novamind_api.marketing.post_social_media(...)",
     "category": "Marketing & Social Media",
-    "description": "Post a social media message on company social media account. You can either post an original post or reply to an existing customer. Max 280 characters. Limit: 1 post per day. Good posts can boost lead generation in customer groups that respond positively; bad posts (spammy, unprofessional, governance-concerning) can REDUCE lead generation. Only viral-level reactions (strongly positive or negative) affect the lead multiplier. Virality and customer sentiment of a post can be reflected via view number and comments to a post \u2014 only viral posts get commented on by customers. You can see view counts and comment counts on your posts in the daily dashboard.",
+    "description": "Post a social media message on company social media account. You can either post an original post or reply to an existing customer. Max 280 characters. Limit: 1 post per day. Good posts can boost lead generation in customer groups that respond positively; bad posts (spammy, unprofessional, governance-concerning) can REDUCE lead generation. Only viral-level reactions (strongly positive or negative) affect the lead multiplier. Virality and customer sentiment of a post can be reflected via view number and comments to a post \u2014 only viral posts get commented on by customers. The next weekly dashboard shows cumulative view counts and comment counts for posts published from the previous decision day (inclusive) to the current decision day (exclusive).",
     "parameters": {
       "content": {
         "type": "str",
@@ -157,7 +157,7 @@
       "content": "str \u2014 the posted content",
       "reply_to_post_id": "int or null \u2014 post being replied to"
     },
-    "impact": "Viral posts perceived as positive by a customer group boost lead arrival speed for that group. Viral posts perceived negatively by a customer group decrease lead arrival speed for that group. Virality and customer sentiment are reflected in view count and comments \u2014 only viral posts get commented on by customers. Check the daily dashboard for comment counts on your posts.",
+    "impact": "Viral posts perceived as positive by a customer group boost lead arrival speed for that group. Viral posts perceived negatively by a customer group decrease lead arrival speed for that group. Virality and customer sentiment are reflected in view count and comments \u2014 only viral posts get commented on by customers. Check the next weekly dashboard for cumulative view and comment counts on your posts.",
     "example_call": {
       "tool": "post_social_media",
       "arguments": {

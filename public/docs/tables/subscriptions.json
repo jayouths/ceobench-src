@@ -12,7 +12,7 @@
     "end_day": "INTEGER \u2014 Day subscription ended (NULL if active)",
     "status": "TEXT \u2014 'lead', 'subscribed', 'cancelled', 'lost'",
     "billing_day_mod30": "INTEGER \u2014 Billing cycle day (0-29)",
-    "seat_count": "INTEGER \u2014 Current effective seats for this subscription",
+    "seat_count": "INTEGER \u2014 Public seat snapshot, updated at subscription, negotiated contract and billing events; may lag the internal customer seat drift",
     "pending_plan": "TEXT \u2014 Scheduled plan change (NULL if none)",
     "pending_price": "REAL \u2014 Negotiated price for pending plan change",
     "contract_months": "INTEGER \u2014 Commitment length in months (1=month-to-month)",

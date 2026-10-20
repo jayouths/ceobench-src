@@ -171,7 +171,7 @@ Customer group discovery and research levels
 
 ## `issues`
 
-Individual customer support issues with full lifecycle tracking
+Customer support issues: actionable open issues and actual resolution history. Orphan open issues without an active subscription and issues closed because the customer churned are excluded from all ordinary Agent reads. Actual operations-resolved history remains visible, even after customer churn.
 
 | Column | Description |
 |--------|-------------|
@@ -182,7 +182,7 @@ Individual customer support issues with full lifecycle tracking
 | `days_open` | INTEGER — How many days the issue has been open (increments daily) |
 | `status` | TEXT — 'open' or 'resolved' |
 | `resolved_day` | INTEGER — Simulation day when resolved (NULL if still open) |
-| `resolution_type` | TEXT — How closed: 'ops_resolved' (via operations spend) or 'customer_churned' (customer no longer has an active subscription) |
+| `resolution_type` | TEXT — 'ops_resolved' for actual operations resolution, NULL while open. Lifecycle closures due to customer churn are archived privately, not returned by public queries. |
 
 ---
 
@@ -202,14 +202,14 @@ Financial ledger — all income and expenses
 
 ## `macroeconomic_conditions`
 
-Macroeconomic conditions (ISM PMI business cycle index). PMI > 50 = expansion, PMI < 50 = contraction. Published monthly with ~30 day delay (like real ISM reports). Each reading is the AVERAGE PMI over the prior measurement period, not a single-day snapshot. NOTE: Data is delayed — the most recent reading reflects conditions from ~30 days ago.
+Macroeconomic conditions (ISM PMI business cycle index). PMI > 50 = expansion, PMI < 50 = contraction. The first reading is the Day 1 startup snapshot, not a full-period average. Later readings average each full measurement period (default: Days 2-31, 32-61, etc.). All readings use the configured publication delay (default: 30 days), so the first appears on Day 31, then Day 61, 91, etc. Published data reflects past conditions, not real-time PMI.
 
 | Column | Description |
 |--------|-------------|
-| `day` | INTEGER PRIMARY KEY — Simulation day when PMI was MEASURED (not published). The reading appears in this table ~30 days after this day. |
-| `pmi_value` | REAL — Average ISM PMI over the measurement period (30-70 scale). >50 = expansion, <50 = contraction. This is a period average, not a point-in-time value. |
+| `day` | INTEGER PRIMARY KEY — Measurement-period end day (not publication day). Day 1 denotes the startup snapshot; later rows end full measurement periods. The row appears after the configured publication delay (default: 30 days). |
+| `pmi_value` | REAL — ISM PMI (30-70 scale): Day 1 startup snapshot for the first reading, full measurement-period average thereafter. >50 = expansion, <50 = contraction. |
 | `pmi_trend` | TEXT — 'strong_expansion' (>58), 'expansion' (52-58), 'neutral' (48-52), 'contraction' (42-48), 'severe_contraction' (<42) |
-| `pmi_change` | REAL — Change in average PMI from previous reading (positive = improving) |
+| `pmi_change` | REAL — Change from the previous reading (positive = improving); the startup reading is compared with the configured initial PMI. |
 | `cycle_phase` | TEXT — 'peak', 'declining', 'trough', 'recovering' — current position in business cycle |
 | `description` | TEXT — Human-readable economic summary for the measurement period |
 
@@ -319,7 +319,7 @@ Customer subscriptions (current and historical)
 | `end_day` | INTEGER — Day subscription ended (NULL if active) |
 | `status` | TEXT — 'lead', 'subscribed', 'cancelled', 'lost' |
 | `billing_day_mod30` | INTEGER — Billing cycle day (0-29) |
-| `seat_count` | INTEGER — Current effective seats for this subscription |
+| `seat_count` | INTEGER — Public seat snapshot, updated at subscription, negotiated contract and billing events; may lag the internal customer seat drift |
 | `pending_plan` | TEXT — Scheduled plan change (NULL if none) |
 | `pending_price` | REAL — Negotiated price for pending plan change |
 | `contract_months` | INTEGER — Commitment length in months (1=month-to-month) |

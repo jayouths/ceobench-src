@@ -1,6 +1,6 @@
 {
   "table": "issues",
-  "description": "Individual customer support issues with full lifecycle tracking",
+  "description": "Customer support issues: actionable open issues and actual resolution history. Orphan open issues without an active subscription and issues closed because the customer churned are excluded from all ordinary Agent reads. Actual operations-resolved history remains visible, even after customer churn.",
   "columns": {
     "issue_id": "INTEGER PRIMARY KEY \u2014 Unique issue ID (auto-incrementing)",
     "customer_id": "INTEGER \u2014 Foreign key to customers",
@@ -9,6 +9,6 @@
     "days_open": "INTEGER \u2014 How many days the issue has been open (increments daily)",
     "status": "TEXT \u2014 'open' or 'resolved'",
     "resolved_day": "INTEGER \u2014 Simulation day when resolved (NULL if still open)",
-    "resolution_type": "TEXT \u2014 How closed: 'ops_resolved' (via operations spend) or 'customer_churned' (customer no longer has an active subscription)"
+    "resolution_type": "TEXT \u2014 'ops_resolved' for actual operations resolution, NULL while open. Lifecycle closures due to customer churn are archived privately, not returned by public queries."
   }
 }

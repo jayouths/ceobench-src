@@ -245,3 +245,30 @@ def test_quick_resolution_boost_starts_from_zero_relationship(make_initialized_s
         (customer_id,),
     ).fetchone()["relationship"]
     assert relationship == pytest.approx(config.quick_resolution_boost_1day)
+
+
+@pytest.mark.parametrize(
+    ('satisfaction', 'probability'), [(0.0, 0.16), (0.5, 0.085), (1.0, 0.01)],
+)
+def test_issue_probability_uses_reference_satisfaction_not_neutral_point(
+    make_initialized_sim, satisfaction, probability,
+):
+    conn, simulator, _ = make_initialized_sim()
+    try:
+        customer_id, _ = _insert_customer_with_subscription(conn)
+        for roll, expected_count in ((probability - 1e-6, 1), (probability + 1e-6, 0)):
+            conn.execute("DELETE FROM issues WHERE customer_id = ?", (customer_id,))
+            conn.execute(
+                "UPDATE customer_state SET satisfaction = ?, open_issue_days = 0 WHERE customer_id = ?",
+                (satisfaction, customer_id),
+            )
+            simulator.rng = SimpleNamespace(random=lambda: roll)
+
+            simulator._process_issues(simulator.get_current_config(), outage=False)
+
+            count = conn.execute(
+                "SELECT COUNT(*) FROM issues WHERE customer_id = ?", (customer_id,),
+            ).fetchone()[0]
+            assert count == expected_count
+    finally:
+        conn.close()

@@ -19,13 +19,13 @@ and run scripts with `./novamind-operation python <script.py>` or
 | `set_usage_quotas` | Set daily usage quotas (rate limits) per customer for each plan. Exceeding quota degrades experience. |
 | `send_enterprise_deal` | Send enterprise deal offerings. Compact tuple format: each deal = [customer_id, [[plan, price_per_seat], ...]]. All contracts are month-to-month (1 month). If the customer has an open negotiation thread, replies to it. If no open thread, initiates renegotiation. Up to 3 offerings per deal. Customer picks the best. Late replies damage relationship (-0.02/day after 1 day grace). No response within 7 days = customer LOST FOREVER. |
 | `get_social_posts` | Search social media posts about your company. NOTE: Sentiment is NOT provided - you must infer it from the post content. |
-| `post_social_media` | Post a social media message on company social media account. You can either post an original post or reply to an existing customer. Max 280 characters. Limit: 1 post per day. Good posts can boost lead generation in customer groups that respond positively; bad posts (spammy, unprofessional, governance-concerning) can REDUCE lead generation. Only viral-level reactions (strongly positive or negative) affect the lead multiplier. Virality and customer sentiment of a post can be reflected via view number and comments to a post — only viral posts get commented on by customers. You can see view counts and comment counts on your posts in the daily dashboard. |
+| `post_social_media` | Post a social media message on company social media account. You can either post an original post or reply to an existing customer. Max 280 characters. Limit: 1 post per day. Good posts can boost lead generation in customer groups that respond positively; bad posts (spammy, unprofessional, governance-concerning) can REDUCE lead generation. Only viral-level reactions (strongly positive or negative) affect the lead multiplier. Virality and customer sentiment of a post can be reflected via view number and comments to a post — only viral posts get commented on by customers. The next weekly dashboard shows cumulative view counts and comment counts for posts published from the previous decision day (inclusive) to the current decision day (exclusive). |
 | `get_cost_info` | Get current cost structure for compute and capacity. Shows model tier costs and capacity tier costs. |
 | `reject_enterprise_deal` | Reject one or more enterprise deals. List-based: each deal identified by customer_id. The system finds the customer's active negotiation thread automatically. New leads are lost, existing customers may churn. |
 | `research_market` | Conduct market research to discover new customer segments. Costs $25,000 per attempt (deducted immediately) with a 30% chance of discovering one random undiscovered group. Result is instant (no delay). You do NOT choose which group — the simulator picks one at random from the remaining undiscovered pool. Discovered groups start at Info Level 1 (±65% accuracy). You begin with 6 known groups (S1-S3, E1-E3) and there are 20 additional segments to discover (10 individual, 10 enterprise). |
-| `research_group` | Research a discovered customer group to a specific info level. Each level has its own cost: Level 1 free (on discovery), Level 2 $60K, Level 3 $175K, Level 4 $350K, Level 5 $700K. Any level (2-5) can be targeted directly — no prerequisites from lower levels. Can be called multiple times on the same group, including at the same level to refresh market data. Each call deducts cost immediately. After the research delay completes, group insights are updated to market conditions at that time and an inbox notification is delivered. Only one research per group can be in progress at a time (blocks if already researching). Use get_group_insights() to retrieve the data. |
-| `get_market_overview` | Get an overview of all known customer segments, their info levels, how many segments remain undiscovered, and latest published macroeconomic conditions (ISM PMI — published monthly with ~30 day delay, showing average PMI over the measurement period). |
-| `get_group_insights` | Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() with an explicit target level (costs money, results after delay). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only. |
+| `research_group` | Research a discovered customer group to a specific info level. If target_level is omitted, Level 1 upgrades to Level 2; Levels 2-5 refresh at the current level. Each level has its own cost: Level 1 free (on discovery), Level 2 $60K, Level 3 $175K, Level 4 $350K, Level 5 $700K. Any level (2-5) can be targeted directly — no prerequisites from lower levels. Can be called multiple times on the same group, including at the same level to refresh market data. Each call deducts cost immediately. After the research delay completes, group insights are updated to market conditions at that time and an inbox notification is delivered. Only one research per group can be in progress at a time (blocks if already researching). Use get_group_insights() to retrieve the data. |
+| `get_market_overview` | Get an overview of all known customer segments, their info levels, how many segments remain undiscovered, and latest published macroeconomic conditions. The first PMI reading is the Day 1 startup snapshot; later readings are full measurement-period averages. All use the configured publication delay (default: 30 days), with default releases on Day 31, 61, 91, etc. |
+| `get_group_insights` | Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() (costs money, results after delay; omitting target_level refreshes at the current level for Levels 2-5 and upgrades Level 1 to 2). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only. |
 | `start_research_project` | Start an R&D research tier. Costs deducted immediately. Completes after sampled duration with sampled quality boost. Tiers are REPEATABLE — same tier can be started again after completion. Only one invocation per tier can be in-progress at a time. Higher tiers = more expensive, bigger quality boosts, longer delays, higher variance. |
 | `list_research_projects` | List all 20 R&D research tiers with their status. Shows cost, duration distribution, quality distribution, in-progress invocations, and completion history for each tier. Tiers are repeatable. |
 | `set_ads_strength` | Set in-app advertising strength (0-1). Ads generate revenue but reduce perceived quality. Effects at global/group/individual levels are ADDITIVE, capped at 1.0 per customer. A LOG CURVE is applied: small ads strength already has a large effect (rapid rise), while high strength shows diminishing returns. |
@@ -687,7 +687,7 @@ Send enterprise deal offerings. Compact tuple format: each deal = [customer_id, 
 
 **Python:** `novamind_api.market.get_group_insights(...)`
 
-Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() with an explicit target level (costs money, results after delay). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.
+Retrieve estimated parameters for a discovered customer group. Returns data frozen at the time the last research_group() completed — to get updated market data, call research_group() (costs money, results after delay; omitting target_level refreshes at the current level for Levels 2-5 and upgrades Level 1 to 2). Accuracy depends on info level (Level 1: ±65%, Level 5: ±5%). Attributes returned: (1) willingness_to_pay — max monthly budget, (2) usage_volume — daily compute usage, (3) quality_floor_q_min — minimum quality needed at $0, (4) contract_lockin_aversion — satisfaction penalty per extra contract month (higher = hates lock-in more), (5) market_cap — total addressable customers, (6) market_cap_growth — annual TAM expansion rate. Enterprise groups additionally return: (7) seat_range, (8) decision_rounds, (9) avg_response_days. Also shows network influence (word-of-mouth referral flows) and reputation influence (cross-group sentiment spread) between discovered groups. Free and read-only.
 
 **Parameters:**
 
@@ -723,7 +723,7 @@ Estimated Parameters:
   Market cap growth:     ~9.2%/year (annual market expansion)
 
 --- Network Influence (word-of-mouth referrals) ---
-Unit: leads per 1000 subscribers per day (at neutral reputation)
+Unit: base leads per 1000 subscribers per day (before acquisition multipliers)
   Self-referral rate: ~4.2 leads per 1000 subs/day
 
 Outgoing (this group's subs → leads in other groups):
@@ -768,7 +768,7 @@ Use research_group('D_S01', target_level=3) to upgrade to Level 3 (±25%).
 
 **Python:** `novamind_api.market.get_market_overview(...)`
 
-Get an overview of all known customer segments, their info levels, how many segments remain undiscovered, and latest published macroeconomic conditions (ISM PMI — published monthly with ~30 day delay, showing average PMI over the measurement period).
+Get an overview of all known customer segments, their info levels, how many segments remain undiscovered, and latest published macroeconomic conditions. The first PMI reading is the Day 1 startup snapshot; later readings are full measurement-period averages. All use the configured publication delay (default: 30 days), with default releases on Day 31, 61, 91, etc.
 
 **Returns:**
 - example: === Market Overview ===
@@ -801,12 +801,12 @@ Use research_group(group_id, target_level) to improve accuracy or refresh data.
 
 **Python:** `novamind_api.market.research_group(...)`
 
-Research a discovered customer group to a specific info level. Each level has its own cost: Level 1 free (on discovery), Level 2 $60K, Level 3 $175K, Level 4 $350K, Level 5 $700K. Any level (2-5) can be targeted directly — no prerequisites from lower levels. Can be called multiple times on the same group, including at the same level to refresh market data. Each call deducts cost immediately. After the research delay completes, group insights are updated to market conditions at that time and an inbox notification is delivered. Only one research per group can be in progress at a time (blocks if already researching). Use get_group_insights() to retrieve the data.
+Research a discovered customer group to a specific info level. If target_level is omitted, Level 1 upgrades to Level 2; Levels 2-5 refresh at the current level. Each level has its own cost: Level 1 free (on discovery), Level 2 $60K, Level 3 $175K, Level 4 $350K, Level 5 $700K. Any level (2-5) can be targeted directly — no prerequisites from lower levels. Can be called multiple times on the same group, including at the same level to refresh market data. Each call deducts cost immediately. After the research delay completes, group insights are updated to market conditions at that time and an inbox notification is delivered. Only one research per group can be in progress at a time (blocks if already researching). Use get_group_insights() to retrieve the data.
 
 **Parameters:**
 
 - `group_id`: {'type': 'string', 'description': "The group ID to research (e.g., 'D_S01', 'D_E03'). Must be discovered (Level 1+).", 'examples': ['D_S01', 'D_E05']}
-- `target_level`: {'type': 'integer', 'description': 'Required target level (2-5). Can jump directly to a higher level; use the current level for a same-level refresh.', 'examples': [2, 3, 4, 5]}
+- `target_level`: {'type': 'integer', 'description': 'Optional target level (2-5). Defaults to max(current_level, 2). Specify a higher level to upgrade or the current level to refresh.', 'examples': [2, 3, 4, 5]}
 
 **Input Schema:**
 ```json
@@ -819,12 +819,11 @@ Research a discovered customer group to a specific info level. Each level has it
     },
     "target_level": {
       "type": "integer",
-      "description": "Required target info level (2-5). Specify a higher level to improve accuracy or the current level to refresh market data."
+      "description": "Optional target info level (2-5). Defaults to max(current_level, 2): Level 1 upgrades to 2, Levels 2-5 refresh at the current level."
     }
   },
   "required": [
-    "group_id",
-    "target_level"
+    "group_id"
   ]
 }
 ```
@@ -899,7 +898,7 @@ Use research_group('D_S01', target_level=2) to improve accuracy.
 
 **Python:** `novamind_api.marketing.post_social_media(...)`
 
-Post a social media message on company social media account. You can either post an original post or reply to an existing customer. Max 280 characters. Limit: 1 post per day. Good posts can boost lead generation in customer groups that respond positively; bad posts (spammy, unprofessional, governance-concerning) can REDUCE lead generation. Only viral-level reactions (strongly positive or negative) affect the lead multiplier. Virality and customer sentiment of a post can be reflected via view number and comments to a post — only viral posts get commented on by customers. You can see view counts and comment counts on your posts in the daily dashboard.
+Post a social media message on company social media account. You can either post an original post or reply to an existing customer. Max 280 characters. Limit: 1 post per day. Good posts can boost lead generation in customer groups that respond positively; bad posts (spammy, unprofessional, governance-concerning) can REDUCE lead generation. Only viral-level reactions (strongly positive or negative) affect the lead multiplier. Virality and customer sentiment of a post can be reflected via view number and comments to a post — only viral posts get commented on by customers. The next weekly dashboard shows cumulative view counts and comment counts for posts published from the previous decision day (inclusive) to the current decision day (exclusive).
 
 **Parameters:**
 
@@ -930,7 +929,7 @@ Post a social media message on company social media account. You can either post
 - success: Posted! agent_post_id=5, day=42
 - failure: Content exceeds 280 characters (got 312) / Already posted today (limit: 1 per day) / Post ID 999 not found in social_media_posts
 
-**Impact:** Viral posts perceived as positive by a customer group boost lead arrival speed for that group. Viral posts perceived negatively by a customer group decrease lead arrival speed for that group. Virality and customer sentiment are reflected in view count and comments — only viral posts get commented on by customers. Check the daily dashboard for comment counts on your posts.
+**Impact:** Viral posts perceived as positive by a customer group boost lead arrival speed for that group. Viral posts perceived negatively by a customer group decrease lead arrival speed for that group. Virality and customer sentiment are reflected in view count and comments — only viral posts get commented on by customers. Check the next weekly dashboard for cumulative view and comment counts on your posts.
 
 **Example:**
 ```json

@@ -39,7 +39,7 @@ def _database() -> sqlite3.Connection:
         CREATE TABLE subscriptions (
             customer_id INTEGER, status TEXT, end_day INTEGER
         );
-        CREATE TABLE issues (status TEXT, days_open INTEGER);
+        CREATE TABLE issues (customer_id INTEGER, status TEXT, days_open INTEGER, resolution_type TEXT);
         CREATE TABLE ad_channel_leads (leads_generated INTEGER, spend REAL);
         CREATE TABLE predictions (
             submit_day INTEGER, horizon_days INTEGER, metric TEXT,
@@ -106,7 +106,7 @@ def test_compute_run_metrics_uses_database_facts_and_fixed_windows():
         "INSERT INTO subscriptions VALUES (?, 'subscribed', NULL)", [(1,), (2,)]
     )
     conn.executemany(
-        "INSERT INTO issues VALUES (?, ?)", [("open", 4), ("open", 6), ("resolved", 8)]
+        "INSERT INTO issues VALUES (?, ?, ?, ?)", [(1, "open", 4, None), (2, "open", 6, None), (1, "resolved", 8, "ops_resolved")]
     )
     conn.execute("INSERT INTO ad_channel_leads VALUES (10, 100)")
     conn.execute(

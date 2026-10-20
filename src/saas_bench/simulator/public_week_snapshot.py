@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 from pydantic import TypeAdapter
 
 from .config import BenchmarkConfig, MODEL_TIERS
-from .database import get_cash, get_config, get_discovered_groups
+from .database import PUBLIC_ISSUES_SQL, get_cash, get_config, get_discovered_groups
 from .simulation import DayResult
 
 
@@ -180,7 +180,7 @@ def _get_subscriber_counts(
           AND c.customer_type = 'small'
     """).fetchone()[0]
     enterprise = conn.execute("""
-        SELECT COUNT(*) AS accounts, COALESCE(SUM(s.seat_count), 0) AS seats
+        SELECT COUNT(*) AS accounts, COALESCE(SUM(CAST(c.seat_count AS INTEGER)), 0) AS seats
         FROM subscriptions s
         JOIN customers c ON s.customer_id = c.customer_id
         WHERE s.status = 'subscribed' AND s.end_day IS NULL
@@ -279,16 +279,17 @@ def _build_delivered_quality(
 
 
 def _build_social_posts(conn: sqlite3.Connection, day: int) -> list[SocialPostSummary]:
-    if day <= 7:
+    if day <= 0:
         return []
 
+    # Agent 在周首决策日发帖；包含周首、排除当前日，反馈才会进入下一周观察。
     rows = conn.execute("""
         SELECT asp.agent_post_id, asp.content, asp.views, asp.comment_post_ids,
                COUNT(smp.post_id) AS comment_count
         FROM agent_social_media_posts asp
         LEFT JOIN social_media_posts smp
           ON smp.reply_to_agent_post_id = asp.agent_post_id
-        WHERE asp.day > ? AND asp.day <= ?
+        WHERE asp.day >= ? AND asp.day < ?
         GROUP BY asp.agent_post_id
     """, (day - 7, day)).fetchall()
 
@@ -324,12 +325,9 @@ def build_public_week_snapshot(
     individual_subscribers, enterprise_accounts, enterprise_seats = _get_subscriber_counts(
         conn, day_result
     )
-    open_issues = conn.execute("""
-        SELECT COUNT(*) FROM customer_state cs
-        JOIN subscriptions s ON cs.customer_id = s.customer_id
-        WHERE s.status = 'subscribed' AND s.end_day IS NULL
-          AND cs.open_issue_days > 0
-    """).fetchone()[0]
+    open_issues = conn.execute(
+        f"SELECT COUNT(DISTINCT customer_id) FROM ({PUBLIC_ISSUES_SQL}) WHERE status = 'open'"
+    ).fetchone()[0]
 
     # 这里仅暴露原 Dashboard 已公开的汇总，不把隐藏客户状态交给 Analysis。
     return PublicWeekSnapshot(

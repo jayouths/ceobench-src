@@ -192,7 +192,6 @@ def test_subscription_day_records_immutable_daily_stock(make_initialized_sim):
         "UPDATE customers SET seat_count = 12.8 WHERE customer_id = ?",
         (enterprise,),
     )
-    simulator._sync_active_subscription_seat_counts()
     conn.execute(
         """
         UPDATE subscriptions SET plan = 'B', listed_price = 90.0,
@@ -252,7 +251,7 @@ def test_subscription_day_records_immutable_daily_stock(make_initialized_sim):
     assert conn.execute(
         "SELECT seat_count FROM subscriptions WHERE subscription_id = ?",
         (enterprise_sub,),
-    ).fetchone()[0] == 12
+    ).fetchone()[0] == 10
 
 
 def test_step_day_records_subscription_day(make_initialized_sim):
@@ -288,10 +287,7 @@ def test_step_day_records_subscription_day(make_initialized_sim):
     assert segment["market_capacity_multiplier"] is not None
     assert segment["actual_leads"] is not None
     assert segment["total_leads_expected"] == pytest.approx(
-        (
-            config.reputation_lead_multiplier_min
-            + config.reputation_lead_multiplier_range * segment["reputation"]
-        )
+        segment["reputation"]
         * segment["market_capacity_multiplier"]
         * segment["calendar_cycle_multiplier"]
         * segment["macroeconomic_multiplier"]

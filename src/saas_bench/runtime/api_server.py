@@ -36,7 +36,7 @@ _ORACLE_MODE: bool = os.environ.get("ORACLE_MODE") == "1"
 
 from ..simulator.tools import AgentTools, ToolResult
 from .request_journal import RequestJournal
-from ..simulator.database import TABLE_DOCS
+from ..simulator.database import PUBLIC_ISSUES_SQL, TABLE_DOCS
 from ..simulator.public_week_snapshot import (
     PublicWeekSnapshot,
     build_public_week_snapshot,
@@ -63,7 +63,7 @@ def _quote_identifier(name: str) -> str:
 
 @contextmanager
 def _public_query_views(conn, *, oracle_mode: bool):
-    """让 SELECT * 只展开公开字段；源表直读仍由授权器检查。"""
+    """投影公开字段及工单行；原始工单不允许普通查询直读。"""
     created = []
     try:
         if not oracle_mode:
@@ -78,15 +78,24 @@ def _public_query_views(conn, *, oracle_mode: bool):
                 if not columns:
                     continue
                 projection = ', '.join(_quote_identifier(col) for col in columns)
+                if table == 'issues':
+                    # 仅视图名授权可被同名 CTE 冒充。临时投影按值隔离，
+                    # 授权器可以无条件拒绝 main.issues，历史和主库均不改写。
+                    conn.execute(
+                        f"CREATE TEMP TABLE issues AS SELECT {projection} "
+                        f"FROM ({PUBLIC_ISSUES_SQL})"
+                    )
+                    created.append(('TABLE', table))
+                    continue
                 conn.execute(
                     f"CREATE TEMP VIEW {_quote_identifier(table)} AS "
                     f"SELECT {projection} FROM main.{_quote_identifier(table)}"
                 )
-                created.append(table)
+                created.append(('VIEW', table))
         yield
     finally:
-        for table in reversed(created):
-            conn.execute(f"DROP VIEW temp.{_quote_identifier(table)}")
+        for kind, table in reversed(created):
+            conn.execute(f"DROP {kind} temp.{_quote_identifier(table)}")
 
 # 查询接口不能改变共享连接的事务或附加数据库状态；这些动作不是数据查询。
 _QUERY_CONNECTION_ACTIONS = {
@@ -169,6 +178,13 @@ class _QueryAuthorizer:
 
         if action_code == sqlite3.SQLITE_READ:
             table = (table_name or '').lower()
+            # SQLite 对未限定的临时表 COUNT(*) 不填库名；此时 issues
+            # 必然解析到本次投影。显式 main.issues 始终携带 main，仍拒绝。
+            if table == 'issues' and database_name is None and not column_name:
+                return sqlite3.SQLITE_OK
+            if table == 'issues' and database_name != 'temp':
+                self.denied_table = table
+                return sqlite3.SQLITE_DENY
             if database_name not in ('main', 'temp') or table not in _PUBLIC_COLUMNS:
                 self.denied_table = table
                 return sqlite3.SQLITE_DENY

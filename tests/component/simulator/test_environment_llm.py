@@ -530,3 +530,5 @@ def test_macro_publication_prompt_keeps_released_pmi_value(
     assert "Just-released data" in work[0]["prompt"]
     assert "ISM PMI: 47.2" in work[0]["prompt"]
     assert "down 1.3" in work[0]["prompt"]
+    assert "first release is the Day 1 startup snapshot" in work[0]["prompt"]
+    assert "from last month" not in work[0]["prompt"]

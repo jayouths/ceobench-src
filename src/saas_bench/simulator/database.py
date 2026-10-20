@@ -12,6 +12,21 @@ if TYPE_CHECKING:
     from .config import BenchmarkConfig
 
 
+# 普通 Agent 只看可处理的开放工单及真实解决历史；失效记录仍保留在主库。
+PUBLIC_ISSUES_SQL = """
+    SELECT i.* FROM main.issues AS i
+    WHERE COALESCE(i.resolution_type, '') <> 'customer_churned'
+      AND (
+          i.status = 'resolved'
+          OR EXISTS (
+              SELECT 1 FROM main.subscriptions AS s
+              WHERE s.customer_id = i.customer_id
+                AND s.status = 'subscribed' AND s.end_day IS NULL
+          )
+      )
+"""
+
+
 # =====================================================================
 # TABLE_DOCS: Canonical documentation for all database tables.
 # Used to render the Agent-visible static table documentation.
@@ -44,7 +59,7 @@ TABLE_DOCS = {
             'group_id': "TEXT — Customer segment group identifier (e.g., 'S1', 'S2', 'E1')",
         },
         'internal_columns': {
-            'seat_count': 'REAL — Internal float accumulator for seat drift; the effective integer value is mirrored to subscriptions',
+            'seat_count': 'REAL — Internal float accumulator for seat drift; floored when simulation rules read it',
             'steepness_left': 'REAL — Sigmoid curve steepness for left half (price < c_max/2)',
             'steepness_right': 'REAL — Sigmoid curve steepness for right half (price >= c_max/2)',
             'c_max': 'REAL — Hard budget constraint (price at which Q_required reaches q_max)',
@@ -84,7 +99,7 @@ TABLE_DOCS = {
             'end_day': 'INTEGER — Day subscription ended (NULL if active)',
             'status': "TEXT — 'lead', 'subscribed', 'cancelled', 'lost'",
             'billing_day_mod30': 'INTEGER — Billing cycle day (0-29)',
-            'seat_count': 'INTEGER — Current effective seats for this subscription',
+            'seat_count': 'INTEGER — Public seat snapshot, updated at subscription, negotiated contract and billing events; may lag the internal customer seat drift',
             'pending_plan': "TEXT — Scheduled plan change (NULL if none)",
             'pending_price': 'REAL — Negotiated price for pending plan change',
             'contract_months': 'INTEGER — Commitment length in months (1=month-to-month)',
@@ -93,6 +108,7 @@ TABLE_DOCS = {
         'internal_columns': {
             'daily_usage_rate': 'REAL — Sampled usage rate for billing period (internal)',
             'billing_period_usage': 'REAL — Cumulative usage this billing period (internal)',
+            'effective_c_max': 'REAL — Billing-period individual budget snapshot, excluding current market drift (hidden)',
             'churn_reason': 'TEXT — Structured churn reason enum (hidden from agent)',
             'first_billing_done': 'INTEGER — Whether first billing period completed (internal)',
         }
@@ -244,12 +260,12 @@ TABLE_DOCS = {
         }
     },
     'macroeconomic_conditions': {
-        'description': 'Macroeconomic conditions (ISM PMI business cycle index). PMI > 50 = expansion, PMI < 50 = contraction. Published monthly with ~30 day delay (like real ISM reports). Each reading is the AVERAGE PMI over the prior measurement period, not a single-day snapshot. NOTE: Data is delayed — the most recent reading reflects conditions from ~30 days ago.',
+        'description': 'Macroeconomic conditions (ISM PMI business cycle index). PMI > 50 = expansion, PMI < 50 = contraction. The first reading is the Day 1 startup snapshot, not a full-period average. Later readings average each full measurement period (default: Days 2-31, 32-61, etc.). All readings use the configured publication delay (default: 30 days), so the first appears on Day 31, then Day 61, 91, etc. Published data reflects past conditions, not real-time PMI.',
         'columns': {
-            'day': 'INTEGER PRIMARY KEY — Simulation day when PMI was MEASURED (not published). The reading appears in this table ~30 days after this day.',
-            'pmi_value': 'REAL — Average ISM PMI over the measurement period (30-70 scale). >50 = expansion, <50 = contraction. This is a period average, not a point-in-time value.',
+            'day': 'INTEGER PRIMARY KEY — Measurement-period end day (not publication day). Day 1 denotes the startup snapshot; later rows end full measurement periods. The row appears after the configured publication delay (default: 30 days).',
+            'pmi_value': 'REAL — ISM PMI (30-70 scale): Day 1 startup snapshot for the first reading, full measurement-period average thereafter. >50 = expansion, <50 = contraction.',
             'pmi_trend': "TEXT — 'strong_expansion' (>58), 'expansion' (52-58), 'neutral' (48-52), 'contraction' (42-48), 'severe_contraction' (<42)",
-            'pmi_change': 'REAL — Change in average PMI from previous reading (positive = improving)',
+            'pmi_change': 'REAL — Change from the previous reading (positive = improving); the startup reading is compared with the configured initial PMI.',
             'cycle_phase': "TEXT — 'peak', 'declining', 'trough', 'recovering' — current position in business cycle",
             'description': 'TEXT — Human-readable economic summary for the measurement period',
         }
@@ -289,7 +305,7 @@ TABLE_DOCS = {
         }
     },
     'issues': {
-        'description': 'Individual customer support issues with full lifecycle tracking',
+        'description': 'Customer support issues: actionable open issues and actual resolution history. Orphan open issues without an active subscription and issues closed because the customer churned are excluded from all ordinary Agent reads. Actual operations-resolved history remains visible, even after customer churn.',
         'columns': {
             'issue_id': 'INTEGER PRIMARY KEY — Unique issue ID (auto-incrementing)',
             'customer_id': 'INTEGER — Foreign key to customers',
@@ -299,8 +315,8 @@ TABLE_DOCS = {
             'status': "TEXT — 'open' or 'resolved'",
             'resolved_day': 'INTEGER — Simulation day when resolved (NULL if still open)',
             'resolution_type': (
-                "TEXT — How closed: 'ops_resolved' (via operations spend) or "
-                "'customer_churned' (customer no longer has an active subscription)"
+                "TEXT — 'ops_resolved' for actual operations resolution, NULL while open. "
+                "Lifecycle closures due to customer churn are archived privately, not returned by public queries."
             ),
         }
     },
@@ -433,7 +449,8 @@ def init_database(db_path: Path) -> sqlite3.Connection:
             -- Usage tracking per billing period
             daily_usage_rate REAL NOT NULL DEFAULT 0,  -- Sampled at billing period start, constant for the month
             billing_period_usage REAL NOT NULL DEFAULT 0,  -- Cumulative usage this billing period
-            seat_count INTEGER NOT NULL DEFAULT 1,  -- Current effective seats, synchronized from the customer's float drift accumulator
+            seat_count INTEGER NOT NULL DEFAULT 1,  -- Public subscription/billing-event snapshot, not the live drift accumulator
+            effective_c_max REAL,  -- HIDDEN: individual budget snapshot, market drift applied at read time
             -- V2.1: Contract-based enterprise subscriptions
             contract_months INTEGER NOT NULL DEFAULT 1,  -- Commitment length in months (1=month-to-month)
             contract_end_day INTEGER,  -- Day when contract expires (NULL for month-to-month/small customers)
@@ -814,10 +831,10 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         -- =====================================================================
         -- Tracks the simulated ISM Purchasing Managers' Index (PMI) over time.
         -- PMI > 50 = expansion, PMI < 50 = contraction, PMI = 50 = neutral.
-        -- Each reading is the AVERAGE PMI over a ~30-day measurement period.
+        -- First reading: Day 1 startup snapshot; later readings: full-period averages.
         -- Published with a ~30-day delay (macro_pmi_publication_delay_days), matching
         -- real ISM reports (January activity published first business day of February).
-        -- The agent only sees delayed, period-averaged data — not real-time conditions.
+        -- The agent only sees published, delayed readings — not real-time conditions.
         CREATE TABLE IF NOT EXISTS macroeconomic_conditions (
             day INTEGER PRIMARY KEY,
             pmi_value REAL NOT NULL,                   -- ISM PMI (30-70 scale)
@@ -1069,7 +1086,7 @@ def init_database(db_path: Path) -> sqlite3.Connection:
                 NEW.subscription_id,
                 c.customer_type,
                 'cancelled',
-                CASE WHEN c.customer_type = 'large' THEN OLD.seat_count ELSE 1 END
+                CASE WHEN c.customer_type = 'large' THEN CAST(c.seat_count AS INTEGER) ELSE 1 END
             FROM customers AS c
             WHERE c.customer_id = NEW.customer_id;
         END;
@@ -1092,7 +1109,7 @@ def init_database(db_path: Path) -> sqlite3.Connection:
                     THEN 'upgraded'
                     ELSE 'downgraded'
                 END,
-                CASE WHEN c.customer_type = 'large' THEN NEW.seat_count ELSE 1 END
+                CASE WHEN c.customer_type = 'large' THEN CAST(c.seat_count AS INTEGER) ELSE 1 END
             FROM customers AS c
             WHERE c.customer_id = NEW.customer_id;
         END;
@@ -1144,6 +1161,7 @@ def init_database(db_path: Path) -> sqlite3.Connection:
     for col, col_type in [
         ('promotion', 'REAL NOT NULL DEFAULT 0.0'),
         ('effective_price', 'REAL NOT NULL DEFAULT 0.0'),
+        ('effective_c_max', 'REAL'),
         ('first_billing_done', 'INTEGER NOT NULL DEFAULT 0'),
     ]:
         try:
@@ -1215,12 +1233,13 @@ def get_mrr(conn: sqlite3.Connection) -> float:
     Uses effective_price (listed_price - promotion) for accurate revenue.
     For individual customers (small): effective_price is the total price.
     For enterprise customers (large): effective_price is per-seat, so multiply by
-    the effective integer seat count stored on the subscription.
+    the floored current internal customer seat count (the public subscription
+    snapshot can lag until the next billing or contract event).
     """
     result = conn.execute("""
         SELECT COALESCE(SUM(
             CASE WHEN c.customer_type = 'large'
-                 THEN s.effective_price * s.seat_count
+                 THEN s.effective_price * CAST(c.seat_count AS INTEGER)
                  ELSE s.effective_price
             END
         ), 0)

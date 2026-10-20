@@ -5,7 +5,7 @@ import math
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Dict, Optional, Tuple
 
 import numpy as np
@@ -253,7 +253,8 @@ class Simulator:
             # Use fixed phase from config (consume the RNG draw to keep stream consistent)
             _ = float(self._macro_rng.uniform(0, 2 * math.pi))
             self._macro_cycle_phase_offset = getattr(config, 'macro_pmi_fixed_phase', 0.0)
-        self._macro_last_update_day = -config.macro_pmi_update_interval_days  # Force update on day 1
+        # 沿用作者的首日触发：首份是 Day 1 启动读数，随后才统计完整周期均值。
+        self._macro_last_update_day = -config.macro_pmi_update_interval_days
         self._macro_last_social_post_day = 0  # Track last macro social post batch
         self._macro_next_social_post_day = int(self._macro_rng.integers(
             config.macro_social_post_interval_min,
@@ -450,15 +451,9 @@ class Simulator:
 
         For existing users at billing day, applies promotion to evaluate plans.
         """
-        # V3: Macroeconomic effect on willingness to pay
-        # In contraction, customers' effective budget shrinks (more likely to churn)
         group_id = sub_row['group_id'] if sub_row['group_id'] else None
         customer_id = sub_row['customer_id']
-        if group_id:
-            wtp_mult = self.get_macro_multiplier(group_id, 'willingness_to_pay')
-            effective_c_max = c_max * wtp_mult
-        else:
-            effective_c_max = c_max
+        effective_c_max = self._apply_macro_budget(group_id, c_max)
 
         best_plan = None
         best_satisfaction = float('-inf')
@@ -624,7 +619,11 @@ class Simulator:
             if 'seat_count_drift' in indiv_rates:
                 base_rate = compound(indiv_rates['seat_count_drift'])
                 macro_seat_mult = self.get_macro_multiplier(group_id, 'seat_count')
-                effective_rate = base_rate * macro_seat_mult
+                # 增长乘倍率，收缩除倍率，避免衰退时反而减少裁员；中性条件不变。
+                effective_rate = (
+                    base_rate / macro_seat_mult if base_rate < 0
+                    else base_rate * macro_seat_mult
+                )
                 self.conn.execute("""
                     UPDATE customers SET seat_count = MAX(1.0, seat_count * (1.0 + ?))
                     WHERE seat_count IS NOT NULL AND customer_id IN (
@@ -632,32 +631,8 @@ class Simulator:
                     )
                 """, (effective_rate, group_id))
 
-        # customers 保留浮点数以累积缓慢漂移；对经营生效的整数席位
-        # 必须在同一次漂移中立即同步，避免 Dashboard、Agent 和评价口径分叉。
-        self._sync_active_subscription_seat_counts()
-
         # L6: Cleanup temp table
         self.conn.execute("DROP TABLE IF EXISTS _tmp_active_subs")
-
-    def _sync_active_subscription_seat_counts(self) -> None:
-        """将企业客户的浮点漂移结果转为当前生效的整数订阅席位。"""
-        self.conn.execute("""
-            UPDATE subscriptions AS s
-            SET seat_count = (
-                SELECT CAST(c.seat_count AS INTEGER)
-                FROM customers AS c
-                WHERE c.customer_id = s.customer_id
-            )
-            WHERE s.status = 'subscribed'
-              AND s.end_day IS NULL
-              AND EXISTS (
-                  SELECT 1
-                  FROM customers AS c
-                  WHERE c.customer_id = s.customer_id
-                    AND c.customer_type = 'large'
-                    AND c.seat_count IS NOT NULL
-              )
-        """)
 
     def _apply_monthly_leads_noise(self):
         """v3.4aj: perturb every (channel, group) leads_per_1000_dollars entry with N(0, 0.05*v).
@@ -1527,6 +1502,7 @@ class Simulator:
             )
 
         # Initialize customer state with sigmoid curve parameters and relationship
+        # 0.5 是沿用上游的 EMA 初值，不代表中性点 0 或首次实际体验。
         self.conn.execute("""
             INSERT INTO customer_state (customer_id, satisfaction, open_issue_days, relationship,
                                         current_steepness_left, current_steepness_right, current_c_max,
@@ -1596,11 +1572,12 @@ class Simulator:
 
         # Get the fields needed to initialize subscription usage and pricing.
         customer = self.conn.execute("""
-            SELECT usage_scale, seat_count, group_id FROM customers WHERE customer_id = ?
+            SELECT usage_scale, seat_count, group_id, c_max FROM customers WHERE customer_id = ?
         """, (customer_id,)).fetchone()
         usage_scale = customer['usage_scale'] if customer else 50.0
         seat_count = int(customer['seat_count'] or 1)
         group_id = customer['group_id'] if customer else 'S1'
+        initial_c_max = customer['c_max'] if customer else 100.0
         # Sample daily usage rate for this billing period
         daily_usage_rate = sample_daily_usage_rate(self.rng, usage_scale, seat_count)
 
@@ -1615,13 +1592,13 @@ class Simulator:
         self.conn.execute("""
             INSERT INTO subscriptions (
                 customer_id, plan, listed_price, promotion, effective_price,
-                seat_count,
+                effective_c_max, seat_count,
                 start_day, status, billing_day_mod30,
                 daily_usage_rate, billing_period_usage, first_billing_done
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'subscribed', ?, ?, 0, 0)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'subscribed', ?, ?, 0, 0)
         """, (
             customer_id, plan, price, first_period_promo, eff_price,
-            seat_count,
+            initial_c_max, seat_count,
             self.current_day,
             self.current_day % 30, daily_usage_rate,
         ))
@@ -1840,7 +1817,7 @@ class Simulator:
                    s.promotion, s.first_billing_done, s.start_day,
                    s.daily_usage_rate,
                    c.steepness_left, c.steepness_right, c.c_max, c.group_id,
-                   c.usage_demand, s.seat_count, c.ads_quality_sensitivity,
+                   c.usage_demand, c.seat_count, c.ads_quality_sensitivity,
                    cs.current_steepness_left, cs.current_steepness_right, cs.current_c_max,
                    cs.open_issue_days,
                    COALESCE(cs.current_q_max, c.q_max) as q_max,
@@ -1954,15 +1931,16 @@ class Simulator:
                     direction = 'downgrade'
 
                 # Update subscription — recompute promotion + effective_price for new plan.
-                # 客户支付能力不做账单快照，后续决策继续读取当前市场漂移。
+                # 只快照个体预算；市场漂移在满意度读取时加一次。
                 group_id = sub['group_id']
                 new_promo = self._get_effective_promotion(customer_id, group_id, best_plan)
                 new_eff_price = max(0.0, new_price - new_promo)
                 self.conn.execute("""
                     UPDATE subscriptions SET plan = ?, listed_price = ?,
-                           promotion = ?, effective_price = ?
+                           promotion = ?, effective_price = ?, effective_c_max = ?
                     WHERE subscription_id = ?
-                """, (best_plan, new_price, new_promo, new_eff_price, sub['subscription_id']))
+                """, (best_plan, new_price, new_promo, new_eff_price,
+                      sub['current_c_max'] or sub['c_max'], sub['subscription_id']))
 
                 # Log plan change
                 if self.event_logger:
@@ -1984,16 +1962,18 @@ class Simulator:
         """Generate new customers using a simple, interpretable growth model per group.
 
         Growth formula:
-            daily_leads[group] = reputation_multiplier[group] × (
+            base_leads[group] = (
                 Σ(spend[channel] × leads_per_1k$[channel][group] / 1000)
-              + existing_customers[group] × network_leads_per_1k_customers[group] / 1000
+              + Σ(existing_customers[source] × network_rate[source][group])
             )
-            n_new = Poisson(daily_leads)
+            daily_leads[group] = reputation[group] × base_leads[group] × other_multipliers
+            n_new = Poisson(daily_leads[group])
 
         Every parameter is directly interpretable:
-        - leads_per_1000_dollars: "spend $1000/day on social_media → ~90 S1 leads/day"
-        - NETWORK_INFLUENCE_MATRIX[S1][S1] = 0.087: "1000 existing S1 customers → ~87 new S1 leads/day"
-        - reputation: multiplier 0.6-1.4 (bad reputation cuts leads by 40%)
+        - Channel and network rates contribute base leads before acquisition multipliers.
+        - reputation: the target group's 0-1 reputation is the multiplier itself;
+          neutral reputation 0.5 scales base leads by 0.5.
+        - other_multipliers: market availability, calendar, macro, social posts and surges.
 
         Customers subscribe directly if any plan is acceptable on their sigmoid participation curve.
         Enterprise customers become leads requiring negotiation.
@@ -2071,11 +2051,8 @@ class Simulator:
 
         for group_id, group in active_groups.items():
             rep = group_reps.get(group_id, 0.5)
-            # 声誉是 0–1 状态，不是获客倍率；中性声誉应对应配置中的基准获客量。
-            reputation_factor = (
-                self.config.reputation_lead_multiplier_min
-                + self.config.reputation_lead_multiplier_range * rep
-            )
+            # 沿用作者公式：目标客群声誉本身就是倍率，中性 0.5 也只乘 0.5。
+            reputation_factor = rep
 
             # Channel leads (sum across all channels)
             group_channel_leads = channel_leads.get(group_id, {})
@@ -2212,6 +2189,8 @@ class Simulator:
                 q_min, q_max, c_max = self._apply_drift_offsets(
                     group_id, q_min, q_max, c_max
                 )
+                if _is_enterprise:
+                    c_max = self._apply_macro_budget(group_id, c_max)
 
                 lead_promo = self._get_lead_promotion(group_id, channel=lead_channel)
                 effective_price = max(0.0, price - lead_promo)
@@ -2341,6 +2320,7 @@ class Simulator:
             customer_ids = list(range(first_id, last_id + 1))
 
             # --- Batch INSERT into customer_state ---
+            # 与单条创建保持一致，沿用 0.5 作为 EMA 初值，不在此估算首次体验。
             cs_rows = []
             for i, (params, outcome, best_plan, price) in enumerate(all_leads):
                 cid = customer_ids[i]
@@ -2446,7 +2426,7 @@ class Simulator:
 
                     sub_rows.append((
                         cid, best_plan, price, first_period_promo, eff_price,
-                        seat_count,
+                        params.get('c_max', 100.0), seat_count,
                         _day, _day % 30, daily_usage_rate
                     ))
                     new_individual_leads += 1
@@ -2458,10 +2438,10 @@ class Simulator:
                 self.conn.executemany("""
                     INSERT INTO subscriptions (
                         customer_id, plan, listed_price, promotion, effective_price,
-                        seat_count,
+                        effective_c_max, seat_count,
                         start_day, status, billing_day_mod30,
                         daily_usage_rate, billing_period_usage, first_billing_done
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'subscribed', ?, ?, 0, 0)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'subscribed', ?, ?, 0, 0)
                 """, sub_rows)
 
             # --- Batch INSERT lost lead records ---
@@ -2534,6 +2514,8 @@ class Simulator:
         q_min, q_max, c_max = self._apply_drift_offsets(
             group_id, q_min, q_max, c_max
         )
+        if CUSTOMER_GROUPS[group_id].is_enterprise:
+            c_max = self._apply_macro_budget(group_id, c_max)
 
         best_plan = 'A'
         best_satisfaction = float('-inf')
@@ -2689,11 +2671,14 @@ class Simulator:
             self.config.base_outage_prob * ops_reduction
         )
         p_outage = base_prob_with_ops * (1 + self.config.outage_overload_factor * overload)
-        outage = self.rng.random() < p_outage
+        # 按日期与事件独立抽样：客户循环不能串扰服务噪声，故障分支也不能串扰延迟。
+        outage = event_rng(self.config.seed, "service_outage", self.current_day).random() < p_outage
 
         # Downtime (convert to Python int to avoid numpy.int64 blob storage issues)
         if outage:
-            downtime = int(self.rng.choice([10, 30, 90], p=[0.5, 0.35, 0.15]))
+            downtime = int(event_rng(
+                self.config.seed, "service_downtime", self.current_day,
+            ).choice([10, 30, 90], p=[0.5, 0.35, 0.15]))
         else:
             downtime = 0
 
@@ -2701,13 +2686,17 @@ class Simulator:
         p95_ms = (
             self.config.p95_base_ms
             + self.config.p95_overload_factor * overload
-            + self.rng.normal(0, self.config.p95_noise_std)
+            + event_rng(self.config.seed, "service_latency_noise", self.current_day).normal(
+                0, self.config.p95_noise_std,
+            )
         )
 
         error_rate = clamp(
             self.config.error_rate_base
             + self.config.error_rate_overload_factor * overload
-            + self.rng.normal(0, self.config.error_rate_noise_std),
+            + event_rng(self.config.seed, "service_error_rate_noise", self.current_day).normal(
+                0, self.config.error_rate_noise_std,
+            ),
             0.0, 1.0
         )
 
@@ -2804,13 +2793,13 @@ class Simulator:
         # L5: Single unified fetch for ALL active subscribers with all needed columns.
         # This result is also returned for reuse by _process_issues (L5 shared fetch).
         subscribers = self.conn.execute("""
-            SELECT s.customer_id, s.plan, s.listed_price, s.effective_price,
+            SELECT s.customer_id, s.plan, s.listed_price, s.effective_price, s.effective_c_max,
                    s.start_day, s.daily_usage_rate,
                    cs.satisfaction, cs.open_issue_days,
                    cs.current_steepness_left, cs.current_steepness_right, cs.current_c_max,
                    c.steepness_left, c.steepness_right, c.c_max,
                    cs.relationship, c.group_id,
-                   c.usage_demand, s.seat_count,
+                   c.usage_demand, c.seat_count,
                    c.customer_type, s.contract_months, s.contract_end_day,
                    c.ads_quality_sensitivity, c.ads_return_sensitivity,
                    COALESCE(cs.current_q_max, c.q_max) as q_max,
@@ -2978,8 +2967,8 @@ class Simulator:
             csr = sub['current_steepness_right']
             steep_r_np[i] = csr if csr else sub['steepness_right']
 
-            cc = sub['current_c_max']
-            c_max_np[i] = cc if cc else sub['c_max']
+            # 账期内保留个体预算快照，市场偏移仍在下方统一应用一次。
+            c_max_np[i] = sub['effective_c_max'] or sub['current_c_max'] or sub['c_max']
 
             qmx = sub['q_max']
             q_max_np[i] = qmx if qmx is not None else 0.75
@@ -3242,7 +3231,7 @@ class Simulator:
             # Fallback if cache not populated (shouldn't happen in normal step_day flow)
             all_subscribers = self.conn.execute("""
                 SELECT cs.customer_id, cs.satisfaction, cs.open_issue_days, cs.relationship,
-                       c.group_id, s.seat_count, s.plan
+                       c.group_id, c.seat_count, s.plan
                 FROM customer_state cs
                 JOIN subscriptions s ON cs.customer_id = s.customer_id
                 JOIN customers c ON cs.customer_id = c.customer_id
@@ -3437,13 +3426,15 @@ class Simulator:
         # Issue probability scales linearly with seat_count — more seats = more users = more tickets
         new_issue_cs_updates = []  # (customer_id,)
         new_issue_inserts = []     # (customer_id, group_id, open_day, resolution_type)
+        # 参考满意度为 1，不是中性点 0；基础概率项不能解释为中性客户的最终概率。
+        reference_satisfaction = 1.0
         for sub in all_subscribers:
             if sub['open_issue_days'] == 0:
-                q = sub['satisfaction']  # Approximation
+                satisfaction = sub['satisfaction']
                 seat_count = int(sub['seat_count'] or 1)
                 p_issue = clamp(
                     (self.config.base_issue_rate
-                     + self.config.issue_quality_factor * (1 - q)
+                     + self.config.issue_quality_factor * (reference_satisfaction - satisfaction)
                      + self.config.issue_outage_factor * (1.0 if outage else 0.0)
                     ) * seat_count,
                     0.0, 0.4
@@ -3484,7 +3475,7 @@ class Simulator:
         # L3: Fetch all columns needed for inline quality computation (no per-customer DB queries)
         subscribers = self.conn.execute("""
             SELECT s.customer_id, s.plan, s.listed_price, s.effective_price, s.start_day, s.daily_usage_rate,
-                   c.group_id, c.usage_demand, s.seat_count, c.ads_quality_sensitivity,
+                   c.group_id, c.usage_demand, c.seat_count, c.ads_quality_sensitivity,
                    c.steepness_left, c.steepness_right, c.c_max,
                    cs.current_steepness_left, cs.current_steepness_right, cs.current_c_max,
                    cs.open_issue_days,
@@ -3820,10 +3811,9 @@ class Simulator:
 
         Two systems:
         1. REPUTATION: Every customer contributes daily reputation change based on satisfaction.
-           Upweighted for: influencer group, new customer, negative sat, extreme sat, large sat change,
-           quality events, enterprise (user × seats).
-        2. SOCIAL POSTS: Sample up to MAX_POSTS_PER_DAY customers (weighted by same factors + churn)
-           for LLM-generated social media posts via parallel Bedrock Haiku 4.5.
+           Negative satisfaction has twice the slope of positive satisfaction.
+        2. SOCIAL POSTS: Sample up to MAX_POSTS_PER_DAY customers, weighted by satisfaction,
+           influencer status, tenure, recent changes, service events, contract lock-in and seats.
            Churned customers always get negative sentiment.
 
         Args:
@@ -3844,9 +3834,7 @@ class Simulator:
             influence_cache[gid] = sum(v for k, v in row.items() if k != gid)
 
         # ========================================================================
-        # Compute ONE unified weight per customer, used for BOTH:
-        #   - System 1: reputation impact (rep_delta × weight)
-        #   - System 2: social post sampling probability (weight → P(sampled))
+        # 每日声誉只按满意度计算；后面的权重仅用于发帖抽样，不能重复乘入声誉。
         # ========================================================================
         BASE_REP_PER_CUSTOMER = 0.0005
 
@@ -3864,7 +3852,7 @@ class Simulator:
 
         # L11: Hoist hot-loop attribute lookups to locals (avoid 1.4M lookups/day each).
         _influencer_groups = self.INFLUENCER_GROUPS
-        _contract_diss_mult = self.config.contract_dissatisfaction_reputation_multiplier
+        _contract_sampling_weight_mult = self.config.contract_dissatisfaction_sampling_weight_multiplier
 
         # L11: On suppressed days, skip the per-customer Python loop entirely
         # by computing rep_deltas via numpy bincount over the precomputed arrays
@@ -3918,11 +3906,11 @@ class Simulator:
             satisfaction_change = events['satisfaction_change']
             seat_count = int(events.get('seat_count', 1) or 1)
 
-            # --- Unified weight (same for rep impact and sampling) ---
+            # --- Social-post sampling weight, independent of reputation delta ---
             weight = 1.0
             abs_sat = abs(satisfaction)
             # Satisfaction extremity: asymmetric — negative satisfaction weighs more
-            # sat=+0.3 → 4.0x, sat=-0.3 → 4.0 + 1.8 = 5.8x (quadratic bonus for negative)
+            # sat=+0.3 → 4.0x, sat=-0.3 → 4.0 × (1 + 1.8) = 11.2x
             weight *= (1.0 + abs_sat * 10.0)
             if satisfaction < 0:
                 weight *= (1.0 + 20.0 * satisfaction * satisfaction)  # quadratic amplification for negative
@@ -3941,7 +3929,7 @@ class Simulator:
             # Contract dissatisfaction: locked-in unhappy enterprise customers are louder
             is_contract_locked = events.get('is_contract_locked', False)
             if is_contract_locked:
-                weight *= _contract_diss_mult
+                weight *= _contract_sampling_weight_mult
             # Enterprise = user × seats
             weight *= seat_count
             # Defensive: clamp weight to finite value. If satisfaction was -inf (from
@@ -3949,7 +3937,7 @@ class Simulator:
             if not _isfinite(weight):
                 weight = 1e6  # Very high but finite — still gets sampled with high probability
 
-            # --- System 2: build candidate for sampling (same weight) ---
+            # --- System 2: build candidate for sampling ---
             event_context = None
             post_type = 'general_satisfaction'
             # Prefer contract_dissatisfaction as primary event type for locked-in unhappy customers
@@ -4001,7 +3989,7 @@ class Simulator:
                 'event_context': event_context,
             })
 
-        # Churned customers: unified weight for both rep + sampling.
+        # Churned customers: sampling weight only; reputation damage is handled at cancellation.
         # On suppressed days, candidates are unused — skip building them.
         if _suppress:
             churn_events = ()
@@ -4089,8 +4077,8 @@ class Simulator:
                             )
 
         # ========================================================================
-        # System 2: Sample up to 10 candidates for LLM social posts
-        # Uses the SAME weight as System 1 reputation — unified weighting.
+        # System 2: Sample up to MAX_POSTS_PER_DAY candidates for LLM social posts
+        # These weights select public feedback; they do not change daily reputation.
         # When _suppress_customer_posts is set (step_week days 1-6), skip sampling.
         # ========================================================================
         if getattr(self, '_suppress_customer_posts', False):
@@ -4527,7 +4515,7 @@ class Simulator:
         mrr = self.conn.execute("""
             SELECT COALESCE(SUM(
                 CASE WHEN c.customer_type = 'large'
-                     THEN s.effective_price * s.seat_count
+                     THEN s.effective_price * CAST(c.seat_count AS INTEGER)
                      ELSE s.effective_price
                 END
             ), 0)
@@ -5029,7 +5017,11 @@ class Simulator:
 
         return multiplier
 
-    def get_macro_multiplier(self, group_id: str, dimension: str) -> float:
+    def _apply_macro_budget(self, group_id: Optional[str], c_max: float) -> float:
+        # 输入已含偏好漂移；宏观倍率仅用于本次价格判断，不写回或重复累乘。
+        return c_max * self.get_macro_multiplier(group_id, 'willingness_to_pay')
+
+    def get_macro_multiplier(self, group_id: Optional[str], dimension: str) -> float:
         """Get the current macro multiplier for a specific group and dimension.
 
         Args:
@@ -5045,15 +5037,16 @@ class Simulator:
     def _process_macroeconomic_cycle(self, config: dict):
         """Process the macroeconomic cycle for the current day.
 
-        Matches real ISM PMI publication methodology:
+        Publish lagged PMI readings using the author's startup schedule:
         1. Daily: evolve internal PMI via Ornstein-Uhlenbeck process (simulation uses real-time internally)
         2. Accumulate daily PMI values into a measurement-period buffer
-        3. Every ~30 days (macro_pmi_update_interval_days): compute AVERAGE PMI over the period
-           (like real ISM diffusion index which covers the entire prior month's activity)
+        3. Day 1: buffer a single-day startup reading. Then every configured measurement
+           interval, compute the average of the next full period (default: Days 2-31).
         4. Buffer the averaged reading for delayed publication (macro_pmi_publication_delay_days)
         5. Flush any pending publications whose publication day has arrived → write to DB + notify agent
 
-        This ensures the agent only sees lagged, period-averaged PMI — matching real CEO information constraints.
+        The first published value is a startup snapshot, not a full-period average.
+        Later published values are measurement-period averages; all use the configured delay.
         The simulation itself uses the real-time daily PMI for internal multiplier calculations.
 
         Returns:
@@ -5083,7 +5076,7 @@ class Simulator:
         # === Step 2: End of measurement period → compute average and buffer for publication ===
         days_since_last_update = self.current_day - self._macro_last_update_day
         if days_since_last_update >= cfg.macro_pmi_update_interval_days:
-            # Compute average PMI over the measurement period (like real ISM monthly survey)
+            # 启动期只有 Day 1 一个样本；后续缓冲区覆盖完整统计周期。
             avg_pmi = sum(self._macro_pmi_daily_history) / len(self._macro_pmi_daily_history)
             avg_pmi = round(avg_pmi, 1)
 
@@ -5170,10 +5163,11 @@ class Simulator:
         prompt = f"""Write ONE social media post (Twitter/LinkedIn style, 1-3 sentences) reacting to today's ISM PMI data release.
 
 Just-released data:
-- ISM PMI: {pmi:.1f} ({direction} {abs_change:.1f} from last month)
+- ISM PMI: {pmi:.1f} ({direction} {abs_change:.1f})
 - Trend: {trend.replace('_', ' ')}
 
 Context: This data was just published today (like real ISM reports released on the 1st business day of each month). The poster is reacting to the fresh data release.
+The first release is the Day 1 startup snapshot, compared with the initial PMI reference; later releases report measurement-period averages and changes from the previous reading.
 
 Requirements:
 - Reference the release specifically ("ISM just released", "PMI came in at", "new data shows", etc.)
@@ -5311,8 +5305,8 @@ Requirements:
 
         Competitor events occur stochastically (Poisson-like). When they trigger:
         1. A random boost is sampled (lognormal) and applied to ALL users' q_min and q_max
-        2. Social media posts about the competitor product are generated for M days
-        3. A notification is sent to the agent
+        2. During the post window, social posts use the latest active event as context
+        No Inbox notification is sent; agents observe social media and quality metrics.
         """
         # Ablation: short-circuit when competitor system is disabled entirely.
         if getattr(self.config, 'competitor_events_disabled', False):
@@ -5576,11 +5570,11 @@ Requirements:
             )
 
     def _generate_competitor_event_posts(self):
-        """Generate social media posts for active competitor events.
+        """Generate the configured daily posts for the latest active competitor event.
 
         These posts are independent of subscribers — they represent external market
-        buzz about competitor product launches. Uses LLM (Haiku) when available,
-        falls back to templates. Posts are attributed to the market_observer pseudo-customer.
+        buzz about competitor product launches. Uses the configured environment LLM,
+        or templates when none is configured. Posts belong to the market_observer.
 
         Each post receives the competitor event's quality boost with added noise
         (from _competitor_post_noise_rng) so the LLM can calibrate the post's tone
@@ -5592,16 +5586,18 @@ Requirements:
         if not getattr(self, '_market_observer_id', None):
             return
 
-        active_events = self.conn.execute("""
+        # 固定每日总量，只围绕最新活动事件发帖；不按重叠事件数放大公开信息。
+        event = self.conn.execute("""
             SELECT event_id, boost_amount, description FROM competitor_events
-            WHERE post_end_day >= ?
-        """, (self.current_day,)).fetchall()
+            WHERE start_day <= ? AND post_end_day >= ?
+            ORDER BY start_day DESC, event_id DESC
+            LIMIT 1
+        """, (self.current_day, self.current_day)).fetchone()
 
-        if not active_events:
+        if event is None:
             return
 
         posts_per_day = self.config.competitor_event_posts_per_day
-        event = active_events[0]  # Use most recent event for context
         boost = event['boost_amount']
 
         # Add noise to boost for post generation (separate RNG for cross-trajectory consistency)
@@ -5794,6 +5790,46 @@ Guidelines:
     # Enterprise Negotiation Processing
     # =========================================================================
 
+    def _process_monthly_enterprise_renewals(self) -> None:
+        """月度企业订阅在自己的续费日承担自然流失，不要求重新谈判。"""
+        subscribers = self.conn.execute("""
+            SELECT s.subscription_id, s.customer_id, c.group_id
+            FROM subscriptions s JOIN customers c ON c.customer_id = s.customer_id
+            WHERE c.customer_type = 'large' AND s.status = 'subscribed'
+              AND s.end_day IS NULL AND s.contract_months = 1
+              AND s.first_billing_done = 1 AND s.start_day <= ?
+              AND s.billing_day_mod30 = ?
+            ORDER BY s.subscription_id
+        """, (self.current_day - 30, self.current_day % 30)).fetchall()
+
+        for sub in subscribers:
+            probability = self._get_involuntary_churn_mu(sub['group_id'])
+            if probability <= 0.0 or self.rng.random() >= probability:
+                continue
+
+            # 订阅状态变更会同时记录取消事件并关闭遗留工单；自然流失
+            # 不另加声誉损害，也不加入投诉帖子的流失候选列表。
+            self.conn.execute("""
+                UPDATE subscriptions SET status = 'cancelled', end_day = ?, churn_reason = ?
+                WHERE subscription_id = ?
+            """, (self.current_day, ChurnReason.INVOLUNTARY.value, sub['subscription_id']))
+
+            # 沿用内部终态机制，仅终止每条线程的最新消息，不重写历史，
+            # 也不把自然流失伪记成谈判超时或主动拒绝。
+            self.conn.execute("""
+                UPDATE enterprise_turns
+                SET _internal_status = 'customer_churned', next_reply_day = NULL
+                WHERE customer_id = ? AND closed = 0 AND _internal_status IS NULL
+                  AND message_id IN (
+                      SELECT MAX(message_id) FROM enterprise_turns
+                      WHERE customer_id = ? GROUP BY thread_id
+                  )
+            """, (sub['customer_id'], sub['customer_id']))
+            add_notification(
+                self.conn, self.current_day, 'customer_churned',
+                'Enterprise customer subscription ended',
+            )
+
     def _process_enterprise_negotiations(
         self,
         config: dict,
@@ -5816,6 +5852,12 @@ Guidelines:
         import time as _time
         _ent_timings = {}
         enterprise_churn_events = []
+
+        # 先终止续费失败的订阅，再构建活动线程缓存、回复和收费，
+        # 防止已自然流失的客户同日被旧谈判重新成交。
+        _t0 = _time.monotonic()
+        self._process_monthly_enterprise_renewals()
+        _ent_timings['monthly_renewals'] = _time.monotonic() - _t0
 
         # L9: Compute GROUP BY thread_id, MAX(message_id) ONCE into a temp table.
         # All 3 sub-operations (agent_timeouts, scheduled_replies, active_threads)
@@ -5944,16 +5986,15 @@ Guidelines:
 
         # 1) Batch-fetch subscription info for all customers
         sub_rows = chunked_select(self.conn, """
-            SELECT customer_id, plan, listed_price, contract_end_day, start_day,
-                   seat_count
+            SELECT customer_id, plan, listed_price, contract_end_day, start_day
             FROM subscriptions
             WHERE customer_id IN ({ph}) AND status = 'subscribed' AND end_day IS NULL
         """, unique_cids)
         sub_map = {row['customer_id']: row for row in sub_rows}
 
-        # 2) Batch-fetch customer info (group_id, c_max)
+        # 2) Batch-fetch customer info (seat_count, group_id, c_max)
         cust_rows = chunked_select(self.conn, """
-            SELECT c.customer_id, c.group_id, c.c_max,
+            SELECT c.customer_id, c.seat_count, c.group_id, c.c_max,
                    cs.current_c_max, cs.shock_event_id
             FROM customers c
             LEFT JOIN customer_state cs ON c.customer_id = cs.customer_id
@@ -6026,7 +6067,7 @@ Guidelines:
                 cancel_updates.append((end_day, churn_reason_val, customer_id))
                 dead_thread_ids.append(thread_id)
 
-                seat_count = int(sub['seat_count'] or 0) if sub else 0
+                seat_count = int(cust['seat_count'] or 0) if cust else 0
                 group_id = cust['group_id'] if cust else None
 
                 relationship_updates.append((customer_id,))
@@ -6202,7 +6243,8 @@ Guidelines:
 
             # V2.1: Evaluate offerings using structured satisfaction model
             evaluation = evaluate_offerings(
-                state,
+                # 谈判状态保存漂移后的预算；报价与还价共用同一份当日有效预算。
+                replace(state, c_max=self._apply_macro_budget(state.group_id, state.c_max)),
                 offerings,
                 qualities,
                 self.config,
@@ -6416,13 +6458,15 @@ Guidelines:
         # Compute contract_end_day
         contract_end_day = self.current_day + contract_months * 30
 
-        # Get group_id for promotion computation. Customer preferences remain in customer state.
+        # 成交时快照未含市场偏移的个体预算，保留作者账期语义。
         cust_row = self.conn.execute("""
-            SELECT c.group_id
+            SELECT c.group_id, c.c_max, cs.current_c_max
             FROM customers c
+            JOIN customer_state cs ON c.customer_id = cs.customer_id
             WHERE c.customer_id = ?
         """, (customer_id,)).fetchone()
         deal_group_id = cust_row['group_id'] if cust_row else 'E1'
+        deal_c_max = (cust_row['current_c_max'] or cust_row['c_max']) if cust_row else 100.0
         deal_plan = agreed_plan or 'C'  # Enterprise typically on plan C
         deal_promo = self._get_effective_promotion(customer_id, deal_group_id, deal_plan)
         if state.thread_type == 'new_lead':
@@ -6444,6 +6488,7 @@ Guidelines:
                 'listed_price': agreed_price,
                 'promotion': deal_promo,
                 'effective_price': deal_eff_price,
+                'effective_c_max': deal_c_max,
                 'seat_count': seat_count,
                 'start_day': self.current_day,
                 # 企业线索尚未使用服务，首个账单周期必须从实际成交日开始。
@@ -6478,6 +6523,7 @@ Guidelines:
                 'listed_price': agreed_price,
                 'promotion': deal_promo,
                 'effective_price': deal_eff_price,
+                'effective_c_max': deal_c_max,
                 'seat_count': seat_count,
                 'contract_months': contract_months,
                 'contract_end_day': new_contract_end,
@@ -6585,7 +6631,7 @@ Guidelines:
         newly_suspended_customers = set()
         # Get all enterprise customers with subscriptions and asymmetric sigmoid curve params
         enterprises = self.conn.execute("""
-            SELECT c.customer_id, c.group_id, s.seat_count,
+            SELECT c.customer_id, c.group_id, CAST(c.seat_count AS INTEGER) AS seat_count,
                    COALESCE(cs.current_q_max, c.q_max) as q_max,
                    COALESCE(cs.current_q_min, c.q_min) as q_min,
                    c.steepness_left as initial_steepness_left, c.steepness_right as initial_steepness_right,
@@ -6657,13 +6703,14 @@ Guidelines:
             q_max = ent['q_max'] if ent['q_max'] is not None else 0.75
             q_min = ent['q_min'] if ent['q_min'] is not None else 0.25
             q_min, q_max, c_max = self._apply_drift_offsets(ent['group_id'], q_min, q_max, c_max)
+            c_max = self._apply_macro_budget(ent['group_id'], c_max)
 
             # Check participation constraint using asymmetric sigmoid curve
             price = ent['effective_price']
             satisfaction = self._compute_satisfaction(steepness_left, steepness_right, c_max, quality, price, q_max, q_min)
 
-            # Trigger churn prevention only if satisfaction < 0 AND in churn window
-            if satisfaction < 0 and in_churn_window:
+            # 预算是硬上限，高质量不能绕过预算；仍遵守原有合同保护窗口。
+            if (price > c_max or satisfaction < 0) and in_churn_window:
                 self._create_churn_prevention_thread(customer_id, ent)
                 newly_suspended_customers.add(customer_id)
                 continue
@@ -6814,7 +6861,7 @@ Guidelines:
 
         # Find enterprise subscribers with contracts expiring within lead_days
         approaching = self.conn.execute("""
-            SELECT c.customer_id, c.group_id, s.seat_count,
+            SELECT c.customer_id, c.group_id, CAST(c.seat_count AS INTEGER) AS seat_count,
                    s.plan, s.listed_price, s.contract_months, s.contract_end_day
             FROM customers c
             JOIN subscriptions s ON c.customer_id = s.customer_id
@@ -6884,7 +6931,7 @@ Guidelines:
 
         # Also check for expired contracts with no renewal — auto-churn
         expired = self.conn.execute("""
-            SELECT c.customer_id, c.group_id, s.seat_count,
+            SELECT c.customer_id, c.group_id, CAST(c.seat_count AS INTEGER) AS seat_count,
                    s.plan, s.listed_price, s.contract_months, s.contract_end_day
             FROM customers c
             JOIN subscriptions s ON c.customer_id = s.customer_id
@@ -7017,19 +7064,21 @@ Guidelines:
             SELECT s.subscription_id, s.customer_id, s.listed_price,
                    s.promotion, s.effective_price,
                    s.plan, s.pending_plan, s.pending_price, s.start_day,
-                   c.customer_type, c.usage_scale, s.seat_count, c.group_id,
+                   c.customer_type, c.usage_scale, c.seat_count, c.group_id,
+                   c.c_max, cs.current_c_max,
                    s.first_billing_done
             FROM subscriptions s
             JOIN customers c ON s.customer_id = c.customer_id
+            JOIN customer_state cs ON c.customer_id = cs.customer_id
             WHERE s.status = 'subscribed' AND s.end_day IS NULL
               AND s.billing_day_mod30 = ?
         """, (billing_day,)).fetchall()
 
         # L4: Collect batch operations
-        pending_updates = []    # (plan, listed_price, promo, eff_price, subscription_id) for pending plan changes
+        pending_updates = []    # (plan, listed_price, promo, eff_price, budget, subscription_id)
         ledger_inserts = []     # (day, category, amount, note)
         reset_updates = []      # (new_daily_usage_rate, subscription_id)
-        promo_updates = []      # (promotion, effective_price, first_billing_done, seat_count, subscription_id)
+        promo_updates = []      # (promotion, effective_price, budget, first_billing_done, seats, subscription_id)
         price_updates = []      # (listed_price, subscription_id) for individual price changes
 
         # Payment suspension: enterprise customers with active churn_prevention
@@ -7072,6 +7121,9 @@ Guidelines:
                 if billing_price < sub['listed_price']:
                     price_updates.append((billing_price, sub['subscription_id']))
 
+            # 作者账期快照只含个体预算，不提前叠加当前市场偏移。
+            billing_c_max = sub['current_c_max'] or sub['c_max']
+
             # Compute promotion for this billing period
             existing_promo = self._get_effective_promotion(customer_id, group_id, current_plan)
             # Lead promotion only applies if first billing hasn't been done yet
@@ -7104,24 +7156,24 @@ Guidelines:
             new_daily_usage_rate = sample_daily_usage_rate(self.rng, usage_scale, seat_count)
             reset_updates.append((new_daily_usage_rate, sub['subscription_id']))
 
-            # Store billing-period promotion and effective price on the subscription.
-            # 市场偏好不做快照，每次客户决策时只读取一次当前漂移。
+            # 保存账期价格和个体预算；市场偏移仍在读取时统一计算。
             # After first billing, only existing user promotion applies (no more lead promo)
             next_promo = self._get_effective_promotion(customer_id, group_id, current_plan)
             next_eff_price = max(0.0, billing_price - next_promo)
-            promo_updates.append((next_promo, next_eff_price, 1, seat_count, sub['subscription_id']))
+            promo_updates.append((next_promo, next_eff_price, billing_c_max, 1, seat_count, sub['subscription_id']))
 
             # Handle pending plan change — also needs promo+effective_price recomputed
             if sub['pending_plan']:
                 pending_promo = self._get_effective_promotion(customer_id, group_id, sub['pending_plan'])
                 pending_eff = max(0.0, sub['pending_price'] - pending_promo)
-                pending_updates.append((sub['pending_plan'], sub['pending_price'], pending_promo, pending_eff, sub['subscription_id']))
+                pending_updates.append((sub['pending_plan'], sub['pending_price'], pending_promo, pending_eff, billing_c_max, sub['subscription_id']))
 
         # L4: Execute batch writes
         if pending_updates:
             self.conn.executemany("""
                 UPDATE subscriptions
                 SET plan = ?, listed_price = ?, promotion = ?, effective_price = ?,
+                    effective_c_max = ?,
                     pending_plan = NULL, pending_price = NULL
                 WHERE subscription_id = ?
             """, pending_updates)
@@ -7149,7 +7201,7 @@ Guidelines:
         if promo_updates:
             self.conn.executemany("""
                 UPDATE subscriptions
-                SET promotion = ?, effective_price = ?, first_billing_done = ?,
+                SET promotion = ?, effective_price = ?, effective_c_max = ?, first_billing_done = ?,
                     seat_count = ?
                 WHERE subscription_id = ?
             """, promo_updates)
@@ -7226,7 +7278,7 @@ Guidelines:
         if has_any_ads:
             # Fetch all active subscribers with ads return sensitivity
             ad_subs = self.conn.execute("""
-                SELECT s.customer_id, c.group_id, c.ads_return_sensitivity, s.seat_count
+                SELECT s.customer_id, c.group_id, c.ads_return_sensitivity, c.seat_count
                 FROM subscriptions s
                 JOIN customers c ON s.customer_id = c.customer_id
                 WHERE s.status = 'subscribed' AND s.end_day IS NULL
@@ -7547,7 +7599,7 @@ Guidelines:
         """).fetchone()[0]
 
         total_enterprise = self.conn.execute("""
-            SELECT COUNT(*) AS accounts, COALESCE(SUM(s.seat_count), 0) AS seats
+            SELECT COUNT(*) AS accounts, COALESCE(SUM(CAST(c.seat_count AS INTEGER)), 0) AS seats
             FROM subscriptions s
             JOIN customers c ON s.customer_id = c.customer_id
             WHERE s.status = 'subscribed' AND s.end_day IS NULL
@@ -7556,7 +7608,7 @@ Guidelines:
 
         # Count enterprise deals that converted to subscribed today
         new_enterprise_today = self.conn.execute("""
-            SELECT COUNT(*) AS accounts, COALESCE(SUM(s.seat_count), 0) AS seats
+            SELECT COUNT(*) AS accounts, COALESCE(SUM(CAST(c.seat_count AS INTEGER)), 0) AS seats
             FROM subscriptions s
             JOIN customers c ON s.customer_id = c.customer_id
             WHERE s.status = 'subscribed' AND s.start_day = ?

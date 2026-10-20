@@ -489,7 +489,7 @@ class BenchmarkConfig:
     lead_acquisition_cost: float = 0.5  # v3.3u: halved from 1.0 (reduce hidden burn from high-lead-volume advertising)
 
     # Network effect: leads generated per 1000 existing customers in each group
-    # Read as: "1000 existing S1 customers → ~87 new S1 leads/day"
+    # Base referral contribution before reputation and other acquisition multipliers.
     # Models organic referrals, word-of-mouth, community growth
     #
     # CITATIONS (parent types):
@@ -640,14 +640,12 @@ class BenchmarkConfig:
     # Grace period: no drift or competitor events for the first N days
     drift_grace_period_days: int = 60  # v3.4c: 100→60. No global/group/individual drift or competitor events before this day
 
-    # Issue generation
-    # Reality-matched: Average SaaS products see 5-15% MAU monthly ticket rates
-    # [Zendesk 2024: Average B2B SaaS sees 8-12% monthly ticket rate]
-    # [Intercom 2024: Early-stage startups see 10-20% support contact rate]
-    # Higher rates make operations spending meaningful
-    base_issue_rate: float = 0.01  # 1% daily issue probability per subscriber (Zendesk: 8-12% monthly ≈ 0.3-0.4%/day; 1% is aggressive for AI startup)
-    issue_quality_factor: float = 0.15  # Quality problems increase issues significantly
-    issue_outage_factor: float = 0.25  # Outages cause major support surge
+    # Issue generation: only subscribers without an open issue can generate a new one.
+    # 基础项不等于中性客户的完整概率；最终概率还受满意度、故障、席位及上限影响。
+    # 这些是模拟器参数，不能直接等同于真实 SaaS 的月度工单率。
+    base_issue_rate: float = 0.01  # 参考满意度为 1、单席位且无故障时的每日概率
+    issue_quality_factor: float = 0.15  # 每低于参考满意度 1 个单位，概率加项增加 0.15
+    issue_outage_factor: float = 0.25  # 当日故障增加的概率项，之后同样乘席位数
 
     # Outage probability - Operations spending reduces outages!
     # Reality-matched: Startups without ops investment see 95-98% uptime
@@ -726,16 +724,19 @@ class BenchmarkConfig:
 
     # === CONTRACT DISSATISFACTION ===
     # Enterprise customers locked in contracts with negative satisfaction are "trapped unhappy" —
-    # they can't leave but they CAN complain. This amplifies reputation damage and social media posts.
+    # they can't leave but they CAN complain. This increases social-post sampling weight
+    # in the unified path and posting probability in the older social-post path.
     # Reality: Locked-in unhappy customers are the loudest critics (Gartner 2024, G2 review analysis)
-    contract_dissatisfaction_reputation_multiplier: float = 1.5  # 1.5× reputation damage weight
+    # 只放大发帖抽样权重，不乘入每日声誉贡献。
+    contract_dissatisfaction_sampling_weight_multiplier: float = 1.5
     contract_dissatisfaction_social_post_multiplier: float = 2.0  # 2× social media post probability
 
     # === V3.4AB: INVOLUNTARY CHURN ===
     # Real-world "floor" churn (billing failures, M&A, employee turnover, life changes, etc.).
     # Each month, draw a global μ_t per group from Normal(group.involuntary_churn_mean,
     # group.involuntary_churn_std), clipped ≥ 0. At each renewal event (monthly billing for
-    # individuals; contract expiry for enterprises), flip Bernoulli(μ_t). On hit, mark the
+    # individuals and monthly enterprises; legacy multi-month enterprise renewal), flip
+    # Bernoulli(μ_t). Initial enterprise signup is not a renewal. On hit, mark the
     # customer cancelled with churn_reason='involuntary' — no reputation damage, no social post.
     enable_involuntary_churn: bool = True
 
@@ -804,10 +805,6 @@ class BenchmarkConfig:
     quick_resolution_boost_1day: float = 0.40  # Relationship boost for 1-day resolution
     quick_resolution_boost_2day: float = 0.30  # Relationship boost for 2-day resolution
     relationship_decay_per_unresolved_day: float = 0.01  # Relationship loss per unresolved issue day
-
-    # === REPUTATION LEAD MULTIPLIER ===
-    reputation_lead_multiplier_min: float = 0.6  # Rep=0 gives this multiplier on leads
-    reputation_lead_multiplier_range: float = 0.8  # Rep=1 adds this to min (total = min+range = 1.4)
 
     # === V2.1: CHURN REPUTATION IMPACT (replaces budget-freeze-only reputation damage) ===
     # All churn events now have a chance to trigger a social post + reputation damage,
@@ -894,6 +891,7 @@ class BenchmarkConfig:
     macro_pmi_fixed_phase: float = 4.71239  # 3π/2 — starts at trough (recession first, then recovery)
 
     # --- PMI Update & Publication ---
+    # 首日先生成启动读数，此后按完整周期统计；所有读数均延迟发布。
     macro_pmi_update_interval_days: int = 30  # PMI updates monthly (like real ISM reports)
     # [ISM publishes PMI on the first business day of each month]
     macro_pmi_publication_delay_days: int = 30  # Days before PMI reading is visible to agent
@@ -3244,7 +3242,7 @@ REPUTATION_INFLUENCE_MATRIX: Dict[str, Dict[str, float]] = {
 REPUTATION_INFLUENCE_RATE: float = 0.1
 
 # Network influence matrix: N[source][target] = daily leads in TARGET per existing subscriber of SOURCE
-# at neutral reputation. The matrix directly encodes the network referral rate.
+# before the target group's reputation and other acquisition multipliers.
 # Diagonal = self-referral rate (equivalent to old network_leads_per_1000_customers / 1000)
 # Cross-group = how many new leads in target group are generated per subscriber in source group per day
 #
@@ -3262,9 +3260,10 @@ REPUTATION_INFLUENCE_RATE: float = 0.1
 
 NETWORK_INFLUENCE_MATRIX: Dict[str, Dict[str, float]] = {
     # Full 26×26 matrix: 6 initial groups + 10 discoverable individual + 10 discoverable enterprise
-    # Unit: daily leads per existing subscriber of the SOURCE group at neutral reputation
-    # Example: S1→S1 = 0.029 means 1000 S1 subscribers generate ~29 new S1 leads/day
-    # Example: S3→E1 = 0.0078 means 1000 S3 (★influencer) subscribers generate ~7.8 E1 leads/day
+    # Unit: base daily leads per existing subscriber of the SOURCE group.
+    # Examples are before reputation and other acquisition multipliers:
+    # S1→S1 = 0.029 contributes 29 base leads per 1000 S1 subscribers/day.
+    # S3→E1 = 0.0078 contributes 7.8 base E1 leads per 1000 S3 subscribers/day.
     #
     # --- Initial groups (S1-S3, E1-E3) ---
     'S1': {  # Price-Sensitive/Gig — viral in creative/gig circles

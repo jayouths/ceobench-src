@@ -18,7 +18,7 @@ You are the CEO of NovaMind AI, a B2B/B2C AI SaaS company. Your goal is to maxim
 - 10 individual (D_S01–D_S10) + 10 enterprise (D_E01–D_E10)
 - Discovered via `research_market()` — $25K per attempt, 30% chance, discovers a random group instantly
 - Info levels 1–5 with improving accuracy (±65% → ±5%)
-- Use `research_group(group_id, target_level)` to upgrade or refresh information explicitly (costs more and takes multiple days at higher levels)
+- Use `research_group(group_id, target_level)` to upgrade or refresh information. Omitting `target_level` upgrades Level 1 to 2, or refreshes the current level for Levels 2-5 (costs more and takes multiple days at higher levels).
 
 ## Customer Acquisition
 
@@ -39,14 +39,14 @@ New customers join through several channels:
 
 **Network Effects (Cross-Group Referrals):**
 - Existing subscribers generate word-of-mouth referrals at measurable rates
-- Each source group's subscribers produce leads in target groups at a specific rate (leads per subscriber per day at neutral reputation)
-- Example: if rate is 0.005, then 1000 subscribers generate ~5 leads/day in that target group
+- Each source group's subscribers contribute base leads in target groups before acquisition multipliers
+- Example: a rate of 0.005 contributes 5 base leads/day per 1000 source subscribers, before the target group's reputation and other acquisition multipliers
 - Only discovered groups participate in cross-group network effects
 - Use `get_group_insights()` to see referral rates between groups (shown as "leads per 1000 subs/day")
 
 **Reputation (Cross-Group Sentiment Spread):**
 - Good service builds reputation; outages/issues/cancellations damage it
-- Reputation directly affects new customer acquisition speed — higher reputation means more leads convert and arrive faster, while negative reputation suppresses lead flow
+- The target group's reputation directly multiplies advertising and referral base leads: initial neutral reputation 0.5 gives a 0.5 multiplier. It does not directly change purchase acceptance.
 - Reputation spreads ACROSS related groups — not just within the same group
 - Enterprise cancellation or negative social media posts can damage reputation in adjacent enterprise groups
 - Positive reviews from happy customers boost reputation in related groups

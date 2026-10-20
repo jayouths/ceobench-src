@@ -15,14 +15,15 @@ def research_market() -> Dict:
     return _client.call('research_market')
 
 
-def research_group(group_id: str, target_level: int) -> Dict:
-    """Research a discovered group at an explicit information level.
+def research_group(group_id: str, target_level: int | None = None) -> Dict:
+    """Upgrade or refresh a discovered group's information.
 
     Higher info levels give more accurate data about the group.
 
     Args:
         group_id: The group identifier (e.g., 'D_S01').
-        target_level: Target info level (2-5). Use the current level to refresh.
+        target_level: Optional level (2-5). Omit to upgrade Level 1 to 2,
+            or refresh at the current level for Levels 2-5.
 
     Returns:
         Dict with research result.

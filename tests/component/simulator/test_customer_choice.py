@@ -59,7 +59,32 @@ def test_new_customer_stores_static_preferences_and_reads_market_drift_once(
     assert effective_c_max == pytest.approx(after_drift["c_max"] + 10.0)
 
 
-def test_billing_does_not_snapshot_market_preference_drift(make_initialized_sim):
+@pytest.mark.parametrize("group_id", ["E1", "S1"])
+def test_new_plan_choice_applies_macro_only_to_enterprises(
+    make_initialized_sim, monkeypatch, group_id,
+):
+    conn, sim, _ = make_initialized_sim(seed=123)
+    plan_config = sim.get_current_config()
+    plan_config.update(
+        price_A=50.0, price_B=90.0, price_C=200.0, tier_A=1, tier_B=4,
+        quota_A=100, quota_B=100, quota_C=100,
+    )
+    sim._cache_step_day_globals(plan_config)
+    params = {**sim._generate_customer_from_group(group_id), "c_max": 100.0, "usage_demand": 1.0, "seat_count": 1}
+    monkeypatch.setattr(sim, "_compute_satisfaction", lambda _sl, _sr, _budget, quality, *_args: quality)
+    original_params = copy.deepcopy(params)
+
+    sim._macro_multipliers = sim._compute_macro_multipliers(40.0)
+    contraction = sim._choose_plan_for_customer_curve(params, plan_config)
+    sim._macro_multipliers = sim._compute_macro_multipliers(60.0)
+    expansion = sim._choose_plan_for_customer_curve(params, plan_config)
+
+    assert (contraction, expansion) == (("A", "B") if group_id == "E1" else ("B", "B"))
+    assert params == original_params
+
+
+@pytest.mark.parametrize("pmi", [40.0, 50.0, 60.0])
+def test_billing_does_not_snapshot_market_preference_drift(make_initialized_sim, pmi):
     conn, sim, config = make_initialized_sim(seed=123)
     params = {
         **sim._generate_customer_from_group("S1"),
@@ -88,12 +113,14 @@ def test_billing_does_not_snapshot_market_preference_drift(make_initialized_sim)
         row["name"]
         for row in conn.execute("PRAGMA table_info(subscriptions)").fetchall()
     }
-    assert "effective_c_max" not in columns
+    assert "effective_c_max" in columns
+    assert conn.execute("SELECT effective_c_max FROM subscriptions WHERE customer_id = ?", (customer_id,)).fetchone()[0] == 100.0
     effective_price = conn.execute(
         "SELECT effective_price FROM subscriptions WHERE customer_id = ?",
         (customer_id,),
     ).fetchone()["effective_price"]
 
+    sim._macro_multipliers = sim._compute_macro_multipliers(pmi)
     events = sim._update_customer_satisfaction(
         plan_config,
         overload=0.0,
@@ -115,6 +142,35 @@ def test_billing_does_not_snapshot_market_preference_drift(make_initialized_sim)
     assert events[customer_id]["new_satisfaction"] == pytest.approx(
         expected_satisfaction
     )
+
+
+def test_individual_budget_drift_waits_for_billing_snapshot(make_initialized_sim):
+    conn, sim, config = make_initialized_sim(seed=123)
+    config.satisfaction_ema_alpha = 1.0
+    config.stickiness_log_scale = 0.0
+    sim.current_day = 65
+    params = {**sim._generate_customer_from_group("S1"), "c_max": 100.0, "q_min": 0.2, "q_max": 0.8}
+    cid = sim._create_customer(params)
+    sim._create_subscription(cid, "A", 50.0)
+    conn.execute("UPDATE customer_state SET current_c_max = 60.0 WHERE customer_id = ?", (cid,))
+    _set_market_preference_drift(conn, quality_offset=0.1, budget_offset=10.0)
+    settings = sim.get_current_config()
+    settings["quota_A"] = 1000
+    settings["price_A"] = 50.0
+    sim._cache_step_day_globals(settings)
+
+    for day, budget in [(90, 100.0), (95, 60.0)]:
+        sim.current_day = day
+        if day == 95:
+            sim._process_billing(settings)
+        conn.execute("UPDATE subscriptions SET daily_usage_rate = 1.0 WHERE customer_id = ?", (cid,))
+        assert conn.execute("SELECT effective_c_max FROM subscriptions WHERE customer_id = ?", (cid,)).fetchone()[0] == budget
+        events = sim._update_customer_satisfaction(settings, overload=0.0, outage=False)
+        required = sim._compute_required_quality(
+            cost=50.0, steepness_left=params["steepness_left"], steepness_right=params["steepness_right"],
+            c_max=budget + 10.0, q_min=0.3, q_max=0.9,
+        )
+        assert events[cid]["new_satisfaction"] == pytest.approx(sim._cached_q_shared_per_plan["A"] - required)
 
 
 def test_new_customer_plan_choice_applies_current_market_drift(
